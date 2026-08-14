@@ -25,12 +25,10 @@ import {
   ArrowUp,
   ArrowUpDown,
   Bookmark,
-  Briefcase,
   Building2,
   ChevronDown,
   Columns3,
   CreditCard,
-  Landmark,
   Eye,
   EyeOff,
   Fingerprint,
@@ -84,7 +82,6 @@ import {
   loadCmdSearchSummary,
   loadCmdExplorerFacilities,
   loadCmdExplorerPayers,
-  loadCmdExplorerEmployers,
   loadCohortCurve,
   loadCohortDrilldown,
   generateCollectionsAiAnalysis,
@@ -102,7 +99,6 @@ import {
   type CmdExplorerSort,
   type CmdFacilityOption,
   type CmdFacilitiesResult,
-  type CmdEmployerOption,
   type GridViewsResult,
   type CohortCurve,
   type CohortCurvePoint,
@@ -371,18 +367,6 @@ export function CmdCollectionsExplorer({
   // loaded once per view (like facilities) and filtered client-side as the user types.
   const [payerOptions, setPayerOptions] = useState<string[]>([]);
   const [payerSelection, setPayerSelection] = useState<string[]>([]);
-  // VOB MARKET narrows (enrichment from the Indigo VOB benefits set, matched on member_id_bidx).
-  // Employer is a SERVER-side type-ahead (~11.6k distinct → too many to load whole): the picker's
-  // query is debounced and re-fetched per keystroke. `employerDisplay` remembers value→friendly-name
-  // for the selected tags (the current query's options may not include an already-picked employer).
-  // Funding is a STATIC two-value market ('Self-Funded' / 'Fully Insured'). Both scope grid + summary;
-  // whenever either is active the read is a semi-join into VOB → members with no matching VOB drop out.
-  const [employerSelection, setEmployerSelection] = useState<string[]>([]);
-  const [employerOptions, setEmployerOptions] = useState<CmdEmployerOption[]>([]);
-  const [employerLoading, setEmployerLoading] = useState(false);
-  const [employerQuery, setEmployerQuery] = useState('');
-  const [employerDisplay, setEmployerDisplay] = useState<Map<string, string>>(() => new Map());
-  const [fundingSelection, setFundingSelection] = useState<string[]>([]);
 
   // Searchable PHI (gated to canRevealPhi + audited server-side). These are matched via keyed
   // blind indexes (exact member ID / 3-char alpha prefix / exact group #) — the raw value is
@@ -425,10 +409,6 @@ export function CmdCollectionsExplorer({
     setRefinement(null);
     setFacilitySelection([]);
     setPayerSelection([]);
-    setEmployerSelection([]);
-    setFundingSelection([]);
-    setEmployerQuery('');
-    setEmployerOptions([]);
   }
 
   // Server-side sort. Default: most-recent Payment Received first.
@@ -507,13 +487,9 @@ export function CmdCollectionsExplorer({
   const hasAnySearch =
     facilitySelection.length > 0 ||
     payerSelection.length > 0 ||
-    employerSelection.length > 0 ||
-    fundingSelection.length > 0 ||
     hasPhiSearch;
   // Stable dep keys for the selection sets (array identity changes on every toggle otherwise).
   const payerKey = payerSelection.join('\n');
-  const employerKey = employerSelection.join('\n');
-  const fundingKey = fundingSelection.join('\n');
   const facilityKey = facilitySelection.join(''); // control char can't appear in a facility name
 
   // --- dual-mode yield + AI-analysis input assembly ------------------------
@@ -595,21 +571,6 @@ export function CmdCollectionsExplorer({
     () => payerOptions.map((p) => ({ value: p, display: p })),
     [payerOptions],
   );
-  // Employer options are SERVER-fetched per query (see the type-ahead effect); value = employer_norm
-  // (the exact filter value), display = a representative raw employer name.
-  const employerPickerOptions = useMemo<PickerOption[]>(
-    () => employerOptions.map((o) => ({ value: o.employer_norm, display: o.employer_name ?? o.employer_norm })),
-    [employerOptions],
-  );
-  // Funding is a STATIC two-value market vocabulary (the exact stored `funding` values).
-  const fundingPickerOptions = useMemo<PickerOption[]>(
-    () => [
-      { value: 'Self-Funded', display: 'Self-funded' },
-      { value: 'Fully Insured', display: 'Fully insured' },
-    ],
-    [],
-  );
-
   // Load the tenant-scoped facility options for the multi-select whenever the view changes.
   useEffect(() => {
     // Server-seeded on first mount → skip the initial fetch (the seed is for this view already).
@@ -646,42 +607,6 @@ export function CmdCollectionsExplorer({
     };
   }, [view]);
 
-  // Employer type-ahead: SERVER-side per-keystroke search (the ~11.6k vocabulary is too large to load
-  // whole). The debounced query drives loadCmdExplorerEmployers; a sub-3-char term yields an empty list
-  // server-side. Results feed the picker's dropdown AND accumulate into employerDisplay so an
-  // already-selected employer's tag keeps its friendly name even after the query (options) moves on.
-  const dEmployerQuery = useDebouncedValue(employerQuery, 250).trim();
-  useEffect(() => {
-    if (dEmployerQuery.length < 3) {
-      setEmployerOptions([]);
-      setEmployerLoading(false);
-      return;
-    }
-    let live = true;
-    setEmployerLoading(true);
-    loadCmdExplorerEmployers(dEmployerQuery, view)
-      .then((r) => {
-        if (!live) return;
-        const opts = r.ok ? r.employers : [];
-        setEmployerOptions(opts);
-        if (opts.length > 0) {
-          setEmployerDisplay((prev) => {
-            const next = new Map(prev);
-            for (const o of opts) next.set(o.employer_norm, o.employer_name ?? o.employer_norm);
-            return next;
-          });
-        }
-        setEmployerLoading(false);
-      })
-      .catch(() => {
-        if (!live) return;
-        setEmployerOptions([]);
-        setEmployerLoading(false);
-      });
-    return () => {
-      live = false;
-    };
-  }, [dEmployerQuery, view]);
 
   // Dismiss the Month/Year popover on outside pointer-down or Escape — the SAME dismiss behavior as
   // the view-switcher dropdown (D). Listeners attach only while it's open. (The popover holds
@@ -749,8 +674,6 @@ export function CmdCollectionsExplorer({
       facility?: string[];
       primary_payer?: string;
       primary_payers?: string[];
-      employers?: string[];
-      funding?: string[];
       cpt_code?: string;
       revenue_code?: string;
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
@@ -763,10 +686,6 @@ export function CmdCollectionsExplorer({
       f.month = month;
     }
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
-    // VOB market narrows (employer / funding) — top-level scope like facility/payer; a non-empty set
-    // narrows via the server semi-join into VOB (members with no matching VOB drop out).
-    if (employerSelection.length > 0) f.employers = employerSelection;
-    if (fundingSelection.length > 0) f.funding = fundingSelection;
     // Facility multi-select is a top-level scope; a facility drill-down chip narrows to that ONE
     // facility (overriding the dropdown). Payer/CPT chips stay exact single-value refinements.
     if (facilitySelection.length > 0) f.facility = facilitySelection;
@@ -797,9 +716,9 @@ export function CmdCollectionsExplorer({
     }
     return f;
     // year only matters when a specific month is chosen (see original rationale); facilityKey is the
-    // stable proxy for facilitySelection's contents (employerKey/fundingKey likewise).
+    // stable proxy for facilitySelection's contents (payerKey likewise).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, fundingKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
   const loadPage = useCallback(
     async (
@@ -880,15 +799,9 @@ export function CmdCollectionsExplorer({
       recencyDays?: number;
       facility?: string[];
       primary_payers?: string[];
-      employers?: string[];
-      funding?: string[];
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
     } = {};
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
-    // VOB market narrows scope the summary identically to the grid, so the drill lists describe the
-    // SAME (VOB-narrowed) population the grid shows.
-    if (employerSelection.length > 0) f.employers = employerSelection;
-    if (fundingSelection.length > 0) f.funding = fundingSelection;
     // Top-level scope (date window + facility set) applies to the summary too — so the drill lists
     // describe the SAME population the grid shows. The chip refinement does NOT (it's a within-
     // results drill; the chips stay a stable facet navigator while drilling).
@@ -918,7 +831,7 @@ export function CmdCollectionsExplorer({
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, fundingKey, view]);
+  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, view]);
 
   // Fetch the alpha-prefix cohort curve when a ≥3-char alpha-prefix search is active (PHI-gated).
   // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
@@ -1048,22 +961,6 @@ export function CmdCollectionsExplorer({
   }
   function clearPayers() {
     setPayerSelection([]);
-  }
-  function toggleEmployer(value: string) {
-    setEmployerSelection((prev) =>
-      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
-    );
-  }
-  function clearEmployers() {
-    setEmployerSelection([]);
-  }
-  function toggleFunding(value: string) {
-    setFundingSelection((prev) =>
-      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
-    );
-  }
-  function clearFunding() {
-    setFundingSelection([]);
   }
 
   /** Pick a rolling recency window (toggle off if re-clicked); clears any Month/Year selection. */
@@ -1204,33 +1101,6 @@ export function CmdCollectionsExplorer({
             onToggle={togglePayer}
             onClear={clearPayers}
           />
-          {/* VOB market narrows (employer + funding), enriched from the Indigo VOB benefits set.
-              Employer is a SERVER-side type-ahead (onQueryChange + loading) — the vocabulary is far too
-              large to load whole; funding is a fixed two-value tag set. Both semi-join into VOB, so an
-              active narrow drops any charge whose member has no matching VOB row. */}
-          <MultiSelectTagPicker
-            label="Employer"
-            placeholder="Type to find employers…"
-            icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
-            options={employerPickerOptions}
-            selected={employerSelection}
-            onToggle={toggleEmployer}
-            onClear={clearEmployers}
-            onQueryChange={setEmployerQuery}
-            loading={employerLoading}
-            minChars={3}
-            displayOverride={employerDisplay}
-          />
-          <MultiSelectTagPicker
-            label="Funding"
-            placeholder="Self-funded / Fully insured…"
-            icon={<Landmark className="h-3.5 w-3.5" aria-hidden />}
-            options={fundingPickerOptions}
-            selected={fundingSelection}
-            onToggle={toggleFunding}
-            onClear={clearFunding}
-          />
-
           {/* Unified time window (A): ONE segmented control — [7d][14d][30d][90d][Month/Year ▾].
               DEFAULT is 90d (see recencyDays init) so the first-load summary hits the index path;
               re-clicking the active chip or picking a Month/Year reaches the "All months" state (no

@@ -48,8 +48,6 @@ import {
   type CollectionsAiInput,
   cmdExplorerFacilities,
   cmdExplorerPayers,
-  cmdExplorerEmployers,
-  CMD_FUNDING_MARKETS,
   recordAccess,
   revealCmdExplorerRow,
   revealCmdExplorerRows,
@@ -1258,15 +1256,6 @@ export interface CmdReportFilter {
   /** Multi-select payer tags (guided payer search) — set membership; empty/absent = all payers. */
   primary_payers?: string[];
   /**
-   * VOB MARKET tags — the member's verified employer(s) and/or funding market, matched through the
-   * VOB benefits set on member_id_bidx. `employers` are employer_norm values from the type-ahead;
-   * `funding` are the market tags ('Self-Funded' / 'Fully Insured'). Set membership; empty/absent =
-   * no restriction. NOTE: whenever either is active the match is a SEMI-JOIN into VOB, so charges
-   * whose member has no matching VOB row are EXCLUDED ("no-VOB excluded" is intrinsic).
-   */
-  employers?: string[];
-  funding?: string[];
-  /**
    * Searchable-PHI terms (raw). Resolved SERVER-SIDE to blind-index tokens, gated to
    * PHI-entitled roles, and audited — the raw terms are never stored, logged, or sent to SQL.
    */
@@ -1369,42 +1358,6 @@ function applyPayerFilter(filter: CmdReportFilter, readerFilter: { primary_payer
     if (typeof p !== 'string' || p.length === 0 || p.length > CMD_PAYER_NAME_MAX) return false;
   }
   readerFilter.primary_payers = payers;
-  return true;
-}
-
-/** Max employers acceptable in one multi-select (bounded input — the vocabulary is ~11.6k). */
-const CMD_EMPLOYER_SET_MAX = 200;
-/** Max length of a single employer_norm string (bounds abuse; real values are short). */
-const CMD_EMPLOYER_NAME_MAX = 200;
-
-/**
- * Validate + copy the VOB market multi-selects (employers / funding) into the reader filter. Both
- * are set-membership like facility/payer: an empty/absent array is a no-op (no restriction), NOT a
- * match-nothing filter. `funding` is intersected with the closed CMD_FUNDING_MARKETS vocabulary
- * (unknown tags silently dropped; if that empties a non-empty selection the market clause is simply
- * omitted). `employers` are opaque employer_norm strings, bounded in count + length. Returns false
- * only on a hard rejection (over-long employer set/string). When either survives, the reader emits
- * the VOB semi-join → charges whose member has no matching VOB row are excluded (intrinsic).
- */
-function applyMarketFilter(
-  filter: CmdReportFilter,
-  readerFilter: { employers?: string[]; funding?: string[] },
-): boolean {
-  if (Array.isArray(filter.employers) && filter.employers.length > 0) {
-    const employers = filter.employers;
-    if (employers.length > CMD_EMPLOYER_SET_MAX) return false;
-    for (const e of employers) {
-      if (typeof e !== 'string' || e.length === 0 || e.length > CMD_EMPLOYER_NAME_MAX) return false;
-    }
-    readerFilter.employers = employers;
-  }
-  if (Array.isArray(filter.funding) && filter.funding.length > 0) {
-    const funding = filter.funding.filter(
-      (f): f is (typeof CMD_FUNDING_MARKETS)[number] =>
-        typeof f === 'string' && (CMD_FUNDING_MARKETS as readonly string[]).includes(f),
-    );
-    if (funding.length > 0) readerFilter.funding = funding;
-  }
   return true;
 }
 
@@ -1531,13 +1484,10 @@ export async function loadCmdReport(
     revenue_code?: string;
     primary_payer?: string;
     primary_payers?: string[];
-    employers?: string[];
-    funding?: string[];
     phiIndex?: PhiIndexTokens;
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
-  if (!applyMarketFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer.' };
   if (!applySearchFilter(filter, readerFilter)) {
     return { ok: false, error: 'Invalid search.' };
   }
@@ -1778,13 +1728,10 @@ export async function loadCmdSearchSummary(
     revenue_code?: string;
     primary_payer?: string;
     primary_payers?: string[];
-    employers?: string[];
-    funding?: string[];
     phiIndex?: PhiIndexTokens;
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
-  if (!applyMarketFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer.' };
   if (!applySearchFilter(filter, readerFilter)) return { ok: false, error: 'Invalid search.' };
   if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
   // PHI search: gate (canRevealPhi) + resolve tokens; audit happens in loadCmdReport (the
@@ -1940,35 +1887,6 @@ export async function loadCmdExplorerPayers(view?: DashboardView): Promise<CmdPa
   if (entityIds === null) return { ok: false };
   try {
     return { ok: true, payers: await cmdExplorerPayers(entityIds) };
-  } catch {
-    return { ok: false };
-  }
-}
-
-export type CmdEmployersResult = { ok: true; employers: CmdEmployerOption[] } | { ok: false };
-
-/** Max employer options returned per keystroke (the vocabulary is large; the picker shows a slice). */
-const CMD_EMPLOYER_OPTIONS_LIMIT = 50;
-
-/**
- * Employer options for the guided EMPLOYER type-ahead (non-PHI). SERVER-SIDE per-keystroke search
- * (unlike facility/payer, which load whole): the client passes the typed `term`; a sub-minimum term
- * (< CMD_SEARCH_TERM_MIN) returns an EMPTY list (not an error) so the throwaway 1–2 char prefixes
- * never hit the DB. Scoped to the RBAC-clamped `view`'s entity ids (server-derived), so it lists only
- * employers that appear for the caller's own members. Reader-only; employer is a plan-level dimension
- * (plaintext, like payer/facility), never PHI.
- */
-export async function loadCmdExplorerEmployers(
-  term: string,
-  view?: DashboardView,
-): Promise<CmdEmployersResult> {
-  const entityIds = await viewEntityScope(view);
-  if (entityIds === null) return { ok: false };
-  const t = typeof term === 'string' ? term.trim() : '';
-  if (t.length < CMD_SEARCH_TERM_MIN) return { ok: true, employers: [] };
-  if (t.length > CMD_SEARCH_TERM_MAX) return { ok: false };
-  try {
-    return { ok: true, employers: await cmdExplorerEmployers(entityIds, t, CMD_EMPLOYER_OPTIONS_LIMIT) };
   } catch {
     return { ok: false };
   }
