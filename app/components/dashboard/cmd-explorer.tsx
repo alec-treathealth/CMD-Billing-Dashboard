@@ -7,8 +7,8 @@
  * of which is a clickable drill-down chip that refines the detail grid below. The noisy rows
  * stay one click away instead of being the first thing you face.
  *
- * Search is a SERVER-SIDE substring (ILIKE) match over the 4 TEXT columns (facility / payer / CPT /
- * revenue code) — the numeric + date columns aren't substring-searchable (a leading-wildcard ILIKE on
+ * Search is a SERVER-SIDE substring (ILIKE) match over the 5 TEXT columns (facility / payer / CPT /
+ * revenue code / employer) — the numeric + date columns aren't substring-searchable (a leading-wildcard ILIKE on
  * them can't use an index and doubled the cost; use the date window / sort / drill chips instead), and
  * the 3 PHI columns are encrypted at rest (the gated Patient lookup handles those). Scope still FOLLOWS
  * the visible columns — hiding a searchable column drops it from search too. Typing is debounced
@@ -25,6 +25,7 @@ import {
   ArrowUp,
   ArrowUpDown,
   Bookmark,
+  Briefcase,
   Building2,
   ChevronDown,
   Columns3,
@@ -82,6 +83,7 @@ import {
   loadCmdSearchSummary,
   loadCmdExplorerFacilities,
   loadCmdExplorerPayers,
+  loadCmdExplorerEmployerNames,
   loadCohortCurve,
   loadCohortDrilldown,
   generateCollectionsAiAnalysis,
@@ -132,6 +134,9 @@ const COLUMNS: readonly { key: ColKey; label: string; phi: boolean; numeric: boo
   { key: 'cpt_code', label: 'CPT Code', phi: false, numeric: false },
   { key: 'revenue_code', label: 'Revenue Code', phi: false, numeric: false },
   { key: 'primary_payer', label: 'Primary Payer', phi: false, numeric: false },
+  // Employer (0101/0102): primary-insurance employer, a plan-level dimension like payer. Visible by
+  // default ON PURPOSE — search scope follows visible columns, so hiding it would also un-search it.
+  { key: 'employer_name', label: 'Employer', phi: false, numeric: false },
   { key: 'patient_name', label: 'Patient Name', phi: true, numeric: false },
   { key: 'member_id_raw', label: 'Member ID', phi: true, numeric: false },
   { key: 'group_number', label: 'Group Number', phi: true, numeric: false },
@@ -151,6 +156,10 @@ const DEFAULT_ORDER: ColKey[] = COLUMNS.map((c) => c.key);
 // Columns hidden by default for users WITHOUT a saved view — data kept, re-showable via the column
 // picker. A user's saved view carries its own explicit visibility (hidden_columns) and still governs.
 const DEFAULT_HIDDEN = new Set<ColKey>(['adjustments']);
+// Minimum characters before the employer type-ahead fires. Mirrors the server-side floor
+// (CMD_SEARCH_TERM_MIN in cmdExplorerQuery.ts, re-checked in the action) so throwaway 1–2 char
+// prefixes never leave the browser; the server remains the authority.
+const MIN_SEARCH_LEN = 3;
 // Columns the grid can sort by (server-side; mirrors CMD_EXPLORER_SORTABLE_COLUMNS): the two date
 // columns + all seven money/ratio columns. allowed_amount / pct_allowed / pct_paid are SORTABLE
 // AGAIN (0059 repoint ③): the rollup materializes allowed_reliable + both pcts, so there is a real
@@ -367,6 +376,13 @@ export function CmdCollectionsExplorer({
   // loaded once per view (like facilities) and filtered client-side as the user types.
   const [payerOptions, setPayerOptions] = useState<string[]>([]);
   const [payerSelection, setPayerSelection] = useState<string[]>([]);
+  // Employer (0101/0102) — the COLLECTIONS-native employer, stamped on the row at ingest/backfill.
+  // A SERVER-side type-ahead (the vocabulary is the widest of the three), debounced + re-fetched per
+  // keystroke, exactly like the facility/payer pickers otherwise. Nothing here touches VOB.
+  const [employerSelection, setEmployerSelection] = useState<string[]>([]);
+  const [employerOptions, setEmployerOptions] = useState<string[]>([]);
+  const [employerLoading, setEmployerLoading] = useState(false);
+  const [employerQuery, setEmployerQuery] = useState('');
 
   // Searchable PHI (gated to canRevealPhi + audited server-side). These are matched via keyed
   // blind indexes (exact member ID / 3-char alpha prefix / exact group #) — the raw value is
@@ -409,6 +425,9 @@ export function CmdCollectionsExplorer({
     setRefinement(null);
     setFacilitySelection([]);
     setPayerSelection([]);
+    setEmployerSelection([]);
+    setEmployerQuery('');
+    setEmployerOptions([]);
   }
 
   // Server-side sort. Default: most-recent Payment Received first.
@@ -487,9 +506,11 @@ export function CmdCollectionsExplorer({
   const hasAnySearch =
     facilitySelection.length > 0 ||
     payerSelection.length > 0 ||
+    employerSelection.length > 0 ||
     hasPhiSearch;
   // Stable dep keys for the selection sets (array identity changes on every toggle otherwise).
   const payerKey = payerSelection.join('\n');
+  const employerKey = employerSelection.join('\n');
   const facilityKey = facilitySelection.join(''); // control char can't appear in a facility name
 
   // --- dual-mode yield + AI-analysis input assembly ------------------------
@@ -591,6 +612,11 @@ export function CmdCollectionsExplorer({
     };
   }, [view]);
 
+  const employerPickerOptions = useMemo<PickerOption[]>(
+    () => employerOptions.map((e) => ({ value: e, display: e })),
+    [employerOptions],
+  );
+
   // Load the tenant-scoped payer options for the guided payer search whenever the view changes.
   // No server seed for payers (unlike facilities), so this always fetches on mount + view change.
   useEffect(() => {
@@ -606,6 +632,34 @@ export function CmdCollectionsExplorer({
       live = false;
     };
   }, [view]);
+
+  // Employer type-ahead: SERVER-side per-keystroke search (the vocabulary is the widest of the
+  // three pickers, so it is not loaded whole). A sub-3-char term yields an empty list server-side;
+  // this mirrors that floor client-side so those keystrokes never fire a request at all.
+  const dEmployerQuery = useDebouncedValue(employerQuery, 250).trim();
+  useEffect(() => {
+    if (dEmployerQuery.length < MIN_SEARCH_LEN) {
+      setEmployerOptions([]);
+      setEmployerLoading(false);
+      return;
+    }
+    let live = true;
+    setEmployerLoading(true);
+    loadCmdExplorerEmployerNames(dEmployerQuery, view)
+      .then((r) => {
+        if (!live) return;
+        setEmployerOptions(r.ok ? r.employers : []);
+        setEmployerLoading(false);
+      })
+      .catch(() => {
+        if (!live) return;
+        setEmployerOptions([]);
+        setEmployerLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [dEmployerQuery, view]);
 
 
   // Dismiss the Month/Year popover on outside pointer-down or Escape — the SAME dismiss behavior as
@@ -674,6 +728,7 @@ export function CmdCollectionsExplorer({
       facility?: string[];
       primary_payer?: string;
       primary_payers?: string[];
+      employer_names?: string[];
       cpt_code?: string;
       revenue_code?: string;
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
@@ -686,6 +741,7 @@ export function CmdCollectionsExplorer({
       f.month = month;
     }
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
+    if (employerSelection.length > 0) f.employer_names = employerSelection;
     // Facility multi-select is a top-level scope; a facility drill-down chip narrows to that ONE
     // facility (overriding the dropdown). Payer/CPT chips stay exact single-value refinements.
     if (facilitySelection.length > 0) f.facility = facilitySelection;
@@ -718,7 +774,7 @@ export function CmdCollectionsExplorer({
     // year only matters when a specific month is chosen (see original rationale); facilityKey is the
     // stable proxy for facilitySelection's contents (payerKey likewise).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
   const loadPage = useCallback(
     async (
@@ -799,9 +855,13 @@ export function CmdCollectionsExplorer({
       recencyDays?: number;
       facility?: string[];
       primary_payers?: string[];
+      employer_names?: string[];
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
     } = {};
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
+    // Employer scopes the summary identically to the grid, so the drill lists describe the SAME
+    // population the grid shows.
+    if (employerSelection.length > 0) f.employer_names = employerSelection;
     // Top-level scope (date window + facility set) applies to the summary too — so the drill lists
     // describe the SAME population the grid shows. The chip refinement does NOT (it's a within-
     // results drill; the chips stay a stable facet navigator while drilling).
@@ -831,7 +891,7 @@ export function CmdCollectionsExplorer({
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, view]);
+  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, view]);
 
   // Fetch the alpha-prefix cohort curve when a ≥3-char alpha-prefix search is active (PHI-gated).
   // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
@@ -961,6 +1021,14 @@ export function CmdCollectionsExplorer({
   }
   function clearPayers() {
     setPayerSelection([]);
+  }
+  function toggleEmployer(value: string) {
+    setEmployerSelection((prev) =>
+      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
+    );
+  }
+  function clearEmployers() {
+    setEmployerSelection([]);
   }
 
   /** Pick a rolling recency window (toggle off if re-clicked); clears any Month/Year selection. */
@@ -1100,6 +1168,22 @@ export function CmdCollectionsExplorer({
             selected={payerSelection}
             onToggle={togglePayer}
             onClear={clearPayers}
+          />
+          {/* Employer (0101/0102) — the employer CMD carries on the charge's primary insurance,
+              stamped on the collections row itself. A SERVER-side type-ahead (onQueryChange +
+              loading) because the vocabulary is the widest of the three. Rows with no known
+              employer simply don't match a selection; they are never dropped when it is empty. */}
+          <MultiSelectTagPicker
+            label="Employer"
+            placeholder="Type to find employers…"
+            icon={<Briefcase className="h-3.5 w-3.5" aria-hidden />}
+            options={employerPickerOptions}
+            selected={employerSelection}
+            onToggle={toggleEmployer}
+            onClear={clearEmployers}
+            onQueryChange={setEmployerQuery}
+            loading={employerLoading}
+            minChars={MIN_SEARCH_LEN}
           />
           {/* Unified time window (A): ONE segmented control — [7d][14d][30d][90d][Month/Year ▾].
               DEFAULT is 90d (see recencyDays init) so the first-load summary hits the index path;

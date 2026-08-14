@@ -65,6 +65,7 @@ import {
   buildQualifyFacilityOptionsQuery,
   buildCmdPayerOptionsQuery,
   buildCmdEmployerOptionsQuery,
+  buildCmdEmployerNameOptionsQuery,
   buildCohortCurveQueries,
   buildCohortTotalsQuery,
   buildCohortDrilldownQueries,
@@ -85,6 +86,7 @@ import {
   type CmdFacilityOption,
   type QualifyFacilityOption,
   type CmdEmployerOption,
+  type CmdEmployerNameOption,
   type VobMarketFilter,
   type CohortCurvePoint,
   type CohortCurve,
@@ -153,6 +155,7 @@ export type {
   CmdFacilityOption,
   QualifyFacilityOption,
   CmdEmployerOption,
+  CmdEmployerNameOption,
   CohortCurvePoint,
   CohortCurve,
   CohortTotals,
@@ -3172,6 +3175,25 @@ export const qualifyFacilityOptions = unstable_cache(
  * 30-min cron busts), keeping the ~627k-row DISTINCT scan a warm hit rather than rebuilding it
  * every ingest. The client loads this once and filters it as the user types. Reader-only, non-PHI.
  */
+/**
+ * Employer options for the Collections explorer's guided EMPLOYER picker (0102) — the
+ * COLLECTIONS-NATIVE vocabulary, read per-keystroke from the `employer` arm of the tiny
+ * cmd_explorer_filter_options matview and tenant-scoped to the caller's entitled entityIds.
+ * Distinct from `cmdExplorerEmployers` below, which is QUALIFY's VOB-sourced type-ahead — the two
+ * answer different questions and read different objects; do not merge them (PR #225 removed the VOB
+ * one from Collections deliberately). Rides the shared 'cmd-explorer' tag: this vocabulary changes
+ * only when the rollup + options matviews refresh. Non-PHI. Reader-only.
+ */
+export const cmdExplorerEmployerNames = unstable_cache(
+  async (entityIds: string[], term: string, limit: number): Promise<string[]> => {
+    const { sql, params } = buildCmdEmployerNameOptionsQuery(entityIds, term, limit);
+    const { rows } = await readerExecutor().query<CmdEmployerNameOption>(sql, params);
+    return rows.map((r) => r.employer_name);
+  },
+  ['cmd-explorer-employer-names'],
+  { revalidate: 3600, tags: ['cmd-explorer'] },
+);
+
 export const cmdExplorerPayers = unstable_cache(
   async (entityIds: string[]): Promise<string[]> => {
     const { sql, params } = buildCmdPayerOptionsQuery(entityIds);

@@ -74,9 +74,18 @@ test('BXR_REPORT_COLUMNS: every field the mapper reads is satisfied by a listed 
   const pinned = new Set<string>(BXR_REPORT_COLUMNS);
 
   // HEADERS candidates are alternatives — at least ONE must be present per field.
-  // charge_to_date is the deliberate exception: CMD retired 'Charge To Date' (it duplicated
-  // 'Charge From Date' on 2,579/2,579 rows) and nothing on this plane reads the column.
-  const fields = Object.entries(HEADERS).filter(([k]) => k !== 'charge_to_date');
+  // TWO deliberate exceptions, both "the mapper can read a column the pinned set does not promise",
+  // which is the SAFE direction (pick() → null; the guard still rejects any unexpected column):
+  //  - charge_to_date: CMD retired 'Charge To Date' (it duplicated 'Charge From Date' on
+  //    2,579/2,579 rows) and nothing on this plane reads the column.
+  //  - employer_name: 'Primary Ins Emp Name' is PENDING on the cron's report. Probed live
+  //    2026-08-14 — report 10093959 still projects 24 columns without it (the owner added it to the
+  //    separate payments report 10050915). The mapper is ready; the pinned set must NOT list it
+  //    until the live report does, or set-equality fails every BXR customer and freezes ingest.
+  //    ⚠ When the owner adds it to 10093959: drop 'employer_name' from this exception list AND add
+  //    'Primary Ins Emp Name' to BXR_REPORT_COLUMNS in the same commit — the two move together.
+  const PENDING_OR_RETIRED = new Set(['charge_to_date', 'employer_name']);
+  const fields = Object.entries(HEADERS).filter(([k]) => !PENDING_OR_RETIRED.has(k));
   for (const [field, candidates] of fields) {
     assert.ok(
       (candidates as readonly string[]).some((c) => pinned.has(c)),

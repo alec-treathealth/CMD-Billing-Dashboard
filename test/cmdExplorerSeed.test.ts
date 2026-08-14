@@ -134,6 +134,7 @@ function fullRow(override: RowOverride = {}): CmdExplorerFullRow {
     charge_entered_date: '6/20/2026',
     charge_to_date: '6/21/2026',
     claim_status_raw: 'PAID',
+    employer_name: null,
     ...rest,
     phi: {
       patient_name: 'SMITH, JOHN',
@@ -189,4 +190,37 @@ test('mapRow: blank/null cpt_code maps ok with an em-dash placeholder', () => {
       assert.match(result.row.row_fingerprint, /^[0-9a-f]{64}$/);
     }
   }
+});
+
+// --- employer_name (0101) ---------------------------------------------------
+// The employer column arrived by an OWNER EDIT to the live CMD report layout, mid-flight, on a
+// report the hourly cron reads with UNCHANGED report+filter ids. So the two properties that matter
+// are: (1) it must never move the dedup key, or every historical charge re-inserts; (2) its absence
+// must never skip a row, or a tenant whose layout lags would stop ingesting entirely.
+
+test('employer_name is NOT in the fingerprint: same row with/without an employer → identical hex', () => {
+  const withEmployer = mapRow(fullRow({ employer_name: 'ACME CORP' }), 'f.csv');
+  const without = mapRow(fullRow({ employer_name: null }), 'f.csv');
+  assert.ok(withEmployer.ok && without.ok);
+  assert.equal(withEmployer.row.row_fingerprint, without.row.row_fingerprint);
+});
+
+test('employer_name changing does NOT change the fingerprint (a job change is not a new charge)', () => {
+  const a = mapRow(fullRow({ employer_name: 'ACME CORP' }), 'f.csv');
+  const b = mapRow(fullRow({ employer_name: 'GLOBEX' }), 'f.csv');
+  assert.ok(a.ok && b.ok);
+  assert.equal(a.row.row_fingerprint, b.row.row_fingerprint);
+});
+
+test('employer_name is carried onto the mapped row when present, and null when absent', () => {
+  const present = mapRow(fullRow({ employer_name: 'ACME CORP' }), 'f.csv');
+  const absent = mapRow(fullRow({ employer_name: null }), 'f.csv');
+  assert.ok(present.ok && absent.ok);
+  assert.equal(present.row.employer_name, 'ACME CORP');
+  assert.equal(absent.row.employer_name, null);
+});
+
+test('a missing employer never skips the row (an un-updated report layout must still ingest)', () => {
+  const r = mapRow(fullRow({ employer_name: null }), 'f.csv');
+  assert.ok(r.ok, 'row with no employer must still map ok');
 });

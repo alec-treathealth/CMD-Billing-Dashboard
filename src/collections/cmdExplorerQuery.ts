@@ -16,7 +16,9 @@ import type { CmdExplorerRow } from './cmdExplorer.js';
 /**
  * Closed allowlist for the smart search — the UI search-column key → raw SQL column literal.
  * ONLY the 4 TEXT columns admissions actually search by are here (facility / primary_payer /
- * cpt_code / revenue_code). The numeric + date columns (charge_amount, allowed_amount,
+ * cpt_code / revenue_code). employer_name (0101/0102) is deliberately NOT here — the explorer
+ * searches employer through the GUIDED PICKER (exact set membership, like payer), so an ILIKE arm
+ * would be dead code and its index would never be read. The numeric + date columns (charge_amount, allowed_amount,
  * insurance_payments, adjustments, patient_balance_due, charge_date, payment_received) were REMOVED
  * from the substring bar: a leading-wildcard `::text ILIKE '%q%'` on them can't use any index and
  * roughly DOUBLED the per-keystroke aggregate cost for almost no real use (nobody free-text-searches
@@ -68,6 +70,15 @@ export interface CmdExplorerFilter {
    * explorer UI now feeds this array.
    */
   primary_payers?: string[] | null;
+  /**
+   * Employer tags (the guided employer search, 0101/0102) — DIRECT set membership on the row's own
+   * `employer_name` column, stamped at ingest/backfill from CMD's 'Primary Ins Emp Name'. Empty or
+   * absent = no restriction; a row whose employer is NULL simply never matches an active selection.
+   * NAMED `employer_names`, NOT `employers`, on purpose: `employers` below is QUALIFY's VOB market
+   * filter (a member_id_bidx semi-join into vob.member_benefits_latest). Two different questions —
+   * "this charge's employer" vs "this member's verified VOB employer" — so two fields, never merged.
+   */
+  employer_names?: string[] | null;
   /**
    * VOB MARKET filters — the member's verified employer / funding, matched through the
    * vob.member_benefits_latest matview on member_id_bidx (member-level; the bidx is tenant-agnostic).
@@ -164,6 +175,12 @@ export function cmdExplorerBaseConds(
   // empty/absent is no restriction (omitted, never `= any(ARRAY[]::text[])` which matches nothing).
   if (Array.isArray(filter.primary_payers) && filter.primary_payers.length > 0) {
     conds.push(`primary_payer = any(${add(filter.primary_payers)}::text[])`);
+  }
+  // Employer set-membership (0101/0102) — same discipline as facility/payer: a NON-EMPTY array
+  // narrows, empty/absent is omitted entirely (never `= any(ARRAY[]::text[])`, which matches
+  // nothing). A direct column match on the collections row — NOT the retired VOB semi-join.
+  if (Array.isArray(filter.employer_names) && filter.employer_names.length > 0) {
+    conds.push(`employer_name = any(${add(filter.employer_names)}::text[])`);
   }
   // VOB employer / funding market filters — shared semi-join helper (member_id_bidx IN (…); see
   // buildVobMarketSemiJoin for why it's a semi-join, not a JOIN). Applies identically to the grid and
@@ -358,6 +375,34 @@ export function buildCmdPayerOptionsQuery(entityIds: string[]): { sql: string; p
 
 /** The funding-market vocabulary — the exact stored values the `funding` filter matches. Static (a
  *  two-value enum), so the UI renders a fixed toggle/tag set with no query. */
+/** One employer choice for the guided picker — the exact filterable value. */
+export interface CmdEmployerNameOption {
+  employer_name: string;
+}
+
+/**
+ * Employer options for the guided EMPLOYER picker (0102) — the COLLECTIONS-NATIVE vocabulary, read
+ * from the `employer` arm of collections.cmd_explorer_filter_options (the same tiny precomputed
+ * matview, refreshed by the same hourly function, that already backs facility + payer). A
+ * SERVER-SIDE per-keystroke type-ahead rather than a load-whole picker: the employer vocabulary is
+ * the widest of the three, and the matview is <1MB so a plain ILIKE over it needs no index.
+ * Tenant-scoped to the caller's entitled entityIds. Non-PHI (an employer name is a plan-level
+ * dimension, like a payer name). NOT the retired VOB type-ahead (PR #225), which read
+ * vob.member_benefits_latest.employer_norm.
+ */
+export function buildCmdEmployerNameOptionsQuery(
+  entityIds: string[],
+  term: string,
+  limit: number,
+): { sql: string; params: unknown[] } {
+  const params: unknown[] = [entityIds, likeContains(term), limit];
+  const sql =
+    'select distinct value as employer_name from collections.cmd_explorer_filter_options ' +
+    "where business_entity_id = any($1::uuid[]) and kind = 'employer' and value ilike $2 " +
+    'order by value limit $3';
+  return { sql, params };
+}
+
 export const CMD_FUNDING_MARKETS = ['Self-Funded', 'Fully Insured'] as const;
 
 /**
@@ -418,6 +463,7 @@ export const CMD_EXPLORER_COLUMN_KEYS = [
   'cpt_code',
   'revenue_code',
   'primary_payer',
+  'employer_name',
   'patient_name',
   'member_id_raw',
   'group_number',
@@ -563,7 +609,7 @@ export const CMD_EXPLORER_SELECT =
   "select id, to_char(charge_date, 'YYYY-MM-DD') as charge_date, " +
   "to_char(payment_received, 'YYYY-MM-DD') as payment_received, cpt_code, revenue_code, " +
   'facility, charge_amount, allowed_amount, insurance_payments, adjustments, ' +
-  'patient_balance_due, primary_payer, pct_allowed, pct_paid, ' +
+  'patient_balance_due, primary_payer, employer_name, pct_allowed, pct_paid, ' +
   `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
   // Aliased `t` SO THE ORDER BY CAN TARGET THE RAW COLUMN: the two date columns are projected as
   // `to_char(<date>, 'YYYY-MM-DD') AS <date>` (output name == column name), and an UNQUALIFIED
@@ -648,7 +694,7 @@ export function buildCmdExplorerQuery(
     `select id, to_char(charge_date, 'YYYY-MM-DD') as charge_date, ` +
     `to_char(payment_received, 'YYYY-MM-DD') as payment_received, cpt_code, revenue_code, ` +
     `facility, charge_amount, allowed_reliable as allowed_amount, insurance_payments, adjustments, ` +
-    `patient_balance_due, primary_payer, pct_allowed, pct_paid, ` +
+    `patient_balance_due, primary_payer, employer_name, pct_allowed, pct_paid, ` +
     `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} ` +
     `order by t.${col} ${dir} nulls last, t.id ${dir} limit ${add(limit)}`;

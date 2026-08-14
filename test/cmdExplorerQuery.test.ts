@@ -8,6 +8,7 @@ import {
   buildQualifyFacilityOptionsQuery,
   buildCmdPayerOptionsQuery,
   buildCmdEmployerOptionsQuery,
+  buildCmdEmployerNameOptionsQuery,
   CMD_FUNDING_MARKETS,
   buildCohortCurveQueries,
   buildCohortDrilldownQueries,
@@ -853,4 +854,53 @@ test('employer options query: tenant-scoped, ILIKE on employer_norm, term escape
   assert.match(sql, /select employer_norm, employer_norm as employer_name/);
   // LIKE metacharacter in the term is escaped, never interpolated
   assert.deepEqual(params, [ENTITY, '%boe\\%ing%', 25]);
+});
+
+// --- employer (0101/0102): the COLLECTIONS-native employer filter ------------
+// Distinct from the VOB market filter that PR #225 removed from Collections. These assert the
+// three things that make it a real filter rather than a decoration: it narrows on the row's own
+// column, it is absent when nothing is selected, and its vocabulary is tenant-scoped.
+
+test('employer filter: a non-empty set narrows on the row column, values bound (never inlined)', () => {
+  const { sql, params } = buildCmdExplorerQuery(
+    null,
+    { employer_names: ['ACME CORP', 'GLOBEX'] },
+    CMD_EXPLORER_DEFAULT_SORT,
+    50,
+    ['00000000-0000-0000-0000-000000000001'],
+  );
+  assert.match(sql, /employer_name = any\(\$\d+::text\[\]\)/);
+  assert.ok(params.some((p) => Array.isArray(p) && p.includes('ACME CORP')));
+  assert.doesNotMatch(sql, /ACME CORP/); // the value is a bound param, never interpolated
+});
+
+test('employer filter: empty/absent emits NO clause (no restriction, never match-nothing)', () => {
+  for (const filter of [{}, { employer_names: [] }, { employer_names: null }]) {
+    const { sql } = buildCmdExplorerQuery(null, filter, CMD_EXPLORER_DEFAULT_SORT, 50, ['e']);
+    // The column is still PROJECTED (it is a grid column) — what must be absent is the PREDICATE.
+    assert.doesNotMatch(
+      sql,
+      /employer_name = any/,
+      `emitted an employer predicate for ${JSON.stringify(filter)}`,
+    );
+  }
+});
+
+test('employer filter scopes the SUMMARY identically to the grid (same population)', () => {
+  const { totals } = buildCmdSearchSummaryQueries({ employer_names: ['ACME CORP'] }, ['e']);
+  assert.match(totals.sql, /employer_name = any\(\$\d+::text\[\]\)/);
+});
+
+test('employer options: tenant-scoped, term-bound, limited — reads the filter-options matview', () => {
+  const { sql, params } = buildCmdEmployerNameOptionsQuery(['e1'], 'acme', 25);
+  assert.match(sql, /from collections\.cmd_explorer_filter_options/);
+  assert.match(sql, /kind = 'employer'/);
+  assert.match(sql, /business_entity_id = any\(\$1::uuid\[\]\)/);
+  assert.deepEqual(params, [['e1'], '%acme%', 25]);
+  assert.doesNotMatch(sql, /vob\./); // collections-native: never reads the VOB plane
+});
+
+test('employer is NOT in the ILIKE search allowlist (the picker is the search idiom)', () => {
+  assert.equal(Object.keys(CMD_EXPLORER_SEARCH_COLUMNS).length, 4);
+  assert.ok(!('employer_name' in CMD_EXPLORER_SEARCH_COLUMNS));
 });

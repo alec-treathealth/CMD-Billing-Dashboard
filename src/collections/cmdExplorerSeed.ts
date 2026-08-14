@@ -114,6 +114,9 @@ const INSERT_COLS = [
   // Pull provenance (0084) — non-PHI roster facilityCode, appended after ②a. NOT in the
   // fingerprint (see PlainRow.pull_facility_code); NULL from the seed/adapter paths.
   'pull_facility_code',
+  // Primary-insurance employer (0101) — non-PHI dimension, appended after provenance. NOT in the
+  // fingerprint (see PlainRow.employer_name).
+  'employer_name',
 ] as const;
 
 const BATCH = 500;
@@ -142,6 +145,11 @@ export interface PlainRow {
   charge_to_date: string | null;
   claim_status_raw: string | null;
   claim_status_category: string | null; // derived: normalizeStatus(claim_status_raw).category
+  /** Primary-insurance employer name (0101) — plan-level dimension like primary_payer, stored
+   *  plaintext. Null when the report layout lacks 'Primary Ins Emp Name'. NOT part of the LOCKED
+   *  row_fingerprint (same fence as the ②a columns): dedup identity must not change because the
+   *  owner added a column to the report layout, or every historical row would re-insert. */
+  employer_name: string | null;
   source_file: string;
   row_fingerprint: string;
   /** Roster facilityCode of the CMD customer pull this row came from (0084) — PROVENANCE, not
@@ -277,6 +285,9 @@ export function mapRow(full: CmdExplorerFullRow, sourceFile: string): MapResult 
       charge_to_date: chargeTo.value,
       claim_status_raw: claimStatusRaw,
       claim_status_category: claimStatusCategory,
+      // Dimension, not identity: deliberately set AFTER the fingerprint above, which must never
+      // include it (see the PlainRow.employer_name fence).
+      employer_name: full.employer_name,
       source_file: sourceFile,
       row_fingerprint: fingerprint,
     },
@@ -394,6 +405,8 @@ async function buildInsertParams(row: PlainRow, businessEntityId: string): Promi
     row.charge_id, row.charge_entered_date, row.charge_to_date, row.claim_status_raw, row.claim_status_category,
     // Pull provenance (0084) — null when the source carries none (seed CSV, Indigo adapter).
     row.pull_facility_code ?? null,
+    // Primary-insurance employer (0101) — non-PHI dimension; null when the layout lacks it.
+    row.employer_name,
   ];
 }
 

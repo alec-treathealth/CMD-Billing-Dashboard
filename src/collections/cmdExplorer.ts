@@ -58,6 +58,11 @@ export const HEADERS = {
   // a different table. New rows carry NULL here. Not in the fingerprint, so no dedup impact.
   charge_to_date: ['Charge To Date'],
   claim_status_raw: ['Claim Status'],
+  // Employer of the patient's PRIMARY insurance record (added to the live report layout by the
+  // owner 2026-08-14). A plan-level dimension like primary_payer — stored plaintext, searchable.
+  // OPTIONAL: absent from a report (e.g. a tenant whose layout was not updated) → NULL, never a
+  // skip. NOT in the fingerprint (same fence as the ②a columns), so dedup identity is unchanged.
+  employer_name: ['Primary Ins Emp Name'],
 } as const;
 // ---------------------------------------------------------------------------
 // ALIAS PROVENANCE (2026-08-01). CMD report 10091971 was lost; 10093959 replaced it with some
@@ -138,6 +143,15 @@ export const BXR_REPORT_COLUMNS = [
   'Charge Balance Due Pat',
   'Facility Name',
   'Claim Status',
+  // ⚠ 'Primary Ins Emp Name' IS DELIBERATELY ABSENT — DO NOT ADD IT UNTIL THE LIVE REPORT HAS IT.
+  // PROBED LIVE 2026-08-14 (report 10093959 / filter 10148478, customer 10027973): the cron's
+  // report still projects exactly the 24 columns above — the employer column was added to the
+  // SEPARATE payments report (10050915), not to this one. This list is SET-EQUALITY and
+  // cmdExplorerCron THROWS per customer on any mismatch BEFORE any write, so adding the column
+  // here first would fail every BXR customer and freeze the ingest.
+  // WHEN the owner adds it to 10093959: the cron breaks the moment they save, and stays broken
+  // until this one line ships — so coordinate the CMD edit and the deploy together. The mapper
+  // side is already tolerant (HEADERS.employer_name → pick() → null when absent).
 ] as const;
 
 /** The column names a parsed CMD report actually carries. Empty pull → empty list (the caller
@@ -176,6 +190,9 @@ export interface CmdExplorerNonPhiRow {
   charge_entered_date: string | null;
   charge_to_date: string | null;
   claim_status_raw: string | null;
+  /** Primary-insurance employer name (plan-level dimension, like primary_payer). Null when the
+   *  report layout lacks the column. NOT part of the fingerprint. */
+  employer_name: string | null;
 }
 
 /** Full row = non-PHI projection + its PHI. Held only in volatile server memory. */
@@ -206,6 +223,8 @@ export interface CmdExplorerRow {
   adjustments: string | null;
   patient_balance_due: string | null;
   primary_payer: string | null;
+  /** Primary-insurance employer (plan-level dimension; 0101/0102). Null pre-backfill / unknown. */
+  employer_name: string | null;
   pct_allowed: string | null;
   pct_paid: string | null;
   ingested_at: string;
@@ -283,6 +302,7 @@ export function mapReportRows(rows: CmdReportRow[]): CmdExplorerFullRow[] {
       charge_entered_date: pick(row, HEADERS.charge_entered_date),
       charge_to_date: pick(row, HEADERS.charge_to_date),
       claim_status_raw: pick(row, HEADERS.claim_status_raw),
+      employer_name: pick(row, HEADERS.employer_name),
     };
     const phi: CmdExplorerPhi = {
       patient_name: pick(row, HEADERS.patient_name),
