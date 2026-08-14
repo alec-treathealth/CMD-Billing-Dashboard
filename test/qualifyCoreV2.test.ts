@@ -743,8 +743,7 @@ const OUTCOME = {
   auth_sample: 102,
   avg_los_days: 40.1,
   avg_auth_days: 36.35,
-  window_days: 365,
-};
+  window_days: 365, synced_at: null };
 
 function authFitOf(snap: Awaited<ReturnType<typeof getQualifySnapshotCore>>) {
   return snap.facilities[0]!.factors.find((f) => f.key === 'authFit')!;

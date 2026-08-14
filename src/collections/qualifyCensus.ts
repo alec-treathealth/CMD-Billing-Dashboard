@@ -693,6 +693,12 @@ export function buildQualifyOutcomesReadQuery(): { sql: string; params: unknown[
     sql:
       'select facility_code, stays_sample, auth_sample, ' +
       'avg_los_days::float8 as avg_los_days, avg_auth_days::float8 as avg_auth_days, ' +
+      // synced_at PROJECTED (audit 2026-08-12, P0-5): the sync failed for 6 days against a dead
+      // source host and every rating kept scoring on frozen rows while the card said "Completed
+      // stays, trailing 365d" with no as-of. The column was written and never read; reading it is
+      // what lets the factor date its own evidence. ::date — the day is the resolution that matters
+      // for a daily sync, and a bare date carries no clock-skew ambiguity across timezones.
+      'synced_at::date::text as synced_at, ' +
       'window_days from collections.qualify_facility_outcomes',
     params: [],
   };

@@ -11,13 +11,19 @@ import pg from 'pg';
 import { sanitizeConnectionString, verifyFullSsl } from '../ssl.js';
 import type { ExecResult, QueryExecutor } from './types.js';
 
-export function makeReaderPool(connectionString: string): pg.Pool {
+/**
+ * `applicationName` is what `pg_stat_activity` shows while triaging a stuck read, so it defaults to
+ * this pool's historic value and callers may name themselves instead. Added 2026-08-12 for the v3
+ * Qualify resolution pool, which had been reporting `collections-ingest` — a label that sent an
+ * operator looking at the CMD cron pipeline for a pin caused by an interactive search.
+ */
+export function makeReaderPool(connectionString: string, applicationName = 'claims-query'): pg.Pool {
   return new pg.Pool({
     // Strip any sslmode/ssl param so it can't override our verify-full ssl (drop the ca).
     connectionString: sanitizeConnectionString(connectionString),
     ssl: verifyFullSsl(),
     max: 4,
-    application_name: 'claims-query',
+    application_name: applicationName,
     // Safety ceilings so a runaway/stalled read can't pin a connection in this SHARED reader pool
     // forever (a saturated {max:4} pool otherwise blocks unrelated app reads — collections,
     // dashboard, qualify — with NO upper bound). These are GENEROUS on purpose: one pool serves

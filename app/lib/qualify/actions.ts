@@ -222,6 +222,27 @@ export async function getQualifyComposedCases(input: QualifyComposeInput): Promi
   return getQualifyComposedCasesCore(realDeps, sanitizeCompose(input));
 }
 
+/**
+ * SQLSTATE for a swallow log — the `loadQualifyDataFreshness` idiom, extracted so the five sibling
+ * swallows below stop being silent (audit 2026-08-12, P1-9).
+ *
+ * ⚠ WHY THESE SWALLOWS NEEDED LOGS AT ALL. Each of the actions below fails CLOSED to `{ok:false}`,
+ * which is right: a probe failure must never render a false "never billed", and an options loader
+ * that throws must not take the page down. But `{ok:false}` is also what the UI gets when the answer
+ * is legitimately empty, so a broken GRANT and a quiet book are indistinguishable — in the UI *and*
+ * in the logs. 0089 is exactly that failure: a swallowed 42501 became permanently wrong data instead
+ * of a visible failure, for weeks. The catch stays; the silence goes.
+ *
+ * `?? 'no-sqlstate'` because `String(undefined)` is the word "undefined", which reads as a driver
+ * returning a null SQLSTATE rather than a throw that never had one; 'unknown' means it was not an
+ * object at all. SQLSTATE ONLY — the driver's message can carry query text, and answers nothing here.
+ */
+function sqlstateOf(err: unknown): string {
+  return String(
+    typeof err === 'object' && err !== null ? ((err as { code?: unknown }).code ?? 'no-sqlstate') : 'unknown',
+  );
+}
+
 /** VOB PROBE — is this payer billed anywhere, EVER (unwindowed, cross-tenant)? The compose bar calls this
  *  ONLY when the composed count is 0 AND exactly one payer is selected AND no PHI narrow is active; a
  *  `count` of 0 means "provably never billed" → the VOB path. Non-PHI (payer label only); fail-closed to
@@ -231,7 +252,9 @@ export async function getQualifyPayerEverBilled(payer: string): Promise<{ ok: tr
   if (p === '') return { ok: false };
   try {
     return { ok: true, count: await getQualifyPayerEverBilledCore(realDeps, p) };
-  } catch {
+  } catch (err) {
+    // Fail-closed stays; the SILENCE does not (P1-9). A 42501 here cannot succeed on retry.
+    console.error(`qualify payer-ever-billed probe failed (sqlstate ${sqlstateOf(err)}) — the VOB "never billed" prompt is withheld`);
     return { ok: false };
   }
 }
@@ -244,7 +267,9 @@ export async function getQualifyResolvePayer(term: string): Promise<{ ok: true; 
   if (t === '') return { ok: false };
   try {
     return { ok: true, payer: await getQualifyResolvePayerCore(realDeps, t) };
-  } catch {
+  } catch (err) {
+    // Fail-closed stays; the SILENCE does not (P1-9). A 42501 here cannot succeed on retry.
+    console.error(`qualify identifier payer-resolve failed (sqlstate ${sqlstateOf(err)}) — the identifier search renders no facility ranking`);
     return { ok: false };
   }
 }
@@ -348,7 +373,9 @@ export async function loadQualifyEmployers(term: string): Promise<QualifyEmploye
   if (t.length > QUALIFY_EMPLOYER_TERM_MAX) return { ok: false };
   try {
     return { ok: true, employers: await cmdExplorerEmployers(gate.entityIds, t, QUALIFY_EMPLOYER_OPTIONS_LIMIT) };
-  } catch {
+  } catch (err) {
+    // Fail-closed stays; the SILENCE does not (P1-9). A 42501 here cannot succeed on retry.
+    console.error(`qualify employer options read failed (sqlstate ${sqlstateOf(err)}) — the employer type-ahead returns nothing`);
     return { ok: false };
   }
 }
@@ -373,7 +400,9 @@ export async function loadQualifyFacilityOptions(): Promise<QualifyFacilityOptio
   if (!gate.ok) return { ok: false };
   try {
     return { ok: true, facilities: await qualifyFacilityOptions(gate.entityIds) };
-  } catch {
+  } catch (err) {
+    // Fail-closed stays; the SILENCE does not (P1-9). A 42501 here cannot succeed on retry.
+    console.error(`qualify facility options read failed (sqlstate ${sqlstateOf(err)}) — the facility picker renders EMPTY`);
     return { ok: false };
   }
 }
@@ -436,7 +465,9 @@ export async function loadQualifyPayerOptions(): Promise<QualifyPayerOptionsResu
   if (!gate.ok) return { ok: false };
   try {
     return { ok: true, payers: await cmdExplorerPayers(gate.entityIds) };
-  } catch {
+  } catch (err) {
+    // Fail-closed stays; the SILENCE does not (P1-9). A 42501 here cannot succeed on retry.
+    console.error(`qualify payer options read failed (sqlstate ${sqlstateOf(err)}) — the payer picker renders EMPTY`);
     return { ok: false };
   }
 }

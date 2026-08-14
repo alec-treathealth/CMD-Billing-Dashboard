@@ -125,6 +125,8 @@ export interface QualifyPairRatingContext {
       avg_los_days: number | null;
       avg_auth_days: number | null;
       window_days: number;
+      /** Sync date (P0-5) — optional so a pre-existing fixture stays valid; absent omits the clause. */
+      synced_at?: string | null;
     }
   >;
 }
@@ -182,6 +184,10 @@ export function computePairPolicyRating(
       losSample: useOutcomes ? outcome!.stays_sample : (census?.los_sample ?? null),
       losBasis: useOutcomes ? 'completed' : census?.avg_los_days != null ? 'in_progress' : null,
       losWindowDays: useOutcomes ? outcome!.window_days : null,
+      // P0-5: staleness is measured against the SNAPSHOT's date, not tonight — a backfilled row must
+      // describe how stale the feed was on the day it is dated, exactly like the coding-age decay.
+      losAsOf: useOutcomes ? (outcome!.synced_at ?? null) : null,
+      losAsOfToday: asOf,
       now,
     });
     return { ratingV2: v2.rating, distinctPatients: f.distinctPatients };

@@ -275,6 +275,9 @@ export interface QualifyOutcomesRow {
   avg_los_days: number | null;
   avg_auth_days: number | null;
   window_days: number;
+  /** When the outcomes sync last wrote this row (date only). Null on a pre-P0-5 caller/fixture —
+   *  the factor then simply omits the as-of clause rather than guessing a date. */
+  synced_at: string | null;
 }
 
 /** Raw, un-stripped lifetime cohort context the server loader returns (dollar sums intact — the
@@ -628,6 +631,9 @@ function assembleFacilities(
         losSample: basisLosSample,
         losBasis: useOutcomes ? 'completed' : census?.avg_los_days != null ? 'in_progress' : null,
         losWindowDays: useOutcomes ? outcome!.window_days : null,
+        // P0-5: the completed-stay feed dates itself, so a frozen sync says so on the card instead
+        // of scoring silently on rows that stopped moving (it ran 6 days dead before anyone noticed).
+        losAsOf: useOutcomes ? outcome!.synced_at : null,
         now: ctx.now,
       });
       return {

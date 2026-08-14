@@ -226,3 +226,61 @@ test('pctAllowed above 100 clamps to a 1.0 claims score, never inflates', () => 
   const r = computeRatingV2(baseInput({ pctAllowed: 130 }));
   assert.equal(factor(r, 'claims').score, 1);
 });
+
+// ── P0-5 (audit 2026-08-12): a completed-stay average DATES ITSELF ───────────────────────────────
+// The outcomes sync ran dead for 6 consecutive days against a source host that had gone away, and
+// 12 of 48 facilities kept scoring on frozen rows while the card said "Completed stays, trailing
+// 365d" with no as-of. The fix DISCLOSES rather than suppresses — falling back to the census
+// snapshot would swap a good-but-old measurement for a known-biased current one (in-progress LOS
+// reads systematically low), invisibly, which is the same defect. These pin both halves.
+
+const COMPLETED = {
+  avgAuthDays: 20,
+  avgLosDays: 18,
+  authSample: 8,
+  losSample: 8,
+  losBasis: 'completed' as const,
+  losWindowDays: 365,
+  losAsOfToday: '2026-08-12',
+};
+
+test('P0-5: a FRESH completed-stay row says nothing extra — a daily sync working is not news', () => {
+  const r = computeRatingV2(baseInput({ ...COMPLETED, losAsOf: '2026-08-11' }));
+  const detail = factor(r, 'authFit').detail;
+  assert.match(detail, /Completed stays, trailing 365d\./);
+  assert.ok(!/stale/i.test(detail), 'no staleness caption inside the freshness budget');
+});
+
+test('P0-5: a STALE completed-stay row states its age and says to read it as history', () => {
+  // 2026-08-06 → 2026-08-12 is 6 days: still inside the 7-day budget, so still quiet.
+  const sixDays = computeRatingV2(baseInput({ ...COMPLETED, losAsOf: '2026-08-06' }));
+  assert.ok(!/stale/i.test(factor(sixDays, 'authFit').detail), '6d is jitter, not an outage');
+
+  // 8 days is past the budget for a DAILY sync — that is an operational failure and it says so.
+  const eightDays = computeRatingV2(baseInput({ ...COMPLETED, losAsOf: '2026-08-04' }));
+  const detail = factor(eightDays, 'authFit').detail;
+  assert.match(detail, /Last synced 2026-08-04 \(8d ago\)/, 'names the date AND the age');
+  assert.match(detail, /stale/i);
+  assert.match(detail, /history, not current behaviour/, 'tells the reader what to do with it');
+});
+
+test('P0-5: staleness NEVER changes the score — it is a disclosure, not a suppression', () => {
+  const fresh = computeRatingV2(baseInput({ ...COMPLETED, losAsOf: '2026-08-11' }));
+  const stale = computeRatingV2(baseInput({ ...COMPLETED, losAsOf: '2026-01-01' }));
+  assert.equal(stale.rating, fresh.rating, 'same numbers in, same rating out');
+  assert.equal(factor(stale, 'authFit').score, factor(fresh, 'authFit').score);
+  assert.equal(factor(stale, 'authFit').available, true, 'the factor is not withheld over an ops failure');
+});
+
+test('P0-5: an absent as-of omits the clause rather than guessing, and in_progress is unaffected', () => {
+  const noAsOf = computeRatingV2(baseInput({ ...COMPLETED, losAsOf: null }));
+  assert.match(factor(noAsOf, 'authFit').detail, /Completed stays, trailing 365d\./);
+  assert.ok(!/Last synced/.test(factor(noAsOf, 'authFit').detail));
+
+  // The in-progress basis has its own caption and must not grow a sync date it does not have.
+  const inProgress = computeRatingV2(
+    baseInput({ avgAuthDays: 20, avgLosDays: 18, authSample: 8, losSample: 8, losBasis: 'in_progress', losAsOf: '2026-01-01', losAsOfToday: '2026-08-12' }),
+  );
+  assert.match(factor(inProgress, 'authFit').detail, /currently admitted/);
+  assert.ok(!/Last synced/.test(factor(inProgress, 'authFit').detail));
+});

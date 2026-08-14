@@ -221,7 +221,7 @@ export async function loadQualifyCensusAuth(): Promise<
  *  census snapshot rather than 500ing. Any OTHER error rethrows — a real outage must not read as
  *  "no outcomes on file". Aggregate facility-grain rows; no PHI on this path. */
 export async function loadQualifyFacilityOutcomes(): Promise<
-  Array<{ facility_code: string; stays_sample: number; auth_sample: number; avg_los_days: number | null; avg_auth_days: number | null; window_days: number }>
+  Array<{ facility_code: string; stays_sample: number; auth_sample: number; avg_los_days: number | null; avg_auth_days: number | null; window_days: number; synced_at: string | null }>
 > {
   const q = buildQualifyOutcomesReadQuery();
   try {
@@ -232,6 +232,7 @@ export async function loadQualifyFacilityOutcomes(): Promise<
       avg_los_days: number | null;
       avg_auth_days: number | null;
       window_days: number;
+      synced_at: string | null;
     }>(q.sql, q.params);
     return res.rows;
   } catch (err) {
