@@ -1,5 +1,5 @@
 /**
- * Maintenance interstitial for the Claims Audit surface (/billing-audit). Shown in place of the
+ * Maintenance interstitial for the Claims Desk surface (/billing-audit). Shown in place of the
  * workbench when CLAIMS_AUDIT_MAINTENANCE is enabled (on by default during the refactor). The bypass
  * allowlist reaches the live workbench (see the route page) so the rebuild can be verified live.
  *
@@ -14,7 +14,7 @@ export function ClaimsAuditMaintenanceNotice() {
       <span className="text-3xl" aria-hidden>
         🤖
       </span>
-      <h1 className="text-2xl font-semibold tracking-tight">Claims Audit is being rebuilt</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">Claims Desk is being rebuilt</h1>
       <p className="text-sm text-muted-foreground">
         This tab is currently being refactored into an AI system. Hang tight, new functionalities
         coming soon!

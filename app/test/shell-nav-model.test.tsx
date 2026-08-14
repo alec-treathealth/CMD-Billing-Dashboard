@@ -181,7 +181,7 @@ test('nav: every link carries a rail icon — an icon-first rail cannot render w
   }
 });
 
-test('nav: Claims Audit and Qualify are the Beta-flagged surfaces', () => {
+test('nav: Claims Desk and Qualify are the Beta-flagged surfaces', () => {
   const beta = linksFor('super_admin')
     .filter((l) => l.isBeta)
     .map((l) => l.href);

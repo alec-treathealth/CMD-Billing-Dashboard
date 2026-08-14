@@ -3,7 +3,7 @@
  * asserts on the real HTML, matching the qualify-render convention. What these lock:
  *
  *   1) per-role destinations come from the SHARED nav model (an admissions_seat rail must never
- *      grow a Collections or Claims Audit link),
+ *      grow a Collections or Claims Desk link),
  *   2) the tenant scope (?view=) rides onto view-scoped hrefs and stays OFF cross-tenant ones,
  *   3) the M3 active indicator marks exactly one destination, and it is the current route,
  *   4) collapsed vs expanded both keep every label in the accessible name — the collapsed rail
@@ -38,7 +38,7 @@ function render(opts: {
 
 test('rail: super_admin renders every destination, labelled', () => {
   const html = render({ role: 'super_admin' });
-  for (const label of ['Overview', 'Qualify', 'Collections', 'Claims Audit', 'Code Reference']) {
+  for (const label of ['Overview', 'Qualify', 'Collections', 'Claims Desk', 'Code Reference']) {
     assert.ok(html.includes(label), `missing destination: ${label}`);
   }
 });
@@ -47,7 +47,7 @@ test('rail: admissions_seat is Qualify-only — no dashboard destinations leak i
   const html = render({ role: 'admissions_seat', pathname: '/qualify' });
   assert.ok(html.includes('Qualify'));
   assert.ok(!html.includes('Collections'));
-  assert.ok(!html.includes('Claims Audit'));
+  assert.ok(!html.includes('Claims Desk'));
   assert.ok(!html.includes('Code Reference'));
   assert.ok(!html.includes('href="/dashboard"'));
 });
@@ -111,11 +111,11 @@ test('rail: the active indicator is painted from the M3 token, not a hex', () =>
 
 test('rail: collapsed still carries every label — it is not icon-only for a screen reader', () => {
   const collapsed = render({ role: 'super_admin', expanded: false });
-  for (const label of ['Overview', 'Qualify', 'Collections', 'Claims Audit', 'Code Reference']) {
+  for (const label of ['Overview', 'Qualify', 'Collections', 'Claims Desk', 'Code Reference']) {
     assert.ok(collapsed.includes(label), `collapsed rail dropped: ${label}`);
   }
   // Collapsed leans on title= for the truncated label.
-  assert.ok(collapsed.includes('title="Claims Audit"'));
+  assert.ok(collapsed.includes('title="Claims Desk"'));
 });
 
 test('rail: the expand toggle exposes its state and controls the nav landmark', () => {
@@ -141,7 +141,7 @@ test('rail: Beta reads as a badge when expanded and a dot when collapsed', () =>
 
   const collapsed = render({ role: 'super_admin', expanded: false });
   assert.ok(!collapsed.includes('q-beta-badge'));
-  // Two Beta surfaces (Qualify + Claims Audit) → two collapsed dot markers.
+  // Two Beta surfaces (Qualify + Claims Desk) → two collapsed dot markers.
   assert.equal(collapsed.match(/rounded-full bg-coral400/g)?.length, 2);
 });
 

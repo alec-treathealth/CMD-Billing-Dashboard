@@ -39,10 +39,10 @@ const COLLECTIONS: NavLink = {
   label: 'Collections',
   railIcon: Wallet,
 };
-// Display label "Claims Audit" (2026-07-15) — the route + internal names stay /billing-audit.
+// Display label "Claims Desk" (2026-07-15) — the route + internal names stay /billing-audit.
 const CLAIMS_AUDIT: NavLink = {
   href: '/billing-audit',
-  label: 'Claims Audit',
+  label: 'Claims Desk',
   railIcon: FileSearch,
   isBeta: true,
 };

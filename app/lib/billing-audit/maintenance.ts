@@ -1,5 +1,5 @@
 /**
- * Claims Audit (/billing-audit) maintenance-mode flag. While the Claims Audit workbench is being
+ * Claims Desk (/billing-audit) maintenance-mode flag. While the Claims Desk workbench is being
  * refactored into an AI system, /billing-audit renders a "being rebuilt" notice instead of the
  * workbench for EVERY user except the bypass allowlist below — so the rebuild can be verified live
  * (and worked off-branch) while everyone else sees the notice.
@@ -10,7 +10,7 @@
  * references it. (Mirrors lib/qualify/maintenance.ts.)
  */
 
-// Only these emails bypass the maintenance notice and reach the live Claims Audit surface.
+// Only these emails bypass the maintenance notice and reach the live Claims Desk surface.
 const MAINTENANCE_BYPASS_EMAILS = new Set(['alec@treathealth.ai']);
 
 function maintenanceEnabled(): boolean {
@@ -18,7 +18,7 @@ function maintenanceEnabled(): boolean {
   return v !== '0' && v !== 'false' && v !== 'off';
 }
 
-/** True when this viewer should see the maintenance notice instead of the Claims Audit surface. */
+/** True when this viewer should see the maintenance notice instead of the Claims Desk surface. */
 export function claimsAuditMaintenanceBlocks(email: string | null | undefined): boolean {
   if (!maintenanceEnabled()) return false;
   return !MAINTENANCE_BYPASS_EMAILS.has((email ?? '').trim().toLowerCase());

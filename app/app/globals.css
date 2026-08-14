@@ -275,7 +275,7 @@
  */
 
 /*
- * Beta nav flag — sparkly coral badge on beta top-nav tabs (Qualify + Claims Audit). Decorative
+ * Beta nav flag — sparkly coral badge on beta top-nav tabs (Qualify + Claims Desk). Decorative
  * (aria-hidden). The "Beta" text carries a slow coral shimmer (gradient-clipped) and a small ✦ that
  * twinkles; both animations collapse to static under prefers-reduced-motion (global reset above),
  * leaving a plain coral "Beta ✦". Positioned inside the link's top-right (the link is `relative`).

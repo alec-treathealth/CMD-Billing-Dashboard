@@ -4,7 +4,7 @@
 
    SCOPE: everything here lives under [data-ths='v2']. Nothing leaks. Only the
    Overview page (/dashboard) opts in today — Collections, the Explorer grid,
-   Qualify and Claims Audit keep the v1 look until each is ported deliberately.
+   Qualify and Claims Desk keep the v1 look until each is ported deliberately.
    That is why this is a separate file rather than edits to globals.css.
 
    THREE DELIBERATE DEVIATIONS from the shipped design-system files:
