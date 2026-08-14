@@ -23,7 +23,16 @@
  * why `resolveCoverage` takes no role parameter at all. A role parameter would be a place for the two
  * outputs to diverge; not having one makes divergence unrepresentable rather than merely tested.
  */
-import { makeClient } from '../../../src/collections/db';
+/* ⚠ THE READER POOL, NOT THE INGEST POOL (audit 2026-08-12, P1-7). This module used to build its
+ * pool with `makeClient` from the collections INGEST module, which sets `{ssl, max:4,
+ * application_name:'collections-ingest'}` and NO timeouts of any kind — no `statement_timeout`, no
+ * `query_timeout`, no `connectionTimeoutMillis`. On a `max:4` pool that means four pathological
+ * searches pin every connection with no server-side cancel and no bound on how long the fifth waits,
+ * so the whole v3 search path hangs; and `pg_stat_activity` blamed the CMD cron pipeline for it.
+ * `makeReaderPool` is the sibling that already solved this for the main app reader, with a comment
+ * explaining the same hazard — this path simply never adopted it. The ingest pool is deliberately
+ * left alone: it serves production-critical crons whose long writes SHOULD outlive a read timeout. */
+import { makeReaderPool } from '../../../src/queries/executor';
 import { ALPHA_PREFIX_LEN, alphaPrefixBlindIndex, memberIdBlindIndex } from '../../../src/collections/blindIndex';
 import {
   buildCandidateEvidenceBatchQuery,
@@ -33,6 +42,7 @@ import {
   buildGroupClaimsLabelsQuery,
   buildGroupLadderQuery,
   predicateIdFor,
+  QUALIFY_CANDIDATE_LIMIT,
   type QualifyHandleKind,
 } from '../../../src/collections/qualifyResolutionQuery';
 import { classifyQualifyHandle } from './contract';
@@ -61,13 +71,13 @@ const LADDER_MIN_MEMBERS = 3;
 
 const PANELS: readonly PanelId[] = ['kpis', 'ranking', 'policy', 'ladder', 'trend', 'ai'];
 
-let pool: ReturnType<typeof makeClient> | null = null;
+let pool: ReturnType<typeof makeReaderPool> | null = null;
 /** READ-ONLY least-privilege reader. Never `claims_admin`, never the service-role key. */
 function reader() {
   if (!pool) {
     const url = process.env.CLAIMS_READER_DATABASE_URL;
     if (!url) throw new Error('Missing CLAIMS_READER_DATABASE_URL (set in env; never hardcode or log it)');
-    pool = makeClient(url);
+    pool = makeReaderPool(url, 'qualify-resolution');
   }
   return pool;
 }
@@ -222,6 +232,20 @@ export async function resolveCoverage(input: ResolveCoverageInput): Promise<Reso
     db.query<VobCandidateRow>(vobQ.sql, vobQ.params),
     db.query<ClaimsOnlyRow>(claimsQ.sql, claimsQ.params),
   ]);
+  /* NO SILENT CAP (P1-8). QUALIFY_CANDIDATE_LIMIT is set high enough that it should never bind on
+   * real data, so if it DOES the operator is being shown a trimmed candidate set and nobody would
+   * otherwise know — the same class of quiet truncation as a swallowed SQLSTATE. Non-PHI: a count
+   * and a side, never the handle or any label. */
+  for (const [side, n] of [
+    ['vob', vobRes.rows.length],
+    ['claims-only', claimsRes.rows.length],
+  ] as const) {
+    if (n >= QUALIFY_CANDIDATE_LIMIT) {
+      console.warn(
+        `qualify resolution: ${side} candidates hit the ${QUALIFY_CANDIDATE_LIMIT}-group cap — the candidate list shown is TRUNCATED`,
+      );
+    }
+  }
 
   // ── 2. Evidence for EVERY candidate, in one query (§S1: mark no-evidence before the user picks) ──
   const canonicalIds = [
@@ -437,7 +461,7 @@ export async function resolveCoverage(input: ResolveCoverageInput): Promise<Reso
  * WHY, which is what makes this a proposal rather than the silent re-window v2 shipped.
  */
 async function buildLadder(
-  db: ReturnType<typeof makeClient>,
+  db: ReturnType<typeof makeReaderPool>,
   token: string,
   kind: QualifyHandleKind,
   canonicalPayerId: string | null,

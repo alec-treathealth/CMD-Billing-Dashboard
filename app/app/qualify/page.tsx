@@ -14,6 +14,7 @@ import { dashboardAccess } from '@/lib/access';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { QualifyMaintenanceNotice } from '@/components/qualify/qualify-maintenance-notice';
 import { qualifyMaintenanceBlocks } from '@/lib/qualify/maintenance';
+import { isQualifyOnlyRole } from '@/lib/rbac';
 import { qualifySmokeShellEnabled, qualifyV3FlowEnabled } from '@/lib/qualify/v3Flags';
 import { QualifyTab } from '@/components/qualify/qualify-tab';
 import { ResolutionFlowClient } from '@/components/qualify/v3/resolution-flow-client';
@@ -39,7 +40,10 @@ export default async function QualifyPage() {
 
   // Maintenance gate: every viewer sees the notice except the bypass allowlist (alec@treathealth.ai),
   // so improvements can be verified live while everyone else is held out.
-  if (qualifyMaintenanceBlocks(access.access.user?.email)) return <QualifyMaintenanceNotice />;
+  // `qualifyOnlyViewer` decides whether the notice offers exits at all: for a qualify-only role both
+  // dashboard links redirect straight back here, so showing them builds a closed loop (P0-7).
+  if (qualifyMaintenanceBlocks(access.access.user?.email))
+    return <QualifyMaintenanceNotice qualifyOnlyViewer={isQualifyOnlyRole(role)} />;
 
   // Server-derived amounts capability seeds the initial (pre-search) column layout so an
   // admissions_seat never even renders the $ column headers; every snapshot re-confirms it, and the

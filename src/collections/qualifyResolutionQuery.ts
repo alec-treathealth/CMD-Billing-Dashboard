@@ -60,6 +60,34 @@ export interface BuiltQuery {
  * `vob_payer_id` aliases exist — but it is NOT WIRED IN, so no caller may claim a payer_id-backed
  * basis. A `has_payer_id` column used to be projected here and was mistaken for exactly that.
  */
+/**
+ * Hard ceiling on candidate groups per handle (audit 2026-08-12, P1-8).
+ *
+ * Both candidate builders shipped with NO `limit` at all, while the neighbouring spread query has
+ * carried `QUALIFY_SPREAD_LIMIT` since it was written — and its header records the measured reason:
+ * one alpha prefix carries **300 distinct employers**. Every group crosses the wire inside
+ * `candidates.rejected`, each with an `employerLabel`, so an unbounded group set is both an
+ * unbounded query and an unbounded PHI-adjacent payload to the browser.
+ *
+ * 500 is chosen to sit ABOVE the worst case anyone has measured, so this is a denial-of-service
+ * bound rather than a product decision about how many candidates an operator may pick from. The
+ * worst observed handle carries 300 distinct employers; note that 300 is an employer count from the
+ * spread query's single-dimension grouping, while THIS query groups the wider tuple (payer,
+ * employer, funding, plan, policy), so its group count for that handle is >= 300 and nobody has
+ * measured how much higher. A cap of 200 would therefore have silently trimmed the pickable list on
+ * exactly the pathological prefix it was meant to protect — which is a UI ruling smuggled in as a
+ * safety limit, and not one this file gets to make.
+ *
+ * The service LOGS when the cap actually binds, because a cap that trims the answer without saying
+ * so is the silent truncation this repo keeps getting burned by. If that log ever fires, the right
+ * response is a real candidate-paging decision, not a bigger number here.
+ *
+ * Interpolated as an integer LITERAL, not a bound param: it is a module constant, never caller
+ * input, and `limit $n` would defeat the planner's row estimate. Same discipline as the ladder's
+ * integer-validated rung days.
+ */
+export const QUALIFY_CANDIDATE_LIMIT = 500;
+
 export function buildCoverageCandidatesQuery(handleToken: string, kind: QualifyHandleKind): BuiltQuery {
   const col = HANDLE_COLUMN[kind].vob;
   const sql = `
@@ -94,7 +122,8 @@ export function buildCoverageCandidatesQuery(handleToken: string, kind: QualifyH
              v.employer_norm asc nulls last,
              v.plan_type asc nulls last,
              v.funding asc nulls last,
-             v.policy_type asc nulls last`;
+             v.policy_type asc nulls last
+    limit ${QUALIFY_CANDIDATE_LIMIT}`;
   return { sql, params: [handleToken] };
 }
 
@@ -134,7 +163,8 @@ export function buildClaimsOnlyCandidatesQuery(handleToken: string, kind: Qualif
     group by m.canonical_payer_id, coalesce(pi.display_name, upper(btrim(r.primary_payer))),
              coalesce(m.relationship, 'unmapped')
     order by count(distinct r.member_id_bidx) desc,
-             coalesce(pi.display_name, upper(btrim(r.primary_payer))) asc`;
+             coalesce(pi.display_name, upper(btrim(r.primary_payer))) asc
+    limit ${QUALIFY_CANDIDATE_LIMIT}`;
   return { sql, params: [handleToken] };
 }
 

@@ -20,6 +20,7 @@ import {
   buildGroupClaimsLabelsQuery,
   buildGroupLadderQuery,
   predicateIdFor,
+  QUALIFY_CANDIDATE_LIMIT,
 } from '../src/collections/qualifyResolutionQuery.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -310,4 +311,33 @@ test('the claims-only path anti-joins VOB so a member with a policy is never dou
     sql.includes('v.member_id_bidx = r.member_id_bidx'),
     'correlated on the member token, so it excludes exactly the members that have a policy row',
   );
+});
+
+// ── P1-8 (audit 2026-08-12): candidate resolution is BOUNDED ─────────────────────────────────────
+// Both builders shipped with no `limit` at all while the neighbouring spread query has always
+// carried one, and its header records why: a single alpha prefix carries 300 distinct employers.
+// Every group crosses the wire in `candidates.rejected` with an `employerLabel` attached, so an
+// unbounded group set is an unbounded PHI-adjacent payload as well as an unbounded query.
+test('P1-8: BOTH candidate builders carry the group cap — neither may ship unbounded groups', () => {
+  const cap = new RegExp(`limit ${QUALIFY_CANDIDATE_LIMIT}\\b`);
+  for (const [label, built] of [
+    ['vob', buildCoverageCandidatesQuery('a'.repeat(64), 'prefix')],
+    ['claims-only', buildClaimsOnlyCandidatesQuery('a'.repeat(64), 'prefix')],
+  ] as const) {
+    assert.ok(cap.test(built.sql), `${label} candidates must be capped`);
+    // The cap must come AFTER the ranking, or it truncates an arbitrary slice instead of the top N.
+    assert.ok(
+      built.sql.lastIndexOf('order by') < built.sql.lastIndexOf('limit'),
+      `${label}: the limit must follow the order by`,
+    );
+  }
+});
+
+test('P1-8: the cap sits ABOVE the worst measured handle — it is a DoS bound, not a UI ruling', () => {
+  // The worst observed handle carries 300 distinct EMPLOYERS, and this query groups a wider tuple
+  // than that count came from, so its real group count for that handle is >= 300. A cap at or below
+  // 300 would quietly trim the pickable candidate list on exactly the prefix it exists to protect —
+  // smuggling a paging decision in as a safety limit. If this assertion ever needs relaxing, the
+  // answer is candidate paging, not a bigger number.
+  assert.ok(QUALIFY_CANDIDATE_LIMIT > 300, 'the cap must clear the worst measured handle');
 });

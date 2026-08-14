@@ -154,6 +154,22 @@ function codingAgeMultiplier(ageDays: number): number {
 export const QUALIFY_AUTH_FIT_MIN_SAMPLE = 3;
 
 /**
+ * How many days a completed-stays row may go unsynced before the factor calls it STALE in words.
+ * The sync is DAILY, so anything past a week is an operational failure rather than jitter — measured
+ * 2026-08-12, when it had been failing for 6 consecutive days against a source host that had gone
+ * away, and 12 of 48 facilities were scoring on frozen rows with nothing on screen saying so.
+ */
+export const QUALIFY_OUTCOMES_FRESH_DAYS = 7;
+
+/** Whole days between two ISO dates (UTC, date-only). Negative (a future stamp) reads as 0. */
+function daysSinceIso(fromIso: string, todayIso: string): number | null {
+  const from = Date.parse(`${fromIso}T00:00:00Z`);
+  const today = Date.parse(`${todayIso}T00:00:00Z`);
+  if (Number.isNaN(from) || Number.isNaN(today)) return null;
+  return Math.max(0, Math.floor((today - from) / 86_400_000));
+}
+
+/**
  * True when either side of the auth-fit ratio is built on too few clients. `undefined` means the
  * sample was never measured (a pre-0088 row, or a caller that does not supply it) — that must NOT
  * suppress, or every facility would lose the factor the moment the column was added and before the
@@ -281,6 +297,13 @@ export interface QualifyRatingV2Input {
   /** Trailing window (days) the completed-stay averages were measured over — shown so the number is
    *  self-describing. Ignored unless losBasis is 'completed'. */
   losWindowDays?: number | null;
+  /** The date the completed-stay averages were last SYNCED (audit 2026-08-12, P0-5). Ignored unless
+   *  losBasis is 'completed'; null/absent omits the clause rather than guessing. See the basisNote
+   *  below for why this is disclosed rather than used to suppress. */
+  losAsOf?: string | null;
+  /** "Today", for measuring that staleness. Defaults to `now` — injectable only so the two clocks in
+   *  this function stay a single testable input. */
+  losAsOfToday?: string | null;
   /** Injectable clock for the coding-age decay (tests pin it). */
   now?: Date;
 }
@@ -574,9 +597,24 @@ export function computeRatingV2(input: QualifyRatingV2Input): QualifyRatingV2 {
      *
      * An operator comparing two facilities has to know which measurement they are looking at, and a
      * facility scored on completed stays is not comparable to one scored on stays in progress. */
+    /* STALENESS IS DISCLOSED, NOT SILENTLY SWAPPED (audit 2026-08-12, P0-5). When the outcomes sync
+     * stops — it failed for 6 straight days against a source host that had gone away — the tempting
+     * fix is to fall back to the census snapshot. That would trade a good-but-old measurement for a
+     * known-biased current one (in-progress LOS reads systematically low; the overrun penalty could
+     * never fire — measured 2026-08-06), and would do it invisibly, which is the exact defect being
+     * fixed. The honest form is the same number with its age said out loud. Fresh rows stay quiet:
+     * a daily sync's normal state needs no caption. */
+    const asOfAge =
+      input.losBasis === 'completed' && input.losAsOf
+        ? daysSinceIso(input.losAsOf, input.losAsOfToday ?? now.toISOString().slice(0, 10))
+        : null;
+    const staleNote =
+      asOfAge !== null && asOfAge > QUALIFY_OUTCOMES_FRESH_DAYS
+        ? ` Last synced ${input.losAsOf} (${asOfAge}d ago) — the completed-stay feed is stale, so read this as history, not current behaviour.`
+        : '';
     const basisNote =
       input.losBasis === 'completed'
-        ? ` Completed stays${input.losWindowDays ? `, trailing ${input.losWindowDays}d` : ''}.`
+        ? ` Completed stays${input.losWindowDays ? `, trailing ${input.losWindowDays}d` : ''}.${staleNote}`
         : input.losBasis === 'in_progress'
           ? ' Based on clients currently admitted, so stays are still running and this reads low.'
           : '';

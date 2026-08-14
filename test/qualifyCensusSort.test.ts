@@ -214,7 +214,7 @@ test('the wire follows the SAME basis the rating scored on — completed stays, 
         census({ facility_code: 'NASH', avg_auth_days: 30, avg_los_days: 20, auth_sample: 9, los_sample: 9 }),
       ],
       loadFacilityOutcomes: async () => [
-        { facility_code: 'NASH', stays_sample: 142, auth_sample: 102, avg_los_days: 40.1, avg_auth_days: 36.35, window_days: 365 },
+        { facility_code: 'NASH', stays_sample: 142, auth_sample: 102, avg_los_days: 40.1, avg_auth_days: 36.35, window_days: 365, synced_at: null },
       ],
     }),
     IN,
@@ -344,7 +344,7 @@ test('avg_auth_days of ZERO is withheld — the card cannot claim an overrun the
       loadFacilities: async () => [STRONG],
       loadCensusAuth: async () => [census({ facility_code: 'NASH' })],
       loadFacilityOutcomes: async () => [
-        { facility_code: 'NASH', stays_sample: 40, auth_sample: 40, avg_los_days: 30, avg_auth_days: 0, window_days: 365 },
+        { facility_code: 'NASH', stays_sample: 40, auth_sample: 40, avg_los_days: 30, avg_auth_days: 0, window_days: 365, synced_at: null },
       ],
     }),
     IN,

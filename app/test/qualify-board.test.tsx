@@ -96,10 +96,10 @@ test('completed-stay outcomes beat the census snapshot only at/above the sample 
     ],
   ]);
   const outcomesGood = new Map([
-    ['TREAT_CA', { stays_sample: 4, auth_sample: 4, avg_los_days: 14, avg_auth_days: 10, window_days: 180 }],
+    ['TREAT_CA', { stays_sample: 4, auth_sample: 4, avg_los_days: 14, avg_auth_days: 10, window_days: 180, synced_at: null }],
   ]);
   const outcomesThin = new Map([
-    ['TREAT_CA', { stays_sample: 2, auth_sample: 2, avg_los_days: 14, avg_auth_days: 10, window_days: 180 }],
+    ['TREAT_CA', { stays_sample: 2, auth_sample: 2, avg_los_days: 14, avg_auth_days: 10, window_days: 180, synced_at: null }],
   ]);
   const f = agg({ careSetting: 'IP' });
 
