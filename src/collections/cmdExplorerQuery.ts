@@ -70,7 +70,7 @@ export interface CmdExplorerFilter {
   primary_payers?: string[] | null;
   /**
    * VOB MARKET filters — the member's verified employer / funding, matched through the
-   * vob.member_benefits_current view on member_id_bidx (member-level; the bidx is tenant-agnostic).
+   * vob.member_benefits_latest matview on member_id_bidx (member-level; the bidx is tenant-agnostic).
    * Set membership like `facility`/`primary_payers`: a NON-EMPTY array narrows, empty/absent is no
    * restriction. `employers` matches employer_norm (the normalized, indexed employer key the
    * type-ahead picker supplies); `funding` matches the market tag ('Self-Funded' / 'Fully Insured').
@@ -115,10 +115,10 @@ export interface VobMarketFilter {
 
 /**
  * The VOB employer/funding market predicate, as a SEMI-JOIN on member_id_bidx:
- *   `member_id_bidx in (select member_id_bidx from vob.member_benefits_current where <conds>)`
+ *   `member_id_bidx in (select member_id_bidx from vob.member_benefits_latest where <conds>)`
  * Returns null when neither filter is active (a no-op). Shared by the collections grid/summary AND
  * the qualify builders so the predicate and its column names (funding / employer_norm) live in ONE
- * place. A SEMI-JOIN, not a JOIN: vob.member_benefits_current also has member_id_bidx, so joining it
+ * place. A SEMI-JOIN, not a JOIN: vob.member_benefits_latest also has member_id_bidx, so joining it
  * would make the callers' UNQUALIFIED member_id_bidx conditions ambiguous and force a FROM change.
  * Both sub-conditions target the SAME (latest) VOB row per member. "No-VOB excluded" is intrinsic —
  * a member absent from the subquery cannot satisfy the IN. Every value is bound via `add`.
@@ -132,9 +132,8 @@ export function buildVobMarketSemiJoin(filter: VobMarketFilter, add: ParamAdder)
     vobConds.push(`employer_norm = any(${add(filter.employers)}::text[])`);
   }
   if (vobConds.length === 0) return null;
-  // vob.member_benefits_latest is the MATERIALIZED latest-per-member set (migration 0063), refreshed on
-  // each VOB load. It supersedes the plain vob.member_benefits_current view here: that view recomputed
-  // latest-per-member (~0.7–1.1s sort+DISTINCT over the whole table) on EVERY market-filtered query.
+  // vob.member_benefits_latest is the MATERIALIZED latest-per-member set (migration 0063), refreshed
+  // on each VOB load.
   return `member_id_bidx in (select member_id_bidx from vob.member_benefits_latest where ${vobConds.join(' and ')})`;
 }
 
@@ -671,15 +670,17 @@ export function cmdExplorerSortValue(row: CmdExplorerRow, column: CmdExplorerSor
 export const CMD_SEARCH_TOP_N = 8;
 
 /**
- * The CHARGE-GRAIN aggregate source (migration 0050): one row per logical charge with
+ * The CHARGE-GRAIN source (migration 0050): one row per logical charge with
  * grain-correct netting — charge_amount counted once; insurance_payments = the charge-cumulative
  * running total's max (NEVER summed); allowed_amount = the posting-netted sum (± reversal rows
  * cancel); point-in-time fields = latest snapshot. EVERY aggregate builder in this module reads
  * this view: summing raw cmd_explorer_rows (snapshot grain, BXR ~2.14 rows per charge) was the
  * confirmed root cause of the >100% ratios and ~2× inflated totals (2026-07-13 grain audit).
- * The row-browsing grid and the drilldown patient TABLE intentionally stay on cmd_explorer_rows —
- * row grain is what they display — and the view's `id` is the latest snapshot's real row id, so
- * joins back to the base table (and the audited PHI reveal) still hold.
+ * The row-browsing grid reads this matview too (buildCmdExplorerQuery; its displayed
+ * allowed_amount is the materialized allowed_reliable). Only the drilldown patient TABLE
+ * intentionally stays on cmd_explorer_rows — row grain is what it displays — and the view's
+ * `id` is the latest snapshot's real row id, so joins back to the base table (and the audited
+ * PHI reveal) still hold.
  */
 export const CMD_EXPLORER_CHARGE_ROLLUP = 'collections.cmd_explorer_charge_rollup';
 
