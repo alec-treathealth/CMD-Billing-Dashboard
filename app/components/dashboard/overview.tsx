@@ -142,7 +142,7 @@ export function Dashboard({
     // data-ths='v2' opts this page — and only this page — into the Treat Design
     // System v2 light-ground tokens and class layer (app/app/ths-v2.css). Every
     // rule in that file is scoped to this attribute, so Collections, the Explorer
-    // grid, Qualify and Claims Audit are untouched until each is ported.
+    // grid, Qualify and Claims Desk are untouched until each is ported.
     <section data-ths="v2" className="space-y-6">
       <OverviewKpis
         view={view}

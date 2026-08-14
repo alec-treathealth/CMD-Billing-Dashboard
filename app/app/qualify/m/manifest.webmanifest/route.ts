@@ -4,7 +4,7 @@
  * <link rel="manifest"> in the m/ layout.
  *
  * Scope is "/qualify/m" (no trailing slash so start_url stays in scope) — it covers ONLY the mobile
- * segment, so an installed instance can never navigate to Overview / Collections / Claims Audit or the
+ * segment, so an installed instance can never navigate to Overview / Collections / Claims Desk or the
  * desktop /qualify (none of which are under /qualify/m). theme_color is the LIGHT ground, per the
  * ratified light scheme (not the superseded dark treatment).
  */

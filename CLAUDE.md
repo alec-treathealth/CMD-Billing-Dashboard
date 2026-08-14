@@ -483,14 +483,14 @@ Top nav is built from `app/lib/nav-model.ts` — `nav-links.tsx` (bar) and
 `shell/nav-rail.tsx` (rail) both read it, so the two shells cannot disagree.
 The link set is role-dependent:
 
-- `admin` / `user` / unknown — Overview · Collections · Claims Audit (Beta) · Code Reference
+- `admin` / `user` / unknown — Overview · Collections · Claims Desk (Beta) · Code Reference
 - `super_admin` — the above plus Qualify (Beta), between Overview and Collections
 - `admissions_seat` — Qualify only (single-surface persona)
 
 Surfaces:
 
 - `/dashboard` (Overview) and `/dashboard/collections` — the primary product.
-- `/billing-audit` (labelled "Claims Audit") and `/qualify` + `/qualify/m` — both
+- `/billing-audit` (labelled "Claims Desk") and `/qualify` + `/qualify/m` — both
   currently behind a **refactor notice shown to everyone except
   `alec@treathealth.ai`**. Kill switches: `CLAIMS_AUDIT_MAINTENANCE` /
   `QUALIFY_MAINTENANCE` = `0`/`false`/`off`.
