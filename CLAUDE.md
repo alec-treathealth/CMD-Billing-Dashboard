@@ -158,9 +158,17 @@ you next have one, and promote the number then.
 
 ## Git workflow
 
-Open PRs against `staging`, never `main` — use `gh pr create --base staging`
-explicitly. `main` is production; it only receives a PR from `staging` after
-Vercel and Qodo checks pass.
+⚠ **`staging` IS DELETED — RULED BY ALEC 2026-08-14.** The batching branch is
+gone from the remote (`git ls-remote --heads origin` shows no
+`refs/heads/staging`) and is not coming back; it was ruled poor dev practice.
+**Branch off `main`; open PRs against `main`** — `gh pr create --base main`.
+`main` is production; a PR merges only after Alec reads the Vercel and Qodo
+checks by hand (unchanged). Local clones may still carry a stale
+`origin/staging` remote-tracking ref (last snapshot `fb623dd`, content-identical
+to `main` at deletion); `git fetch --prune` clears it. Every mention of
+`staging` as a live branch below and elsewhere in this file is HISTORICAL —
+kept because the squash/ghost-commit mechanics it documents still explain
+artifacts in this repo's commit history.
 
 **`main` is GitHub-enforced** — ruleset `20617104`, `enforcement: active`, scoped
 to `~DEFAULT_BRANCH`. It replaced discipline that was not holding on its own: 21
@@ -241,9 +249,16 @@ So **browser-test on the feature branch's own preview URL**, not on staging.
 Every push to every branch already builds one, so a PR's preview is the test
 surface and no persistent branch is required to get one.
 
-### Staging discipline — it is a batching branch, not an environment
+### Staging discipline — RETIRED 2026-08-14; historical record only
 
-`staging` exists to **batch** several already-tested changes into ONE production
+⚠ **This entire section is HISTORICAL: `staging` was deleted 2026-08-14** (see
+the ruling at the top of [Git workflow](#git-workflow)). Feature branches now PR
+straight to `main`. The mechanics below — squash ghost commits, the "Update
+branch" drift engine, the force-reset ritual — are kept because they explain
+commit-history artifacts from the staging era. Do not resurrect the branch to
+follow them.
+
+`staging` existed to **batch** several already-tested changes into ONE production
 deploy. That batching is worth real money here — the hourly collections crons are
 production-critical, and every promotion obliges the "verify the next scheduled
 run" check — but batching is the *only* thing it provides, because the previews
@@ -483,14 +498,14 @@ Top nav is built from `app/lib/nav-model.ts` — `nav-links.tsx` (bar) and
 `shell/nav-rail.tsx` (rail) both read it, so the two shells cannot disagree.
 The link set is role-dependent:
 
-- `admin` / `user` / unknown — Overview · Collections · Claims Desk (Beta) · Code Reference
+- `admin` / `user` / unknown — Overview · Collections · Claims Audit (Beta) · Code Reference
 - `super_admin` — the above plus Qualify (Beta), between Overview and Collections
 - `admissions_seat` — Qualify only (single-surface persona)
 
 Surfaces:
 
 - `/dashboard` (Overview) and `/dashboard/collections` — the primary product.
-- `/billing-audit` (labelled "Claims Desk") and `/qualify` + `/qualify/m` — both
+- `/billing-audit` (labelled "Claims Audit") and `/qualify` + `/qualify/m` — both
   currently behind a **refactor notice shown to everyone except
   `alec@treathealth.ai`**. Kill switches: `CLAIMS_AUDIT_MAINTENANCE` /
   `QUALIFY_MAINTENANCE` = `0`/`false`/`off`.

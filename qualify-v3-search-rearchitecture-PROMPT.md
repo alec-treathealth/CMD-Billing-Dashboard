@@ -39,7 +39,7 @@ You are **not** being asked to preserve the current compose-bar model. It is the
   and produce **byte-identical output** for blind and sighted roles. This is the constraint that most
   often gets quietly broken — check it on every new field.
 - Surgical `git add <file>`. Never `-A`. Never a `Co-Authored-By` trailer.
-- PRs open against `staging`, never `main`.
+- PRs open against `main` (⚠ was `staging` — **deleted 2026-08-14**; branch off `main`, `gh pr create --base main`).
 - The five-command gate is the bar for "verified": root `npm test`, root `npm run typecheck`,
   `cd app && npm test`, `cd app && npm run typecheck`, `cd app && npm run build`.
 - `/qualify` is behind `QUALIFY_MAINTENANCE` for everyone except `alec@treathealth.ai`. **Use that.**
@@ -487,12 +487,12 @@ shipped at least once.
 > `W26` contradiction where a populated policy card, a 12-patient ladder and a rating of 34 sit beside
 > "0 charge lines match".
 >
-> The one coordination cost is mechanical, not logical: both phases open PRs against `staging`, so
+> The one coordination cost is mechanical, not logical: both phases open PRs against `main`, so
 > whichever lands second rebases. Keep them in separate PRs (`P0` = migration + coverage report, `P1` =
 > classifier + I2 tests) so the crosswalk review is never blocked on classifier review or vice versa.
 
-Open a PR per phase against `staging`. Nothing merges to `main` except via a `staging → main`
-promotion PR. **A merged migration is not an applied migration** — code that depends on one 500s until
+Open a PR per phase against `main` (⚠ `staging` was deleted 2026-08-14; there is no promotion
+PR any more — a feature branch merges to `main` directly, after Alec reads the checks by hand). **A merged migration is not an applied migration** — code that depends on one 500s until
 `apply_migration` runs.
 
 ---

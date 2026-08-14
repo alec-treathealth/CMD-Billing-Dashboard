@@ -30,7 +30,10 @@
 #
 # RENAME WARNING — DO NOT edit `name:` below or rename the `gate` job key
 # without simultaneously updating the required-status-check string in
-# branch protection on BOTH `main` and `staging`. If the strings drift,
+# branch protection on `main`. (This said "BOTH `main` and `staging`" until
+# 2026-08-14, when `staging` was DELETED — feature branches PR straight to
+# `main` now, so `main` is the only branch carrying this contract.) If the
+# strings drift,
 # GitHub silently reports the old check name as "expected but never
 # reported" and the branch is un-mergeable until a repo admin either
 # re-adds the new name or removes the stale one. There is no in-repo

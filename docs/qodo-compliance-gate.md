@@ -6,8 +6,10 @@ workflow, and captures the rename hazard so it does not silently break merges.
 
 ## Required status check name
 
-Configure this **exact** string in branch protection on both `main` and
-`staging`:
+Configure this **exact** string in branch protection on `main` (⚠ this used to
+say "on both `main` and `staging`" — **`staging` was deleted 2026-08-14**, ruled
+poor dev practice; feature branches now PR straight to `main`, so `main` is the
+only branch that can carry this contract):
 
 ```
 Qodo Compliance Gate / gate
@@ -30,8 +32,8 @@ mismatch only surfaces on the next PR.
 
 Before editing `name:` or the `gate` job key:
 
-1. Open **Settings → Branches → Branch protection rules** for both `main`
-   and `staging` (or use the branch-protection REST API).
+1. Open **Settings → Branches → Branch protection rules** for `main` (or use
+   the branch-protection REST API). `staging` no longer exists — see above.
 2. In "Require status checks to pass before merging", remove the old
    `Qodo Compliance Gate / gate` entry and add the new
    `<new-name> / <new-job-key>` entry.
