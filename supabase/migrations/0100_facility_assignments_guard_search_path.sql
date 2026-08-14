@@ -1,0 +1,33 @@
+-- 0100 — pin search_path on collections.facility_assignments_guard()
+--
+-- WHY: Supabase security advisor WARN (lint 0011_function_search_path_mutable), live on
+--      2026-08-12 and flagged as P1-13 in the /qualify audit of the same date: the trigger
+--      function runs with the CALLER's role-mutable search_path, which is the classic
+--      privilege-escalation primitive for functions that resolve any unqualified name. This
+--      function's body touches only NEW/OLD and raises — it resolves no relations today — so
+--      pinning is pure hardening with no behavior change, and it stays safe if the body ever
+--      grows a lookup.
+-- PHI DISCIPLINE: no data read or written; catalog metadata (pg_proc.proconfig) only.
+-- OWNERSHIP: collections plane — relations and functions there are owned by postgres (measured
+--            2026-08-05). NO `SET ROLE claims_admin` — in this plane it DOWNGRADES the applying
+--            role to non-owner and fails 42501 (see .claude/rules/sql-migrations.md).
+-- IDEMPOTENT: ALTER FUNCTION ... SET overwrites the same proconfig entry; re-running converges.
+-- DEPENDENCY: collections.facility_assignments_guard() must exist (facility-assignments
+--             migration plane, applied live).
+-- Rollback: 0100_facility_assignments_guard_search_path_rollback.sql
+
+-- ── 1. Pin the search path ───────────────────────────────────────────────────────────────────────
+-- Empty is safe here: pg_catalog is always searched implicitly first, so plpgsql operators and
+-- built-ins still resolve; the body references nothing schema-qualified or unqualified beyond
+-- NEW/OLD fields and raise/format.
+alter function collections.facility_assignments_guard() set search_path = '';
+
+-- ── 2. Verification (run manually after apply) ───────────────────────────────────────────────────
+-- select p.proconfig
+--   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+--  where n.nspname = 'collections' and p.proname = 'facility_assignments_guard';
+-- -- expect: {"search_path="}  (one entry, pinned empty)
+--
+-- Exercise the guard still works: any UPDATE that mutates content on collections.facility_assignments
+-- must still raise 'facility_assignments: content is immutable'; a supersession stamp must still pass.
+-- Then re-run the security advisor — the 0011 WARN for this function should clear.

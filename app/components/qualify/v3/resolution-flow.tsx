@@ -2139,6 +2139,15 @@ function ScoreCard({
               <span className="text-xs font-semibold text-ink600">
                 {f.iqBand ? `${IQ_BAND_VERDICTS[f.iqBand]} · ${IQ_BAND_LABELS[f.iqBand]}` : ''}
               </span>
+              {/* THE SCALE, IN WORDS (audit 2026-08-12, P0-2 + P0-6): the numeral is a weighted
+                  composite out of 100, renormalized over the factors that have data — NOT a percent
+                  of billed. The band label above keeps the team's own "65%+" IQ vocabulary, so
+                  without this line the numeral inherits its % reading; and two cards showing equal
+                  numbers can be folds over DIFFERENT factor sets, which "of 100 weighting" is the
+                  disclosure ratingV2.ts designed availableWeight for. */}
+              <span className="text-xs text-ink400">
+                scored on <span className="ths-num">{f.availableWeight}</span> of 100 weighting
+              </span>
             </>
           ) : (
             <span className="max-w-[130px] text-right text-xs font-medium text-ink600">
@@ -3698,12 +3707,20 @@ export function StageAnswer(props: StageAnswerProps): React.ReactElement {
                          line above already reads "patient-weighted across N rated facilities" — the
                          same number, 12px away. `basis` is byte-pinned across two suites and is
                          untouched; only the JSX duplicate went. */
-                      <span className="text-xs text-ink600">
-                        <span className="ths-num" aria-label={`${rating.patients} patients behind this rating`}>
-                          {rating.patients.toLocaleString()}
-                        </span>{' '}
-                        patients
-                      </span>
+                      <>
+                        <span className="text-xs text-ink600">
+                          <span className="ths-num" aria-label={`${rating.patients} patients behind this rating`}>
+                            {rating.patients.toLocaleString()}
+                          </span>{' '}
+                          patients
+                        </span>
+                        {/* THE SCALE, IN WORDS (audit 2026-08-12, P0-2): "out of 100" was aria-only,
+                            while the ticker one strip up prints a TRUE allowed-% with a % suffix in
+                            the same band colours — three big numerals, two scales, and the only
+                            sighted cue was absent. The composite states its scale; the % suffix
+                            stays reserved for real percentages. */}
+                        <span className="text-xs text-ink400">Composite score out of 100 — not a % of billed.</span>
+                      </>
                     ) : null}
                   </div>
                 </>

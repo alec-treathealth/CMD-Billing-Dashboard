@@ -28,7 +28,7 @@ import {
 } from '../app/lib/qualify/core.js';
 import { requireQualifyPrincipalFromAccess } from '../app/lib/qualify/principal.js';
 import { QUALIFY_MIN_LINES } from '../app/lib/qualify/rating.js';
-import { qualifyWindowBounds, trailingWindow } from '../app/lib/qualify/contract.js';
+import { qualifyWindowBounds, trailingWindow, QUALIFY_CLIENT_NAME_ENABLED } from '../app/lib/qualify/contract.js';
 import { QUALIFY_CASES_MAX, type QualifyClaimRow } from '../src/collections/qualifyQuery.js';
 import type { CmdExplorerFilter } from '../src/collections/cmdExplorerQuery.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../app/lib/views.js';
@@ -90,6 +90,9 @@ function makeDeps(principal: () => ReturnType<typeof SUPER>, c: Cap, over: Parti
     mintToken: () => 'HMAC_TOKEN', // never the raw query
     mintGroupToken: () => 'GROUP_HMAC_TOKEN', // never the raw group #
     mintNameToken: () => 'NAME_HMAC_TOKEN', // never the raw name
+    // Enabled in the FIXTURE so the name-path behavior stays exercised while the shipped
+    // QUALIFY_CLIENT_NAME_ENABLED constant is false; the P0-3 tests below pin both deny branches.
+    clientNameEnabled: true,
     resolvePayer: async () => 'AETNA',
     loadFacilities: async (payer, _f, _t, entityIds, _market, token, kind) => {
       c.facilityEntityIds.push(entityIds);
@@ -1093,6 +1096,65 @@ test('name resolve: an unknown name (resolver null) yields the VOB shape; a seat
     assert.equal(f.billedAmount, null);
     assert.equal(f.allowedAmount, null);
   }
+});
+
+// ── P0-3 (audit 2026-08-12): the client-name kill switch binds the SERVER, not just the UI ─────────
+
+test('name resolve: switch OFF → refused BEFORE any mint, audit, or read — a disabled feature is disabled for a hand-crafted POST too', async () => {
+  const c = cap();
+  await assert.rejects(
+    () => getQualifySnapshotByNameCore(makeDeps(SUPER, c, { clientNameEnabled: false }), NAME_IN),
+    /disabled/,
+  );
+  assert.equal(c.audits.length, 0, 'refused before the audit write — nothing was searched');
+  assert.equal(c.facilitiesArgs.length, 0, 'and before any data read');
+});
+
+test('name resolve: clientNameEnabled ABSENT falls back to the shipped constant (fail-closed while the feature is dark)', async () => {
+  const c = cap();
+  const deps = makeDeps(SUPER, c);
+  delete deps.clientNameEnabled;
+  if (QUALIFY_CLIENT_NAME_ENABLED) {
+    const snap = await getQualifySnapshotByNameCore(deps, NAME_IN);
+    assert.equal(snap.resolved?.matchedOn, 'client_name', 'constant flipped on → the path works undelegated');
+  } else {
+    await assert.rejects(() => getQualifySnapshotByNameCore(deps, NAME_IN), /disabled/);
+    assert.equal(c.audits.length, 0, 'default-deny: no audit, no search');
+  }
+});
+
+test('cases drill: a clientName narrow with the switch OFF refuses — it must not silently widen to the un-narrowed set', async () => {
+  const c = cap();
+  await assert.rejects(
+    () =>
+      getQualifyFacilityCasesCore(makeDeps(SUPER, c, { clientNameEnabled: false }), {
+        payer: 'AETNA', facility: '405 recovery', window: W30, filter: { clientName: 'Jane Q Doe' },
+      }),
+    /disabled/,
+  );
+  assert.equal(c.facilityCasesArgs.length, 0, 'no case read happened');
+  // The refusal is the flag's, not the mint try/catch's: the message must NOT claim a transient fault.
+  await assert.rejects(
+    () =>
+      getQualifyFacilityCasesCore(makeDeps(SUPER, cap(), { clientNameEnabled: false }), {
+        payer: 'AETNA', facility: '405 recovery', window: W30, filter: { clientName: 'Jane Q Doe' },
+      }),
+    (err: Error) => !/temporarily unavailable/.test(err.message),
+  );
+});
+
+test('compose: a clientName term with the switch OFF refuses; PHI-free compose filters are untouched by the gate', async () => {
+  await assert.rejects(
+    () =>
+      getQualifyComposedCasesCore(makeDeps(SUPER, cap(), { clientNameEnabled: false }), {
+        payers: ['AETNA'], window: W30, clientName: 'Jane Q Doe',
+      }),
+    /disabled/,
+  );
+  const res = await getQualifyComposedCasesCore(makeDeps(SUPER, cap(), { clientNameEnabled: false }), {
+    payers: ['AETNA'], window: W30,
+  });
+  assert.ok(res, 'no clientName term → the switch is irrelevant and the compose path runs');
 });
 
 test('cases drill: a clientName filter mints the name token, narrows the drill, and audits field "client_name"', async () => {

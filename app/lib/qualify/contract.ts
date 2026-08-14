@@ -1068,6 +1068,25 @@ export type RevealQualifyRowsResult = { ok: true; rows: QualifyRevealedRow[] } |
 export const QUALIFY_BUSINESS_TZ = 'America/Los_Angeles';
 
 /**
+ * The ops calendar day (YYYY-MM-DD) in QUALIFY_BUSINESS_TZ — the ONE anchor every Qualify "today"
+ * must share. Vercel runs TZ=UTC, so from ~afternoon-to-midnight Pacific `new Date().toISOString()`
+ * is already tomorrow; a surface anchored on the raw UTC date disagrees with the ranking beside it
+ * by a whole day for that entire stretch (audit 2026-08-12, P1-1 — the v3 resolve and the tape
+ * context both had their own UTC anchors while qualifyWindowBounds below did this correctly).
+ * `now` is injectable so the math is unit-testable. formatToParts is locale-format-independent.
+ */
+export function qualifyBusinessDayIso(now: Date): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: QUALIFY_BUSINESS_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const part = (t: string) => parts.find((p) => p.type === t)!.value;
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
+/**
  * Window bounds for EVERY QualifyWindow shape. this=[from,to); prior=[priorFrom,priorTo) is the
  * previous EQUIVALENT period (trailing: the adjacent equal-length window; month: the previous
  * calendar month; year: the previous calendar year — the ruled Δ semantics). All calendar
@@ -1097,15 +1116,9 @@ export function qualifyWindowBounds(
     return { from: iso(from), to: iso(to), priorFrom: iso(priorFrom), priorTo: iso(from) };
   }
   const windowDays = window.days;
-  // Civil year/month/day in the business zone (formatToParts is locale-format-independent).
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: QUALIFY_BUSINESS_TZ,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(now);
-  const part = (t: string) => Number(parts.find((p) => p.type === t)!.value);
-  const anchor = new Date(Date.UTC(part('year'), part('month') - 1, part('day')));
+  // Civil year/month/day in the business zone — the shared anchor (qualifyBusinessDayIso above),
+  // so this and every other Qualify "today" cannot drift apart.
+  const anchor = new Date(`${qualifyBusinessDayIso(now)}T00:00:00Z`);
   const shift = (base: Date, days: number) =>
     new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate() + days));
   const to = shift(anchor, 1); // exclusive upper = tomorrow, so all of today is in-window

@@ -109,7 +109,8 @@ Refresh the rollup, then `VACUUM (ANALYZE)` it, or the index-only scan goes cold
 
 ## Deferred / known
 
-- Desktop stale-flash: the qualify tab shows the previous payer's facilities at
-  full opacity during an in-flight new search. Pre-existing; accepted.
+- ~~Desktop stale-flash~~ — FIXED, entry removed 2026-08-12 (audit §6 doc-rot finding): v2 clears
+  the snapshot before refetch (`qualify-tab.tsx` ~651) and v3 dims + suppresses claims in flight.
+  The MOBILE equivalent is still live and is audit finding P1-19 (Wave 4).
 - Mobile trend-sheet header lacks "City, ST" that the card and detail have.
 - Right-swipe has no test — needs jsdom pointer-event infrastructure.

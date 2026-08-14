@@ -16,6 +16,7 @@ import {
   qualifyWindowBounds,
   qualifyWindowLabel,
   qualifyRollingLabel,
+  qualifyBusinessDayIso,
   trailingWindow,
   QUALIFY_WINDOW_OPTIONS,
   QUALIFY_ROLLING_OPTIONS,
@@ -89,4 +90,34 @@ test('isQualifyWindow: structural + range validation; rolling 6/9/12mo valid; ju
   assert.equal(isQualifyWindow({ kind: 'nope' }), false);
   assert.deepEqual([...QUALIFY_WINDOW_OPTIONS], [30, 60, 90], 'quick pills stay 30/60/90');
   assert.deepEqual([...QUALIFY_ROLLING_OPTIONS], [180, 270, 365], 'rolling menu = 6/9/12 months');
+});
+
+// ── qualifyBusinessDayIso — THE shared "today" anchor (audit 2026-08-12, P1-1) ───────────────────
+// Vercel runs TZ=UTC; from ~afternoon-to-midnight Pacific the raw UTC date is already tomorrow. The
+// v3 resolve and the tape context used to anchor on the UTC slice while qualifyWindowBounds anchored
+// in business TZ, so the resolution evidence and the ranking beside it described different day
+// ranges for that whole stretch. These pins are the regression tripwire for any new anchor.
+
+test('businessDayIso: a UTC timestamp past midnight is STILL the previous Pacific day (PDT, UTC-7)', () => {
+  // 2026-08-13T03:00Z = 2026-08-12 20:00 PDT — the exact evening stretch the audit flagged.
+  assert.equal(qualifyBusinessDayIso(new Date('2026-08-13T03:00:00Z')), '2026-08-12');
+  // 06:59Z is 23:59 PDT (still the 12th); 07:01Z crosses Pacific midnight.
+  assert.equal(qualifyBusinessDayIso(new Date('2026-08-13T06:59:00Z')), '2026-08-12');
+  assert.equal(qualifyBusinessDayIso(new Date('2026-08-13T07:01:00Z')), '2026-08-13');
+});
+
+test('businessDayIso: winter (PST, UTC-8) shifts the boundary to 08:00Z — DST is handled by the zone, not hardcoded', () => {
+  assert.equal(qualifyBusinessDayIso(new Date('2026-01-15T07:59:00Z')), '2026-01-14');
+  assert.equal(qualifyBusinessDayIso(new Date('2026-01-15T08:01:00Z')), '2026-01-15');
+});
+
+test('businessDayIso agrees with the trailing-window anchor: bounds.to is ALWAYS business-today + 1', () => {
+  for (const iso of ['2026-08-13T03:00:00Z', '2026-08-12T18:00:00Z', '2026-01-15T07:59:00Z']) {
+    const now = new Date(iso);
+    const day = qualifyBusinessDayIso(now);
+    const b = qualifyWindowBounds(trailingWindow(30), now);
+    const next = new Date(`${day}T00:00:00Z`);
+    next.setUTCDate(next.getUTCDate() + 1);
+    assert.equal(b.to, next.toISOString().slice(0, 10), `${iso}: one anchor, every surface`);
+  }
 });

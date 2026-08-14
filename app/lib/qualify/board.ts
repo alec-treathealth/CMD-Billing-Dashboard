@@ -227,8 +227,6 @@ export function tapePairKey(token: string, payer: string): string {
   return `${token}${TAPE_PAIR_SEP}${payer}`;
 }
 
-const TAPE_BANDS: ReadonlySet<string> = new Set(['65', '50', '30', '15', '0']);
-
 /** Gate → load → assemble. NO audit: same non-PHI-aggregate posture as movers/KPIs/trends. */
 export async function getQualifyPolicyTapeCore(deps: QualifyBoardDeps): Promise<QualifyPolicyTapeResult> {
   const gate = await deps.requirePrincipal();
@@ -267,8 +265,11 @@ export async function getQualifyPolicyTapeCore(deps: QualifyBoardDeps): Promise<
     area: context.get(tapePairKey(r.member_id_prefix_bidx, r.primary_payer))?.area ?? null,
     facilityCount: context.get(tapePairKey(r.member_id_prefix_bidx, r.primary_payer))?.facilityCount ?? 0,
     ratingNow: r.rating_now,
-    // Recompute the band from the number rather than trusting stored text — the two cannot drift.
-    bandNow: TAPE_BANDS.has(r.band_now ?? '') ? (r.band_now as QualifyIqBand) : iqBandOf(r.rating_now),
+    // Recompute the band from the number, NEVER from stored text (audit 2026-08-12, P1-3: the old
+    // code preferred a VALID-looking stored band, so a drifted row — rating_now 51, band_now '30' —
+    // shipped the numeral in the wrong band's color and told the AI explainer the wrong band).
+    // band_now stays on the row type for the cron's write path; reads always derive.
+    bandNow: iqBandOf(r.rating_now),
     ratingThen: r.rating_then,
     deltaPts: r.delta_pts,
     distinctMembers: r.distinct_members,

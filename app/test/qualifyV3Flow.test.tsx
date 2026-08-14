@@ -2033,6 +2033,7 @@ function facility(over: Partial<QualifyFacility>): QualifyFacility {
     state: 'TN',
     ratingV2: 62,
     iqBand: '50', // the real QualifyIqBand vocabulary — renders as "Solid · 50%+"
+    availableWeight: 25, // claims(25) available, the rest excluded — the "scored on N of 100" basis (P0-2)
     // ⚠ STATED, NOT OMITTED (S3). The core sets this on EVERY row of every list, and a fixture that
     // leaves it absent is the S2-D6 defect again: `undefined` is not `null`, so a render guard
     // written as `=== null` would fall through under test while working in production — or, as here,
@@ -3533,6 +3534,18 @@ test('S3 flip — the HERO is derived from the list that LEADS, and its basis SA
   // THE CAPTION NAMES THE POPULATION. "patient-weighted across 2 rated facilities" is true of both
   // lists and therefore identifies neither.
   assert.match(html, /patient-weighted across 2 rated facilities in AETNA US HEALTHCARE&#x27;s whole book/);
+});
+
+test('P0-2 (audit 2026-08-12) — the composite states its SCALE in words: hero disclaimer + per-card weighting basis', () => {
+  // The hero numeral is a renormalized composite; the ticker one strip up prints a TRUE allowed-%
+  // with a % suffix in the same band colours. "out of 100" used to be aria-only, so a sighted rep
+  // had three big numerals and two scales with no cue. These strings are the tripwire — dropping or
+  // rewording them in a refactor must fail here, the way facility-panel's twin is pinned.
+  const html = answerHtml(ledSnapshot());
+  assert.match(html, /Composite score out of 100 — not a % of billed\./);
+  // Every rated card carries the availableWeight basis (the disclosure ratingV2.ts designed): two
+  // equal numerals folded over DIFFERENT factor sets must say so on the card, not only in a panel.
+  assert.match(html, /scored on <span[^>]*>25<\/span> of 100 weighting/);
 });
 
 test('S3 annotation — the facility the member has been to is MARKED; the others are not', () => {

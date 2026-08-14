@@ -29,6 +29,7 @@
  * that could be forgotten.
  */
 import { requireQualifyPrincipal } from '@/lib/qualify/gate';
+import { qualifyBusinessDayIso } from '@/lib/qualify/contract';
 import { resolveCoverage, trailingWindowFor } from '@/lib/qualify/resolutionService';
 
 /**
@@ -47,16 +48,18 @@ import { resolveCoverage, trailingWindowFor } from '@/lib/qualify/resolutionServ
 import type { V3FlowState } from '@/lib/qualify/v3FlowState';
 
 /**
- * Bounded window widths. An out-of-range value falls back rather than reaching SQL.
+ * The resolve window width is PINNED server-side — no form field moves it (audit 2026-08-12: the
+ * old `windowDays` FormData read was dead code — no form ever sent it — and a client-movable
+ * resolve window would let the resolution evidence and the ranking window drift apart, which is
+ * exactly the P1-1 asymmetry the business-day anchor below closes).
  *
- * The default is WIDE (365) on purpose — the resolution stages answer "does this plan have history
- * AT ALL", which is a wide question: at the old 30-day default, a plan whose last claim paid 60 days
- * ago showed "No claim history" on its tile, which is false in the sense the rep reads it. Recency
- * honesty belongs to the ANSWER stage, whose snapshot runs its own auto-window ladder and disclosed
+ * WIDE (365) on purpose — the resolution stages answer "does this plan have history AT ALL", which
+ * is a wide question: at the old 30-day default, a plan whose last claim paid 60 days ago showed
+ * "No claim history" on its tile, which is false in the sense the rep reads it. Recency honesty
+ * belongs to the ANSWER stage, whose snapshot runs its own auto-window ladder and disclosed
  * rationale (docs/qualify-v3-search-pattern.md §Window policy).
  */
 const DEFAULT_WINDOW_DAYS = 365;
-const MAX_WINDOW_DAYS = 3650;
 
 function intField(form: FormData, name: string): number | null {
   const raw = form.get(name);
@@ -79,10 +82,12 @@ export async function resolveCoverageAction(_prev: V3FlowState, form: FormData):
   const rawTerm = form.get('term');
   const term = typeof rawTerm === 'string' ? rawTerm : '';
 
-  const daysRaw = intField(form, 'windowDays');
-  const days = daysRaw !== null && daysRaw > 0 && daysRaw <= MAX_WINDOW_DAYS ? daysRaw : DEFAULT_WINDOW_DAYS;
-  const today = new Date().toISOString().slice(0, 10);
-  const window = trailingWindowFor(today, days);
+  // "Today" is the ops calendar day in the business zone, NOT the server's UTC day — from
+  // ~afternoon-to-midnight Pacific the raw UTC date is already tomorrow, and the ranking beside
+  // this resolution anchors in business TZ (contract.ts qualifyWindowBounds), so a UTC anchor here
+  // made the two describe different day ranges for that whole stretch (audit 2026-08-12, P1-1).
+  const today = qualifyBusinessDayIso(new Date());
+  const window = trailingWindowFor(today, DEFAULT_WINDOW_DAYS);
 
   const candidateRaw = intField(form, 'candidate');
   const { resolution, reason } = await resolveCoverage({
