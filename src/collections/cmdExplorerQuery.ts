@@ -180,7 +180,7 @@ export function cmdExplorerBaseConds(
   // narrows, empty/absent is omitted entirely (never `= any(ARRAY[]::text[])`, which matches
   // nothing). A direct column match on the collections row — NOT the retired VOB semi-join.
   if (Array.isArray(filter.employer_names) && filter.employer_names.length > 0) {
-    conds.push(`employer_name = any(${add(filter.employer_names)}::text[])`);
+    conds.push(`(to_jsonb(t)->>'employer_name') = any(${add(filter.employer_names)}::text[])`);
   }
   // VOB employer / funding market filters — shared semi-join helper (member_id_bidx IN (…); see
   // buildVobMarketSemiJoin for why it's a semi-join, not a JOIN). Applies identically to the grid and
@@ -609,7 +609,7 @@ export const CMD_EXPLORER_SELECT =
   "select id, to_char(charge_date, 'YYYY-MM-DD') as charge_date, " +
   "to_char(payment_received, 'YYYY-MM-DD') as payment_received, cpt_code, revenue_code, " +
   'facility, charge_amount, allowed_amount, insurance_payments, adjustments, ' +
-  'patient_balance_due, primary_payer, employer_name, pct_allowed, pct_paid, ' +
+  'patient_balance_due, primary_payer, (to_jsonb(t)->>\'employer_name\') as employer_name, pct_allowed, pct_paid, ' +
   `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
   // Aliased `t` SO THE ORDER BY CAN TARGET THE RAW COLUMN: the two date columns are projected as
   // `to_char(<date>, 'YYYY-MM-DD') AS <date>` (output name == column name), and an UNQUALIFIED
@@ -694,7 +694,7 @@ export function buildCmdExplorerQuery(
     `select id, to_char(charge_date, 'YYYY-MM-DD') as charge_date, ` +
     `to_char(payment_received, 'YYYY-MM-DD') as payment_received, cpt_code, revenue_code, ` +
     `facility, charge_amount, allowed_reliable as allowed_amount, insurance_payments, adjustments, ` +
-    `patient_balance_due, primary_payer, employer_name, pct_allowed, pct_paid, ` +
+    `patient_balance_due, primary_payer, (to_jsonb(t)->>'employer_name') as employer_name, pct_allowed, pct_paid, ` +
     `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} ` +
     `order by t.${col} ${dir} nulls last, t.id ${dir} limit ${add(limit)}`;
