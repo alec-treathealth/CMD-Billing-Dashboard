@@ -17,6 +17,7 @@ import { ClaimDetailSheet } from '../components/qualify/m/claim-detail-sheet';
 import { AreaChips, deriveAreaChips, facilitiesInArea, AREA_ALL, AREA_OTHER } from '../components/qualify/m/area-chips';
 import { qualifyRating } from '../lib/qualify/rating';
 import { mobileBucketStyle } from '../components/qualify/m/colors';
+import { IQ_BAND_HEX } from '../components/qualify/tokens';
 import type { QualifyFacility, QualifyClaim, QualifyPhi } from '../lib/qualify/contract';
 import { QUALIFY_FACILITY_V2_NULLS } from './helpers/qualifyV2Fixture';
 
@@ -101,7 +102,12 @@ test('SAMPLE GATE (mobile) — a 1-patient card is neutral + "Insufficient", rat
   const thin = { ...FAC, distinctPatients: 1 };
   const thinHtml = renderToStaticMarkup(<SwipeRow facility={thin} onWhy={noop} onOpen={noop} />);
   assert.ok(thinHtml.includes('Insufficient'), 'a <3-patient card labels "Insufficient"');
-  assert.ok(thinHtml.includes('#6B7B79') || thinHtml.includes('rgb(107, 123, 121)'), 'neutral gray, not a rating color');
+  // Read the token, do not restate it: this assertion pinned the literal #6B7B79 and broke when the
+  // Wave 3 contrast pass darkened the neutral to #5F6D6C (3.79:1 on its own tint was a fail). What
+  // it exists to prove is that a sub-floor sample paints the NEUTRAL style rather than a rating
+  // colour — a claim about which token is chosen, not about what that token's value happens to be.
+  const neutral = mobileBucketStyle(null).color;
+  assert.ok(thinHtml.includes(neutral) || thinHtml.includes(neutral.toLowerCase()), 'neutral gray, not a rating color');
   assert.ok(!/>61<\/div>/.test(thinHtml), 'the confident rating number is suppressed');
   assert.ok(/1 patient\b/.test(thinHtml), 'patient count visible');
   // Adequate sample → color + rating intact (the gate suppresses thin slices, not the rating).
@@ -497,12 +503,14 @@ test('SwipeRow v2: an IQ-banded facility renders the v2 numeral + verdict label,
   const html = renderToStaticMarkup(<SwipeRow facility={rated} onWhy={noop} onOpen={noop} />);
   assert.ok(html.includes('>72<'), 'v2 numeral renders (never the rounded v1 rating)');
   assert.ok(html.includes('Strong 65%+'), 'IQ verdict + band label');
-  assert.ok(html.includes('#2E8B6F'), 'band-65 green drives the card accents');
+  assert.ok(html.includes(mobileIqStyle('65').color), 'band-65 green drives the card accents');
   // Fallback: no v2 rating → the v1 bucket presentation survives untouched.
   const legacy = renderToStaticMarkup(<SwipeRow facility={{ ...FAC, distinctPatients: 14 }} onWhy={noop} onOpen={noop} />);
   assert.ok(legacy.includes(String(Math.round(FAC.rating as number))), 'v1 numeral fallback');
   // mobileIqStyle: every band mapped; null → the neutral style (no fabricated color).
-  assert.equal(mobileIqStyle('0').color, '#C0453B');
+  // The VALUE is asserted by app/test/ths-tokens-contrast.test.tsx (which checks it against every
+  // surface it paints on); here we only need band 0 to resolve to a real, distinct style.
+  assert.equal(mobileIqStyle('0').color, IQ_BAND_HEX['0']);
   assert.equal(mobileIqStyle(null).label, mobileBucketStyle(null).label);
 });
 

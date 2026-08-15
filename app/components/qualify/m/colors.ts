@@ -23,11 +23,22 @@ export interface MobileBucketStyle {
   label: string;
 }
 
+/**
+ * ⚠ THE `color` VALUES ARE DARKENED AGAINST THEIR OWN TINT (audit M4 / M5, 2026-08-14), NOT AGAINST
+ * WHITE. Every one of these four bucket styles used to fail 4.5:1 on the tint it ships with — ok
+ * 3.68, warn 2.67, danger 4.35, neutral 3.79 — and the tint is where they actually render (behind
+ * the facility icon, in the KPI tiles). They also paint the VERDICT WORD at 12px on white
+ * (swipe-row), which is small text. So both surfaces bind, and the darker of the two wins.
+ * Mirrors tokens.ts RATING_HEX exactly; a drift test pins the pair.
+ *
+ * The rating NUMBER at 20px/700 qualified as large text and passed all along — the verdict word
+ * beneath it did not, and the verdict word is the part a rep actually reads.
+ */
 const STYLES: Record<RatingBucket, MobileBucketStyle> = {
-  ok: { color: '#2E8B6F', tint: '#EAF3EE', label: 'Strong' },
-  warn: { color: '#C9881E', tint: '#FBF1E0', label: 'Typical' },
-  danger: { color: '#C0453B', tint: '#FBEAEA', label: 'Weak' },
-  neutral: { color: '#6B7B79', tint: '#EFEDE7', label: '—' },
+  ok: { color: '#287860', tint: '#EAF3EE', label: 'Strong' },
+  warn: { color: '#936316', tint: '#FBF1E0', label: 'Typical' },
+  danger: { color: '#B64138', tint: '#FBEAEA', label: 'Weak' },
+  neutral: { color: '#5F6D6C', tint: '#EFEDE7', label: '—' },
 };
 
 export function mobileBucketStyle(rating: number | null): MobileBucketStyle {
@@ -39,12 +50,15 @@ export function mobileBucketStyle(rating: number | null): MobileBucketStyle {
 // IQ_BAND_HEX/WASH; the label is the verdict + the band the team already speaks.
 import { IQ_BAND_LABELS, IQ_BAND_VERDICTS, type QualifyIqBand } from '../../../lib/qualify/ratingV2';
 
+/** Same darkening as STYLES above and for the same reason; mirrors tokens.ts IQ_BAND_HEX exactly.
+ *  Band 15 is #AD4F2A rather than the pure lightness-solve #C43B20 so it stays visually separable
+ *  from band 0's red — see the tier-separation note in tokens.ts IQ_BAND_HEX. */
 const IQ_STYLES: Record<QualifyIqBand, MobileBucketStyle> = {
-  '65': { color: '#2E8B6F', tint: '#EAF3EE', label: `${IQ_BAND_VERDICTS['65']} ${IQ_BAND_LABELS['65']}` },
-  '50': { color: '#1C8B82', tint: '#EAF4F2', label: `${IQ_BAND_VERDICTS['50']} ${IQ_BAND_LABELS['50']}` },
-  '30': { color: '#C9881E', tint: '#FBF1E0', label: `${IQ_BAND_VERDICTS['30']} ${IQ_BAND_LABELS['30']}` },
-  '15': { color: '#E2674F', tint: '#FCEDE8', label: `${IQ_BAND_VERDICTS['15']} ${IQ_BAND_LABELS['15']}` },
-  '0': { color: '#C0453B', tint: '#FBEAEA', label: `${IQ_BAND_VERDICTS['0']} ${IQ_BAND_LABELS['0']}` },
+  '65': { color: '#287860', tint: '#EAF3EE', label: `${IQ_BAND_VERDICTS['65']} ${IQ_BAND_LABELS['65']}` },
+  '50': { color: '#197A72', tint: '#EAF4F2', label: `${IQ_BAND_VERDICTS['50']} ${IQ_BAND_LABELS['50']}` },
+  '30': { color: '#936316', tint: '#FBF1E0', label: `${IQ_BAND_VERDICTS['30']} ${IQ_BAND_LABELS['30']}` },
+  '15': { color: '#AD4F2A', tint: '#FCEDE8', label: `${IQ_BAND_VERDICTS['15']} ${IQ_BAND_LABELS['15']}` },
+  '0': { color: '#B64138', tint: '#FBEAEA', label: `${IQ_BAND_VERDICTS['0']} ${IQ_BAND_LABELS['0']}` },
 };
 
 /** v2 style: IQ band when rated; the neutral v1 style when not. Mobile renders ONE scale — the

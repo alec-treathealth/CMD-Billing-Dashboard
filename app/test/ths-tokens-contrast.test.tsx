@@ -20,7 +20,18 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { TAPE_PALETTE, QUALIFY_PALETTE } from '../components/qualify/tokens';
+import {
+  TAPE_PALETTE,
+  QUALIFY_PALETTE,
+  RATING_HEX,
+  RATING_WASH,
+  IQ_BAND_HEX,
+  IQ_BAND_WASH,
+  FOCUS_RING_HEX,
+} from '../components/qualify/tokens';
+import { mobileBucketStyle, mobileIqStyle } from '../components/qualify/m/colors';
+import { IQ_BAND_ORDER } from '../lib/qualify/ratingV2';
+import type { RatingBucket } from '../lib/qualify/rating';
 
 const cssPath = new URL('../app/ths-v2.css', import.meta.url);
 const css = readFileSync(cssPath, 'utf8');
@@ -175,9 +186,21 @@ test('Smoke primitives are present with the shapes the shell will consume', () =
 const TAPE_SRC = readFileSync(new URL('../components/qualify/policy-tape.tsx', import.meta.url), 'utf8');
 
 test('policy-tape paints from TAPE_PALETTE, not from a private copy of the same hexes', () => {
-  assert.match(TAPE_SRC, /import \{ IQ_BAND_HEX, TAPE_PALETTE \} from '\.\/tokens';/);
+  assert.match(TAPE_SRC, /import \{ TAPE_PALETTE \} from '\.\/tokens';/);
   assert.match(TAPE_SRC, /TAPE_PALETTE\.up/, 'the up colour comes from the token');
   assert.match(TAPE_SRC, /TAPE_PALETTE\.down/, 'and so does the down colour');
+  // ⚠ THIS ASSERTION INVERTED ON 2026-08-14 (audit C-4), and the inversion is the fix. It used to
+  // REQUIRE `import { IQ_BAND_HEX, TAPE_PALETTE }` — i.e. the guard against inlined hexes was
+  // simultaneously pinning the import of the light-surface palette that the rating numeral was
+  // wrongly painted with, on the dark strip, at 2.47-4.17:1. A test can hold a bug in place; this
+  // one did. The band numeral now paints from TAPE_PALETTE.band and IQ_BAND_HEX must not come back
+  // into this file at all.
+  assert.match(TAPE_SRC, /TAPE_PALETTE\.band\[band\]/, 'the rating numeral uses the INVERSE-surface band set');
+  assert.doesNotMatch(
+    TAPE_SRC,
+    /style=\{\{ color: IQ_BAND_HEX/,
+    'IQ_BAND_HEX is measured on WHITE — painting it on the tape is the exact mistake tokens.ts warns about',
+  );
   // The private pair must not come back — it is the copy the guard could not see. ANCHORED TO THE
   // LINE START: a top-level `const` sits at column 0, while the file's own docblock names the
   // deleted constants so the history stays readable. An unanchored needle would fail on the prose
@@ -197,4 +220,133 @@ test('the surface the tape actually paints on is the one the ratios were measure
     'policy-tape renders on bg-teal900; if that is not surfaceInverse, section 1 measures a colour ' +
       'nothing displays and the tape could ship at any contrast at all',
   );
+});
+
+// ── 8. THE BUCKET / BAND TEXT SCALE CLEARS AA ON EVERY SURFACE IT PAINTS ────────────────────────
+//
+// Added 2026-08-14 for the Wave 3 a11y audit (C-5, M4, M5), and the shape of these assertions is
+// the finding. The audit measured every one of these pairs FAILING, and the reason the failure
+// survived so long is that the obvious check — "is this colour readable on white?" — is the wrong
+// check. Each of these hexes is painted on its OWN light WASH at least as often as on white
+// (`.q-heat .q-pctcell`, the mobile tint behind the facility icon, the KPI tiles), and a wash is a
+// lighter ground than white, so it is always the tighter constraint. Verifying against white alone
+// is how `warn` shipped at 2.67:1 while looking fine in a designer's swatch.
+//
+// All of it is SMALL text — `.q-pctcell` at 13px, the mobile verdict word at 12px, the tile numbers
+// at 20px/600 — so the bar is 4.5:1, not the 3:1 large-text allowance.
+const AA_TEXT = 4.5;
+
+function assertPair(fg: string, bg: string, what: string) {
+  const ratio = contrast(fg, bg);
+  assert.ok(
+    ratio >= AA_TEXT,
+    `${what}: ${fg} on ${bg} is ${ratio.toFixed(2)}:1 — below the ${AA_TEXT}:1 AA floor for text this size`,
+  );
+}
+
+test('desktop bucket colours clear AA on white AND on their own heat wash', () => {
+  for (const bucket of ['ok', 'warn', 'danger', 'neutral'] as RatingBucket[]) {
+    const fg = RATING_HEX[bucket];
+    assertPair(fg, QUALIFY_PALETTE.surface, `RATING_HEX.${bucket} on surface`);
+    const wash = RATING_WASH[bucket];
+    // neutral washes to `transparent`, i.e. it renders on whatever is behind it — always the card.
+    if (wash !== 'transparent') assertPair(fg, wash, `RATING_HEX.${bucket} on its wash`);
+  }
+});
+
+test('IQ band colours clear AA on white AND on their own band wash', () => {
+  for (const band of IQ_BAND_ORDER) {
+    assertPair(IQ_BAND_HEX[band], QUALIFY_PALETTE.surface, `IQ_BAND_HEX['${band}'] on surface`);
+    assertPair(IQ_BAND_HEX[band], IQ_BAND_WASH[band], `IQ_BAND_HEX['${band}'] on its wash`);
+  }
+});
+
+test('the MOBILE bucket + band styles clear AA on their own tint (the surface they actually paint on)', () => {
+  // Mobile styles inline and cannot read a CSS custom property, so it keeps its own copy of the
+  // scale — which is exactly why it drifted out of compliance independently and needs its own
+  // assertions rather than inheriting the desktop ones.
+  for (const bucket of ['ok', 'warn', 'danger', 'neutral'] as RatingBucket[]) {
+    const s = mobileBucketStyle(bucket === 'ok' ? 100 : bucket === 'warn' ? 40 : bucket === 'danger' ? 10 : null);
+    assertPair(s.color, s.tint, `mobile bucket ${bucket} on its tint`);
+    assertPair(s.color, QUALIFY_PALETTE.surface, `mobile bucket ${bucket} on white`);
+  }
+  for (const band of IQ_BAND_ORDER) {
+    const s = mobileIqStyle(band);
+    assertPair(s.color, s.tint, `mobile band ${band} on its tint`);
+    assertPair(s.color, QUALIFY_PALETTE.surface, `mobile band ${band} on white`);
+  }
+});
+
+test('the mobile scale has not drifted from the desktop tokens it mirrors', () => {
+  // The whole reason mobile fails independently: two copies of one palette. Pin them together so a
+  // future contrast fix on one side cannot silently leave the phone behind.
+  for (const band of IQ_BAND_ORDER) {
+    assert.equal(
+      mobileIqStyle(band).color.toUpperCase(),
+      IQ_BAND_HEX[band].toUpperCase(),
+      `m/colors.ts IQ_STYLES['${band}'] and tokens.ts IQ_BAND_HEX['${band}'] have drifted`,
+    );
+  }
+});
+
+// ── 9. THE TAPE'S BAND NUMERAL — the C-4 finding, pinned ───────────────────────────────────────
+//
+// policy-tape.tsx painted IQ_BAND_HEX on #0E3A3A and measured 2.99 / 3.01 / 4.17 / 3.73 / 2.47.
+// Band 0 — "Avoid", the strongest warning the scale can give — was the LEAST legible number on the
+// strip. Section 1 above already guards the movement colours; this guards the numeral, which is the
+// value an operator actually reads off the tape.
+test('tape band numerals clear AA on the inverse surface', () => {
+  for (const band of IQ_BAND_ORDER) {
+    assertPair(TAPE_PALETTE.band[band], TAPE_PALETTE.surfaceInverse, `TAPE_PALETTE.band['${band}'] on the tape`);
+  }
+});
+
+test('the tape band set is DISTINCT from the light-surface set it is so easily confused with', () => {
+  // Not a contrast assertion — an anti-drift one. The two objects are named for the same five
+  // bands and differ only in the surface they were measured against, which is precisely why
+  // someone "tidied" one into the other once already (see the ⚠ block in tokens.ts).
+  for (const band of IQ_BAND_ORDER) {
+    assert.notEqual(
+      TAPE_PALETTE.band[band].toUpperCase(),
+      IQ_BAND_HEX[band].toUpperCase(),
+      `TAPE_PALETTE.band['${band}'] equals IQ_BAND_HEX['${band}'] — the light-surface value cannot be ` +
+        `correct on #0E3A3A, so this is the two palettes having been merged`,
+    );
+  }
+});
+
+// ── 10. THE GLOBAL FOCUS RING WORKS ON BOTH GROUNDS ────────────────────────────────────────────
+//
+// One ring colour serves a light app and a dark strip. It is a NON-text indicator, so the bar is
+// 3:1 (SC 1.4.11), but it must clear that on BOTH grounds — which pins its luminance into a narrow
+// window and is why it is its own token rather than a reuse of teal500 (3.01 on teal900) or
+// TAPE_PALETTE.up (2.13 on white).
+test('the global focus ring clears 3:1 on both the light surface and the dark tape', () => {
+  const AA_NON_TEXT = 3;
+  for (const [name, bg] of [
+    ['surface', QUALIFY_PALETTE.surface],
+    ['ground', QUALIFY_PALETTE.ground],
+    ['teal900', TAPE_PALETTE.surfaceInverse],
+  ] as const) {
+    const ratio = contrast(FOCUS_RING_HEX, bg);
+    assert.ok(
+      ratio >= AA_NON_TEXT,
+      `FOCUS_RING_HEX ${FOCUS_RING_HEX} is ${ratio.toFixed(2)}:1 on ${name} (${bg}) — below the 3:1 floor`,
+    );
+  }
+});
+
+test('globals.css actually declares the :focus-visible fallback, with the token colour', () => {
+  // The reason this is a source assertion and not a render one: the defect was the ABSENCE of a
+  // rule. Nothing about a missing stylesheet rule is observable from a component test, which is
+  // why an app with zero focus styling passed every suite it had for months.
+  const globals = readFileSync(new URL('../app/globals.css', import.meta.url), 'utf8');
+  const rule = /:focus-visible\s*\{[^}]*outline:[^;]*#2f9a90/i;
+  assert.match(
+    globals,
+    rule,
+    'globals.css has no :focus-visible fallback painting FOCUS_RING_HEX — every inline `outline: none` ' +
+      'control is invisible to a keyboard user again (SC 2.4.7)',
+  );
+  assert.equal(FOCUS_RING_HEX.toUpperCase(), '#2F9A90', 'the token and the stylesheet must agree');
 });
