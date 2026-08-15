@@ -120,6 +120,11 @@ const INSERT_COLS = [
 
 const BATCH = 500;
 
+// Migration 0101 is applied separately from application deploys. Keep writes compatible with
+// older production schemas until the deployment explicitly enables the new column.
+const EMPLOYER_NAME_ENABLED = process.env.CMD_EMPLOYER_NAME_ENABLED === 'true';
+
+
 /** A fully-validated, typed row ready for fingerprinting + (at insert) encryption.
  *  PHI fields hold PLAINTEXT here; they are encrypted only at the insert boundary.
  *  Exported so the cron (cmdExplorerCron.ts) reuses the exact same row shape. */
@@ -451,14 +456,15 @@ export async function insertRows(
     const paramRows = await Promise.all(batch.map((r) => buildInsertParams(r, businessEntityId)));
     inserted += await withTenant(db, businessEntityId, async (client) => {
       const params: unknown[] = [];
-      const tuples = paramRows.map((vals) => {
+      const tuples = paramRows.map((rawVals) => {
+        const vals = EMPLOYER_NAME_ENABLED ? rawVals : rawVals.slice(0, -1);
         const base = params.length;
         params.push(...vals);
         return `(${vals.map((_, i) => `$${base + i + 1}`).join(', ')})`;
       });
       const sql =
-        `insert into collections.cmd_explorer_rows (${INSERT_COLS.join(', ')}) ` +
-        `values ${tuples.join(', ')} on conflict (row_fingerprint) do nothing`;
+        `insert into collections.cmd_explorer_rows (${(EMPLOYER_NAME_ENABLED ? INSERT_COLS : INSERT_COLS.slice(0, -1)).join(', ')}) ` +
+        `values ${tuples.map((tuple) => EMPLOYER_NAME_ENABLED ? tuple : tuple.slice(0, tuple.lastIndexOf(', '))).join(', ')} on conflict (row_fingerprint) do nothing`;
       const res = await client.query(sql, params);
       return res.rowCount ?? 0;
     });

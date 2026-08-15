@@ -228,7 +228,7 @@ export function cmdExplorerBaseConds(
   // this set is independently reachable. It is not; it is keyed by an id the outer query owns.
   //
   // Same empty-array discipline as facility/primary_payers: NON-EMPTY narrows, empty/absent omits.
-  if (Array.isArray(filter.employer_names) && filter.employer_names.length > 0) {
+  if (EMPLOYER_NAME_ENABLED && Array.isArray(filter.employer_names) && filter.employer_names.length > 0) {
     conds.push(
       `id in (select e.id from collections.cmd_explorer_rows e ` +
         `where e.employer_name = any(${add(filter.employer_names)}::text[]))`,
@@ -245,12 +245,12 @@ export function cmdExplorerBaseConds(
   // 'individual' is the exact complement, INCLUDING the empty string, so the two segments always
   // partition the book — every row is in exactly one, and 'employer' + 'individual' always sums to
   // 'all'. A reader comparing segment counts to the unfiltered total must never find a gap.
-  if (filter.employerMode === 'employer') {
+  if (EMPLOYER_NAME_ENABLED && filter.employerMode === 'employer') {
     conds.push(
       `id in (select e.id from collections.cmd_explorer_rows e ` +
         `where e.employer_name is not null and e.employer_name <> '')`,
     );
-  } else if (filter.employerMode === 'individual') {
+  } else if (EMPLOYER_NAME_ENABLED && filter.employerMode === 'individual') {
     conds.push(
       `id in (select e.id from collections.cmd_explorer_rows e ` +
         `where e.employer_name is null or e.employer_name = '')`,
@@ -727,11 +727,14 @@ export interface CmdExplorerPage {
 // numeric money stays a fixed-2-decimal string. pct_allowed / pct_paid are the GENERATED STORED
 // payer-gap ratios (migration 0038) — non-PHI numerics that arrive as decimal strings (or null),
 // formatted as percentages client-side. id (bigserial) is the keyset + reveal key.
+const EMPLOYER_NAME_ENABLED = process.env.CMD_EMPLOYER_NAME_ENABLED === 'true';
+
 export const CMD_EXPLORER_SELECT =
   "select id, to_char(charge_date, 'YYYY-MM-DD') as charge_date, " +
   "to_char(payment_received, 'YYYY-MM-DD') as payment_received, cpt_code, revenue_code, " +
   'facility, charge_amount, allowed_amount, insurance_payments, adjustments, ' +
-  'patient_balance_due, primary_payer, pct_allowed, pct_paid, employer_name, ' +
+  'patient_balance_due, primary_payer, pct_allowed, pct_paid, ' +
+  (EMPLOYER_NAME_ENABLED ? 'employer_name, ' : '') +
   `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
   // Aliased `t` SO THE ORDER BY CAN TARGET THE RAW COLUMN: the two date columns are projected as
   // `to_char(<date>, 'YYYY-MM-DD') AS <date>` (output name == column name), and an UNQUALIFIED
@@ -846,7 +849,7 @@ export function buildCmdExplorerQuery(
   // `p.*` is safe here (not a `select *` over a table): `p` is this function's own fixed projection
   // immediately above, so the column list stays explicit and allowlisted.
   const sql =
-    `select p.*, e.employer_name from (` +
+    `select p.*${EMPLOYER_NAME_ENABLED ? ', e.employer_name' : ''} from (` +
     `select t.id, to_char(t.charge_date, 'YYYY-MM-DD') as charge_date, ` +
     `to_char(t.payment_received, 'YYYY-MM-DD') as payment_received, t.cpt_code, t.revenue_code, ` +
     `t.facility, t.charge_amount, t.allowed_reliable as allowed_amount, t.insurance_payments, ` +
@@ -854,7 +857,7 @@ export function buildCmdExplorerQuery(
     `to_char(t.ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} ` +
     `order by t.${col} ${dir} nulls last, t.id ${dir} limit ${add(limit)}` +
-    `) p left join collections.cmd_explorer_rows e on e.id = p.id ` +
+    (EMPLOYER_NAME_ENABLED ? `) p left join collections.cmd_explorer_rows e on e.id = p.id ` : ') p ') +
     // Re-stated on the OUTER query: a LEFT JOIN does not preserve the subquery's ordering, and the
     // keyset cursor is built from the LAST ROW of this result set — an unordered page would hand
     // back a cursor for an arbitrary row and silently skip or repeat pages. This re-sort is over
