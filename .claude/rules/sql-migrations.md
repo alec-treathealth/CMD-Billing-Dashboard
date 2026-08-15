@@ -8,9 +8,9 @@ paths:
 
 Two separate planes. Never put a file in the wrong directory.
 
-| Plane | Directory | Next number (as of 2026-08-12) |
+| Plane | Directory | Next number (as of 2026-08-15) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0101** — 0098 applied live 2026-08-11 (`20260811040852`); **0099 (etl_run + pipeline_state) applied live 2026-08-12** (`20260812203336`); **0100 (`facility_assignments_guard` search_path pin) AUTHORED-NOT-APPLIED on `fix/qualify-audit-wave1`**; **0095 consumed its slot with NO file** (one-shot prune, ledger 20260809073608 — never reuse it); 0096 (`manual_deposits`, now tracked) + 0097 (qualify watchers) applied live 2026-08-10 |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0103** — **0101 + 0102 BOTH APPLIED LIVE 2026-08-15** (`20260815103136` / `20260815103354`); neither number is reusable. ⚠ 0101 was applied as **autocommit `execute_sql`** (two `CREATE INDEX CONCURRENTLY`), which writes **NO ledger row** — its row was inserted by hand. **If you apply outside `apply_migration`, insert the ledger row yourself**, or the next session derives your number as free. 0102 added the UPDATE RLS policy that 0101's grant needed to be anything but inert. Earlier: 0098 applied live 2026-08-11 (`20260811040852`); **0099 (etl_run + pipeline_state) applied live 2026-08-12** (`20260812203336`); **0100 (`facility_assignments_guard` search_path pin) AUTHORED-NOT-APPLIED on `fix/qualify-audit-wave1`**; **0095 consumed its slot with NO file** (one-shot prune, ledger 20260809073608 — never reuse it); 0096 (`manual_deposits`, now tracked) + 0097 (qualify watchers) applied live 2026-08-10 |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **035** — 029 applied live; 030/031 authored-not-applied (031 held on purpose — see CLAUDE.md); **032/033/034 applied live 2026-08-10** (`intel_writer_select_grant`, `expected_payment_manual_lifecycle`, `drop_expected_payment_manual_live_idx`) |
 
 ⚠ **2026-08-10 — THE COLLISION THIS PARAGRAPH WARNS ABOUT ACTUALLY HAPPENED.** The qualify-watchers

@@ -53,6 +53,7 @@ import { parseReportCsv } from './cmdPayer.js';
 import { aliasIndigoFacilityColumn, mapReportRows } from './cmdExplorer.js';
 import { mapRow } from './cmdExplorerSeed.js';
 import { makeClient } from './db.js';
+import { withTenant } from '../veris/withTenant.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
 
 /** How many (fingerprint, employer) pairs go in one UPDATE round trip. */
@@ -203,9 +204,24 @@ async function main(): Promise<void> {
 
   const url = process.env.CMD_ROLLUP_WRITER_DATABASE_URL?.trim();
   if (!url) throw new Error('CMD_ROLLUP_WRITER_DATABASE_URL not set (required for --commit; never hardcode or log it)');
-  const db = makeClient(url);
+  const pool = makeClient(url);
   try {
-    const updated = await applyEmployerBackfill(db, plan.pairs, entityId);
+    // ⚠ withTenant IS MANDATORY, NOT TIDINESS. collections.cmd_explorer_rows has RLS ENABLED and
+    // cmd_rollup_writer is NOT rolbypassrls, so every policy on it keys off the transaction-local
+    // GUC `app.business_entity_id`. Running the UPDATE on a bare pool leaves that GUC unset and the
+    // UPDATE matches ZERO rows — with NO error, because RLS filters rather than raises.
+    //
+    // That failure is indistinguishable from a fingerprint mismatch in the output, which is exactly
+    // the wrong place to start debugging: this script's own dry-run text tells the operator a low
+    // match rate means a normalization problem. It measured 0 rows once for this reason before
+    // migration 0102 added the UPDATE policy.
+    //
+    // withTenant also BEGINs a transaction and read-back-verifies the GUC took on this pooled
+    // backend before any query runs, which matters on the 6543 transaction pooler where a different
+    // backend can serve each transaction.
+    const updated = await withTenant(pool, entityId, (client) =>
+      applyEmployerBackfill(client, plan.pairs, entityId),
+    );
     const rate = plan.pairs.size === 0 ? 0 : Math.round((updated / plan.pairs.size) * 1000) / 10;
     console.log(`\n  rows updated     : ${updated} of ${plan.pairs.size} pairs (${rate}%)`);
     if (updated < plan.pairs.size) {
@@ -214,7 +230,7 @@ async function main(): Promise<void> {
       console.log('  means the CSV normalizes differently than the ingest did — investigate.');
     }
   } finally {
-    await db.end();
+    await pool.end();
   }
 }
 
