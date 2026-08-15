@@ -134,6 +134,7 @@ function fullRow(override: RowOverride = {}): CmdExplorerFullRow {
     charge_entered_date: '6/20/2026',
     charge_to_date: '6/21/2026',
     claim_status_raw: 'PAID',
+    employer_name: null,
     ...rest,
     phi: {
       patient_name: 'SMITH, JOHN',

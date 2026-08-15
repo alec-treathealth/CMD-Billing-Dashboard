@@ -65,6 +65,8 @@ import {
   buildQualifyFacilityOptionsQuery,
   buildCmdPayerOptionsQuery,
   buildCmdEmployerOptionsQuery,
+  buildCmdCollectionsEmployerOptionsQuery,
+  buildCmdEmployerCoverageQuery,
   buildCohortCurveQueries,
   buildCohortTotalsQuery,
   buildCohortDrilldownQueries,
@@ -203,7 +205,7 @@ import type { CollectionsYoy } from '../../src/collections/collectionsYoy.js';
 import { facilityDimension, type FacilityDimensionRow } from '../../src/collections/facilities.js';
 import { cmdPayerGapForMonth, cmdReportRows, collectRowsAcrossCustomers, type CmdApiConfig, type CmdReportRow } from '../../src/collections/cmdPayer.js';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer.js';
-import { aliasIndigoFacilityColumn, BXR_REPORT_COLUMNS } from '../../src/collections/cmdExplorer.js';
+import { aliasIndigoFacilityColumn, BXR_REPORT_COLUMNS, bxrExpectedColumnsFor } from '../../src/collections/cmdExplorer.js';
 import { decryptPhi, encryptPhi } from '../../src/collections/phiCrypto.js';
 import {
   cmdEra835ConfigFor,
@@ -1067,10 +1069,16 @@ export function handleCmdExplorerCron(
     configFor: cmdExplorerConfigFor,
     businessEntityId: BXR_TENANT_ID,
     // HEADER CONTRACT. Verified by probing report 10093959 across all 15 BXR customers on
-    // 2026-08-01. A projection change now fails the customer BEFORE replaceCmdDailyForFacility's
-    // DELETE, so the feed freezes (recoverable) instead of being overwritten with nulls (not).
-    // If you deliberately add/remove a column in CMD, update BXR_REPORT_COLUMNS in the same change.
-    expectedColumns: BXR_REPORT_COLUMNS,
+    // 2026-08-01, and report 10094775 on customer 10027973 on 2026-08-15.
+    // A projection change fails the customer BEFORE replaceCmdDailyForFacility's DELETE, so the
+    // feed freezes (recoverable) instead of being overwritten with nulls (not).
+    // If you deliberately add/remove a column in CMD, update the matching set in cmdExplorer.ts.
+    //
+    // Resolved FROM the configured report id rather than hardcoded: the guard is set-equality, so
+    // a fixed pin is correct for exactly one report and would freeze the ingest for the whole gap
+    // between the env flip and the deploy. bxrExpectedColumnsFor keeps the contract and the report
+    // in lockstep, so the cutover (and any rollback) is a single env change.
+    expectedColumns: bxrExpectedColumnsFor(process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10093959'),
   }, opts);
 }
 
@@ -1121,9 +1129,13 @@ export function handleCmdExplorerCatchupCron(req: {
     customers: CMD_EXPLORER_CUSTOMERS,
     configFor: cmdExplorerCatchupConfigFor,
     businessEntityId: BXR_TENANT_ID,
-    // Same report (10093959) as the hourly explorer — column sets belong to the REPORT, the saved
-    // filter only windows rows — so the same header contract applies unchanged.
-    expectedColumns: BXR_REPORT_COLUMNS,
+    // Same report as the hourly explorer — column sets belong to the REPORT, the saved filter only
+    // windows rows — so the same header contract applies unchanged. cmdExplorerCatchupConfigFor
+    // SPREADS cmdExplorerConfigFor and overrides only the filter, so it follows the same
+    // CMD_EXPLORER_REPORT_ID and MUST resolve its contract the same way. Hardcoding the legacy set
+    // here would freeze the daily catch-up at cutover while the hourly explorer kept running — a
+    // silent half-migration whose only symptom is prior-month adjustments quietly not being re-pulled.
+    expectedColumns: bxrExpectedColumnsFor(process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10093959'),
   });
 }
 
@@ -1671,6 +1683,7 @@ async function writeEra835RunRow(
   dates: string[] | undefined,
   byEntity: Record<string, Era835TenantCounts>,
   failure?: { error: string },
+  label = 'era-835',
 ): Promise<void> {
   try {
     await recordEra835IngestRun(
@@ -1681,21 +1694,29 @@ async function writeEra835RunRow(
     );
   } catch (e) {
     console.error(
-      'era-835 cron: era_835_ingest_run write failed (non-fatal):',
+      `${label} cron: era_835_ingest_run write failed (non-fatal):`,
       e instanceof Error ? e.message : String(e),
     );
   }
 }
 
 /**
- * Daily BXR 835 ERA ingest (/api/cron/era-835 — SCHEDULED `50 8 * * *`, see the route file for
- * the still-open finding-1 failure-rate risk accepted at enable time).
+ * One tenant's daily 835 ERA ingest. Shared body behind the two named wrappers below —
+ * the same `…CronForTenant` + thin-wrapper shape the explorer and census pairs already use
+ * (handleCmdCensusCron / handleIndigoCensusCron), so the two tenants cannot drift apart.
+ *
  * GET only; gated on CRON_SECRET with the same constant-time Bearer check as every other
- * cron. Downloads each BXR customer's 835s for the trailing window, parses the X12, and
+ * cron. Downloads each roster customer's 835s for the trailing window, parses the X12, and
  * idempotently lands BOTH grains as cmd_rollup_writer: one staging.era_835_payment row
  * per ST/SE transaction set (written UNCONDITIONALLY — a clean-paid remit with zero CAS
  * triplets still lands; that was defect 2), then its staging.era_835_adjustment triplets
  * carrying payment_id. Non-PHI counts only.
+ *
+ * TENANT SAFETY — nothing here is tenant-specific except the roster. runEra835Ingest
+ * resolves the tenant PER CUSTOMER from `customer.businessEntityId`, insertEra835Transactions
+ * sets `app.business_entity_id` transaction-locally per customer, and every RLS policy on
+ * era_835_payment / _adjustment / _ingest_run is GUC-based (SQL Schemas 013 §6, 022). So a
+ * mixed or per-tenant roster tags rows correctly with no policy, grant or migration change.
  *
  * ERROR POSTURE (finding 1 pending): failures are COUNTED PER CODE and never retried —
  * the root cause of the probe's 30%/42% failure episodes is unknown and the throttle
@@ -1703,13 +1724,14 @@ async function writeEra835RunRow(
  * signal. A 401/403 aborts the WHOLE run via the fatal seam (the CmdEra835Error message
  * names the credential path: the CMD user behind CMD_API_TOKEN / CMD_API_USERNAME needs
  * the Payment role); everything else is per-pull isolated.
- *
- * BXR ONLY for now (15 customers × 5 dates = 75 sequential pulls). No Indigo route yet.
  */
-export async function handleEra835IngestCron(req: {
-  method?: string;
-  authorization?: string | null;
-}): Promise<{ status: number; body: unknown }> {
+async function handleEra835IngestCronForTenant(
+  req: {
+    method?: string;
+    authorization?: string | null;
+  },
+  tenant: { label: string; customers: readonly CmdCustomer[] },
+): Promise<{ status: number; body: unknown }> {
   if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
     return { status: 405, body: { error: 'method_not_allowed' } };
   }
@@ -1724,7 +1746,7 @@ export async function handleEra835IngestCron(req: {
   const stats = newEra835IngestStats();
   // Seed the roster BEFORE the first thing that can throw, so a failure that predates the
   // ingest loop still writes one 'failed' row per tenant instead of none.
-  seedEra835TenantRoster(stats, BXR_CUSTOMERS);
+  seedEra835TenantRoster(stats, tenant.customers);
   let dates: string[] | undefined;
   try {
     // Fail fast on a misconfigured PHI key (mirrors the CLI's up-front probe) — better a
@@ -1754,14 +1776,14 @@ export async function handleEra835IngestCron(req: {
 
     await runEra835Ingest({
       stats,
-      customers: BXR_CUSTOMERS,
+      customers: tenant.customers,
       dates,
       ingestedBy: 'era_835_cron',
       download,
       writeDb: rollupWriterDb(),
       budgetMs: ERA835_BUDGET_MS,
-      // Credential/role rejection: abort the run. Retrying 74 more pulls with a rejected
-      // credential cannot succeed and burns the shared one-at-a-time CMD partner session.
+      // Credential/role rejection: abort the run. Retrying every remaining pull with a
+      // rejected credential cannot succeed and burns the shared one-at-a-time CMD session.
       fatal: (err) =>
         err instanceof CmdEra835Error &&
         err.code === 'http_status' &&
@@ -1770,20 +1792,24 @@ export async function handleEra835IngestCron(req: {
     // Persist the run summary, ONE ROW PER TENANT — FAIL-SOFT: the ingest already
     // succeeded, so a summary-write failure is logged (label only) and never fails the run
     // (0053's posture). Requires SQL Schemas/022 applied; before that it just logs.
-    await writeEra835RunRow(startedAt, dates, stats.by_entity);
+    await writeEra835RunRow(startedAt, dates, stats.by_entity, undefined, tenant.label);
     return { status: 200, body: { ok: true, ...stats } };
   } catch (err) {
     // Generic to the client; message only to the server log (no PHI, no token, no URL).
     // The 401/403 CmdEra835Error message already names the credential path explicitly.
-    console.error('era-835 cron failed:', err instanceof Error ? err.message : String(err));
+    console.error(`${tenant.label} cron failed:`, err instanceof Error ? err.message : String(err));
     // A FAILED run must be as visible as a successful one — a cron that dies every night
     // and writes nothing is exactly the silence 022 exists to end. Per-tenant attribution
     // is unavailable here (the throw may predate the loop), so every tenant in the seeded
     // roster gets a 'failed' row. The COUNTERS ARE REAL, not zeroed: stats is owned by
     // this handler, so whatever committed before the throw is recorded.
-    await writeEra835RunRow(startedAt, dates, stats.by_entity, {
-      error: err instanceof Error ? err.message : String(err),
-    });
+    await writeEra835RunRow(
+      startedAt,
+      dates,
+      stats.by_entity,
+      { error: err instanceof Error ? err.message : String(err) },
+      tenant.label,
+    );
     if (
       err instanceof CmdEra835Error &&
       err.code === 'http_status' &&
@@ -1793,6 +1819,61 @@ export async function handleEra835IngestCron(req: {
     }
     return { status: 500, body: { error: 'cron_failed' } };
   }
+}
+
+/**
+ * BXR 835 ERA ingest (/api/cron/era-835 — SCHEDULED `50 8 * * *`). Roster = BXR_CUSTOMERS
+ * (15) × ERA835_LOOKBACK_DAYS (5) = 75 sequential pulls, which fits ERA835_BUDGET_MS.
+ * Behaviour is unchanged by the tenant refactor: same name, same signature, same roster.
+ */
+export function handleEra835IngestCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  return handleEra835IngestCronForTenant(req, { label: 'era-835', customers: BXR_CUSTOMERS });
+}
+
+/**
+ * Indigo 835 ERA ingest (/api/cron/indigo-era-835 — SCHEDULED `50 9 * * *`).
+ * Roster = INDIGO_CUSTOMERS (29 active; the 3 retired rows are excluded by construction in
+ * cmdCustomers.ts, so no edit here can resume CMD calls against a closed account).
+ *
+ * ⚠ WHY A SEPARATE ROUTE INSTEAD OF WIDENING era-835's ROSTER TO ALL_CMD_CUSTOMERS:
+ * 44 customers × 5 dates = 220 sequential pulls, and at the ERA835_INTER_CALL_DELAY_MS floor
+ * that is 330s of PACING ALONE — past both ERA835_BUDGET_MS (210s) and the route's
+ * maxDuration (300s). Splitting per tenant is also the pattern the explorer and census crons
+ * already use (cmd-explorer :00 / indigo-explorer :30). Do NOT "simplify" this back into one
+ * route, and do NOT lower ERA835_INTER_CALL_DELAY_MS to make one route fit: 150ms pacing is
+ * what preceded the 2026-07-31 401 episode and the throttle theory was FALSIFIED (gentler
+ * pacing produced a HIGHER failure rate), so that constant is not a tuning knob.
+ *
+ * ⚠ EXPECT A SMALL pulls_skipped_budget ON THIS ROUTE, AND DO NOT READ IT AS A FAULT.
+ * MEASURED 2026-08-15 (read-only probe, 29 Indigo customers × 3 dates): 87/87 pulls in 141s
+ * = 1.62s per pull wall-clock, inter-call delay included. At 5 dates that is 145 pulls ≈ 235s
+ * against ERA835_BUDGET_MS (210s), so roughly the last ~15 pulls of a run do not launch.
+ * That degrades exactly as designed: expandDateRange returns ASCENDING, so the budget cut
+ * skips the NEWEST date, which remains in the trailing window for up to 4 more daily runs and
+ * is picked up as it ages — and every re-pull is free because both tables dedup on
+ * row_fingerprint. Watch pulls_skipped_budget in staging.era_835_ingest_run; if it does NOT
+ * fall toward zero as the window rolls, the fix is a second Indigo slot (split the roster),
+ * NOT a shorter delay.
+ *
+ * COVERAGE + CREDENTIAL, both measured by that same probe and both previously unknown:
+ * 26 of 29 customers returned remits — 244 remits, $1,347,567.45 positive (ACH $958,139.67 /
+ * CHK $389,427.78), 53 zero-dollar remits, ZERO negatives, over a 3-day receipt window. And
+ * 0 failures of any code across 87 pulls: no 401/403, so the CMD credential DOES carry the
+ * Payment role on Indigo's account 474623. 25 of the 87 were empty-days classified correctly
+ * against the existing KNOWN_EMPTY_DAY_DIGESTS allowlist, so Indigo needs no new digest.
+ * Two independent runs 4 minutes apart agreed to the cent.
+ */
+export function handleIndigoEra835IngestCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  return handleEra835IngestCronForTenant(req, {
+    label: 'indigo-era-835',
+    customers: INDIGO_CUSTOMERS,
+  });
 }
 
 // Least-privilege writer pool for the BILLING AUDIT plane (claims.audit_row /
@@ -3192,6 +3273,53 @@ export const cmdExplorerPayers = unstable_cache(
  * PHI. Rides its own 'cmd-employers' tag (the VOB set changes only on the VOB sync, not the payment
  * cron), each (entityIds, term, limit) a separate warm entry. Reader-only.
  */
+/**
+ * COLLECTIONS-NATIVE employer options (migration 0101) — the guided employer type-ahead on the
+ * Collections explorer. Reads collections.cmd_explorer_rows.employer_name, the value CMD puts on
+ * the report itself.
+ *
+ * ⚠ NOT cmdExplorerEmployers BELOW, and the two must not be merged. That one reads
+ * vob.member_benefits_latest and serves QUALIFY. Ruled 2026-08-15: Collections reads collections
+ * data only — CMD is the source of truth for collections, VOB is not. The coverage difference is
+ * the point: the VOB set only knows members with a VOB on file.
+ *
+ * Server-side per-keystroke (the employer vocabulary is large), tenant-scoped through entityIds so
+ * a picked option always has rows the caller can see. Rides its own cache tag: this vocabulary
+ * changes on the PAYMENT cron (a new charge can introduce a new employer), unlike the VOB one
+ * which only changes on the VOB sync. Reader-only.
+ */
+export const cmdExplorerCollectionsEmployers = unstable_cache(
+  async (entityIds: string[], term: string, limit: number): Promise<string[]> => {
+    const { sql, params } = buildCmdCollectionsEmployerOptionsQuery(entityIds, term, limit);
+    const { rows } = await readerExecutor().query<{ employer_name: string }>(sql, params);
+    return rows.map((r) => r.employer_name);
+  },
+  ['cmd-explorer-collections-employers'],
+  { revalidate: 3600, tags: ['cmd-collections-employers'] },
+);
+
+/**
+ * Does this tenant have ANY collections employer data yet? Gates the All/Employer/Individual
+ * segment toggle so "Individual" is never offered while it would mean "the entire book".
+ *
+ * `employer_name IS NULL` reads as "individual policy" only once the CMD reports carry the column
+ * AND the one-shot backfill has run; before that it means "not yet populated" and every row
+ * qualifies. This boolean is what lets the UI tell those two states apart.
+ *
+ * Cached for an hour: the answer flips exactly once in this system's life (when the backfill
+ * lands), so re-asking per request would be pure waste — and the negative answer is the expensive
+ * one to compute, which is also the one served most often before cutover.
+ */
+export const cmdExplorerEmployerCoverage = unstable_cache(
+  async (entityIds: string[]): Promise<boolean> => {
+    const { sql, params } = buildCmdEmployerCoverageQuery(entityIds);
+    const { rows } = await readerExecutor().query<{ has_employer_data: boolean }>(sql, params);
+    return rows[0]?.has_employer_data === true;
+  },
+  ['cmd-explorer-employer-coverage'],
+  { revalidate: 3600, tags: ['cmd-collections-employers'] },
+);
+
 export const cmdExplorerEmployers = unstable_cache(
   async (entityIds: string[], term: string, limit: number): Promise<CmdEmployerOption[]> => {
     const { sql, params } = buildCmdEmployerOptionsQuery(entityIds, term, limit);

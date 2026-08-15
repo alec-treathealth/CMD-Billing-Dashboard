@@ -27,24 +27,63 @@ export const HEADERS = {
   charge_from_date: ['Charge From Date'],
   payment_received: ['Payment Received'],
   cpt_code: ['Charge CPT Code', 'CPT Code'],
-  revenue_code: ['Revenue Code'],
+  // ⚠ 10094775 ALIASES (2026-08-15) — EVERY ONE IS APPENDED LAST, AND THE ORDER IS LOAD-BEARING.
+  //
+  // pick() returns the FIRST candidate present. During the cutover BOTH reports are in play: the
+  // live 10093959 and the replacement 10094775. Several of 10093959's columns coexist with their
+  // 10094775 counterpart ON THE SAME REPORT — it pins BOTH 'Charge Insurance Payments' AND
+  // 'Insurance Paid Amount', and BOTH 'Charge Total Adjustments w/ Transfers' AND 'Insurance
+  // Adjustment Amount'. Put a new alias FIRST and the OLD report would silently start reading the
+  // other column, changing values inside the LOCKED fingerprint on a report nobody edited.
+  // Appended last, each new label is reached ONLY when no canonical candidate is present — so one
+  // code path maps both reports correctly and the two can be swapped by env var alone.
+  //
+  // RULED BY ALEC 2026-08-15: on 10094775 these carry the same data as the canonical labels below,
+  // relabelled by CMD's report builder. That ruling is recorded rather than independently measured
+  // — the repo's ALIAS PROVENANCE bar (compare VALUES on a Charge-ID join, as the 437/437 and 85/85
+  // checks did) has NOT been met for the two money aliases. It is the owner's call; the residual
+  // risk is bounded and stated at the cutover checklist.
+  revenue_code: ['Revenue Code', 'Charge Rev Code'],
   // 'Facility Name/ID' is the bank/deposit report's label. Its cells carry BOTH parts —
   // 'CALIFORNIA MENTAL HEALTH LLC (10272858)' — and splitFacilityLabel strips the id so only the
   // name is ever stored or displayed. Listed second so a report emitting the bare 'Facility Name'
   // is unaffected (pick() returns the first candidate present).
   facility: ['Facility Name', 'Facility Name/ID'],
   patient_name: ['Patient Full Name'], //               PHI
-  member_id_raw: ['Claim Primary Member ID'], //         PHI
-  group_number: ['Primary Group Number', 'Primary Group #'], // PHI
-  charge_amount: ['Charge/Debit Amount'],
+  member_id_raw: ['Claim Primary Member ID', 'Current Payer Member ID'], //         PHI
+  group_number: ['Primary Group Number', 'Primary Group #', 'Current Payer Group #'], // PHI
+  charge_amount: ['Charge/Debit Amount', 'Charge Amount'],
   allowed_amount: ['Payment Allowed Amount'],
-  insurance_payments: ['Charge Insurance Payments'],
+  // ⚠ 'Insurance Paid Amount' IS LAST FOR A REASON — see the ordering block above. The live
+  // 10093959 carries BOTH labels, and its canonical one is 'Charge Insurance Payments' (the
+  // charge-cumulative running total the rollup takes a MAX of, never a SUM). Reordering these two
+  // would repoint a fingerprint field on the report currently in production.
+  insurance_payments: ['Charge Insurance Payments', 'Insurance Paid Amount'],
   // 'w/o Transfers' NO LONGER EXISTS in CMD (owner-confirmed 2026-08-01) — the report builder
   // now offers only 'w/ Transfers'. Kept first anyway so any surviving export of the old shape
   // still maps; the live 10093959 report supplies the 'w/' form. MEASURED equivalent, not
   // assumed: on an exact Charge-ID join over CAMH, 'w/ Transfers' reproduced the value the old
   // 'w/o Transfers' column had written on 85 of 85 charges (0 mismatches).
-  adjustments: ['Charge Total Adjustments w/o Transfers', 'Charge Total Adjustments w/ Transfers'],
+  // ⚠⚠ 'Insurance Adjustment Amount' IS LISTED HERE DESPITE BEING EXPLICITLY REJECTED BELOW.
+  // Read both before touching this line — they are not a contradiction once scoped to a report:
+  //   · MEASURED 2026-08-01 on report 10093959, where BOTH labels coexist: 'Insurance Adjustment
+  //     Amount' reproduced the real total-adjustments value on only 15 of 85 charges (it is
+  //     INSURANCE-only, not total). On THAT report it is the wrong column, and because it is
+  //     listed LAST it is still never selected there — 'w/ Transfers' is found first.
+  //   · RULED BY ALEC 2026-08-15 for report 10094775, which carries NO 'Charge Total Adjustments'
+  //     column at all: on that report this label is the total-adjustments field, relabelled.
+  // So the alias is reachable ONLY on a report that has no canonical candidate — exactly the
+  // report the ruling covers. The 15/85 rejection below stays accurate for 10093959 and is
+  // deliberately NOT deleted.
+  // NOT INDEPENDENTLY MEASURED on 10094775: the ALIAS PROVENANCE bar (compare values on a
+  // Charge-ID join) has not been run for this label on the new report. This field is INSIDE the
+  // locked fingerprint, so if the ruling is wrong the cost is a one-time re-insert of the rolling
+  // window. The cutover checklist carries the query to detect that.
+  adjustments: [
+    'Charge Total Adjustments w/o Transfers',
+    'Charge Total Adjustments w/ Transfers',
+    'Insurance Adjustment Amount',
+  ],
   patient_balance_due: ['Charge Balance Due Pat'],
   primary_payer: ['Charge Primary Payer Name', 'Payer Name'],
   // Feed-1 dimension columns (Qualify v2, artifact ②a) — non-PHI. Present on the 21-col report
@@ -58,6 +97,16 @@ export const HEADERS = {
   // a different table. New rows carry NULL here. Not in the fingerprint, so no dedup impact.
   charge_to_date: ['Charge To Date'],
   claim_status_raw: ['Claim Status'],
+  // Plan sponsor / group employer (migration 0101). CMD's label is 'Primary Ins Emp Name' — NOT
+  // 'Employer Name'; verified by live probe 2026-08-15 on BOTH tenants' reports. "Emp" here is
+  // EMPLOYER (the insurance plan's sponsor), not EMPLOYEE: the subscriber's own name is
+  // 'Patient Full Name', a separate column that coexists with this one on the same report.
+  // That distinction is the whole basis of the non-PHI ruling — do not re-map this to a person.
+  //
+  // Present on Indigo's 10092391 (added 2026-08-15, 23rd column) and on BXR's 10094775.
+  // 'Employer Name' is listed as a second candidate ONLY because CMD's report builder offers that
+  // label elsewhere; pick() returns the first present, so a report carrying either still maps.
+  employer_name: ['Primary Ins Emp Name', 'Employer Name'],
 } as const;
 // ---------------------------------------------------------------------------
 // ALIAS PROVENANCE (2026-08-01). CMD report 10091971 was lost; 10093959 replaced it with some
@@ -68,10 +117,16 @@ export const HEADERS = {
 //   'Payment Charge ID' == 'Charge ID'                              211/211
 //   'Primary Group #'   == 'Primary Group Number'   (blind index)   433/433
 //   'Charge Total Adjustments w/ Transfers' == 'w/o Transfers'       85/85
-// Two candidates were REJECTED on the same evidence and must never be aliased in: the report
-// still carries 'Patient Total Balance' (0/85 vs patient_balance_due — patient-wide total, not
-// the per-charge portion) and 'Insurance Adjustment Amount' (15/85 vs adjustments — insurance
-// only, not total). They are ignored because pick() matches exact labels and they are not listed.
+// Two candidates were REJECTED on the same evidence: the report still carries 'Patient Total
+// Balance' (0/85 vs patient_balance_due — patient-wide total, not the per-charge portion) and
+// 'Insurance Adjustment Amount' (15/85 vs adjustments — insurance only, not total).
+//
+// ⚠ SCOPE OF THAT REJECTION NARROWED 2026-08-15 — it is about REPORT 10093959, not about the
+// labels in the abstract. 'Patient Total Balance' remains unlisted and must stay that way.
+// 'Insurance Adjustment Amount' is now listed as the LAST adjustments candidate, reachable only on
+// a report carrying no 'Charge Total Adjustments' column (i.e. 10094775, where Alec ruled it IS the
+// total). On 10093959 both labels coexist, 'w/ Transfers' is found first, and this rejection still
+// governs — the 15/85 number is not superseded. See the ordering block at the top of HEADERS.
 // WHY THIS BAR: five of these fields are inside the LOCKED 14-field fingerprint
 // (cmdExplorerSeed.mapRow). Aliasing a same-named-but-different-valued column changes the dedup
 // key, ON CONFLICT stops firing, and the cron re-inserts every posting hourly. Never add an alias
@@ -140,6 +195,75 @@ export const BXR_REPORT_COLUMNS = [
   'Claim Status',
 ] as const;
 
+/**
+ * The column set of the REPLACEMENT BXR report 10094775 — 25 columns, verified by live probe
+ * against customer 10027973 on 2026-08-15 (410 rows).
+ *
+ * Differs from 10093959 above by more than the added employer column: CMD's builder relabelled
+ * six fields, and the aliases that absorb those relabels are appended LAST in HEADERS so this set
+ * and the legacy one map correctly through one code path. See the ordering block in HEADERS.
+ *
+ *   Charge/Debit Amount        → Charge Amount
+ *   Revenue Code               → Charge Rev Code
+ *   Claim Primary Member ID    → Current Payer Member ID
+ *   Primary Group #            → Current Payer Group #
+ *   Charge Insurance Payments  → Insurance Paid Amount            (ruled equivalent, unmeasured)
+ *   Charge Total Adjustments   → Insurance Adjustment Amount      (ruled equivalent, unmeasured)
+ *   (new)                      → Primary Ins Emp Name             (the employer)
+ *
+ * 'Payment Entered' and 'Other Ref #' are NOT here — both were dropped from the report by its
+ * owner. 'Payment Charge ID' is likewise gone; 'Charge ID' is the surviving label and HEADERS
+ * already accepted both.
+ */
+export const BXR_REPORT_COLUMNS_10094775 = [
+  'Charge Entered Date',
+  'Charge From Date',
+  'Payment Received',
+  'Charge CPT Code',
+  'Charge Rev Code',
+  'Current Payer Member ID',
+  'Current Payer Group #',
+  'Patient Full Name',
+  'Facility Name',
+  'Payer Name',
+  'Charge Amount',
+  'Payment Allowed Amount',
+  'Allowed %',
+  'Insurance Paid Amount',
+  'Paid % of Allowed',
+  'Charge Balance Due Pat',
+  'Insurance Adjustment Amount',
+  'Payment Check #',
+  'Payment Username',
+  'EFT Payment',
+  'Check Payment',
+  'Primary Ins Emp Name',
+  'Charge/Debit Entered User',
+  'Charge ID',
+  'Claim Status',
+] as const;
+
+/**
+ * Pick the header contract for whichever BXR report is configured.
+ *
+ * This exists so the cutover is a ONE-STEP env change instead of a coordinated deploy. The guard
+ * is SET EQUALITY against a single expected set, so a hardcoded pin is only ever correct for one
+ * report: pin the new set and the old report fails every pull until the env flips; pin the old and
+ * the new report fails until the deploy lands. Either way there is a window where the BXR ingest
+ * is frozen — on a feed the standing rules call production-critical.
+ *
+ * Keying the pin off the report id removes the window entirely: flipping CMD_EXPLORER_REPORT_ID
+ * selects the matching contract atomically, and rolling it back restores the old one just as fast.
+ *
+ * UNKNOWN REPORT IDS FALL BACK TO THE LEGACY SET ON PURPOSE — never to "no guard". An unrecognised
+ * id means somebody pointed the cron somewhere this code has never seen, which is exactly when the
+ * projection guard is most valuable; the fallback fails loudly on the first pull rather than
+ * ingesting an unverified shape.
+ */
+export function bxrExpectedColumnsFor(reportId: string): readonly string[] {
+  return reportId.trim() === '10094775' ? BXR_REPORT_COLUMNS_10094775 : BXR_REPORT_COLUMNS;
+}
+
 /** The column names a parsed CMD report actually carries. Empty pull → empty list (the caller
  *  skips the guard: an empty pull writes nothing and deletes nothing, so there is no shape to
  *  police and nothing at risk). All rows share the CSV's header keys, so row 0 is representative. */
@@ -176,6 +300,13 @@ export interface CmdExplorerNonPhiRow {
   charge_entered_date: string | null;
   charge_to_date: string | null;
   claim_status_raw: string | null;
+  /**
+   * Plan sponsor / group employer (migration 0101) — non-PHI, same class as primary_payer.
+   * DELIBERATELY OUTSIDE the LOCKED fingerprint array in cmdExplorerSeed.mapRow: adding it there
+   * would change every existing row's dedup key, ON CONFLICT (row_fingerprint) would stop firing,
+   * and the hourly cron would re-insert the whole 650k-row book. Same fence as charge_to_date.
+   */
+  employer_name: string | null;
 }
 
 /** Full row = non-PHI projection + its PHI. Held only in volatile server memory. */
@@ -209,6 +340,20 @@ export interface CmdExplorerRow {
   pct_allowed: string | null;
   pct_paid: string | null;
   ingested_at: string;
+  /**
+   * Plan sponsor / group employer (migration 0101) — the PLAN-LEVEL attribute, in the same class
+   * as primary_payer. NOT the employee/subscriber name, and NOT VOB-derived: this is the
+   * collections-native value that arrives on the CMD report itself, deliberately independent of
+   * vob.member_benefits_latest.employer_norm (which serves Qualify's market filter and nothing
+   * here). Ruled non-PHI for display + search 2026-08-14; still fenced out of summary_stats and
+   * every model prompt by the PhiKey union.
+   *
+   * Sourced differently by query: the grid reads the 0059 rollup and LEFT JOINs the base table on
+   * `id` for this one column (the rollup has no employer and deliberately never will — see
+   * migration 0101's grain note), while CMD_EXPLORER_SELECT reads it straight off the base table.
+   * Null for any row the one-shot backfill did not match and that predates the new CMD reports.
+   */
+  employer_name: string | null;
 }
 
 /** Trim; empty string → null (so blanks render as an em dash, not ''). */
@@ -283,6 +428,7 @@ export function mapReportRows(rows: CmdReportRow[]): CmdExplorerFullRow[] {
       charge_entered_date: pick(row, HEADERS.charge_entered_date),
       charge_to_date: pick(row, HEADERS.charge_to_date),
       claim_status_raw: pick(row, HEADERS.claim_status_raw),
+      employer_name: pick(row, HEADERS.employer_name),
     };
     const phi: CmdExplorerPhi = {
       patient_name: pick(row, HEADERS.patient_name),

@@ -80,6 +80,47 @@ export interface CmdExplorerFilter {
    */
   employers?: string[] | null;
   funding?: string[] | null;
+  /**
+   * COLLECTIONS-NATIVE employer filter (migration 0101) — the guided employer type-ahead.
+   *
+   * ⚠ DO NOT CONFUSE WITH `employers` DIRECTLY ABOVE. They are different dimensions from different
+   * planes and are deliberately BOTH present:
+   *   · `employers`      → vob.member_benefits_latest.employer_norm, reached by a member_id_bidx
+   *                        semi-join. VOB-derived. Serves QUALIFY's market filter. Excludes any
+   *                        member with no VOB.
+   *   · `employer_names` → collections.cmd_explorer_rows.employer_name, the value that arrives on
+   *                        the CMD report itself. NO VOB INVOLVEMENT WHATSOEVER (ruled 2026-08-15:
+   *                        Collections reads collections data only). A charge with no VOB is fully
+   *                        matchable here — which is most of the book.
+   * Naming follows the existing `primary_payers` → `primary_payer` convention: the plural filter
+   * field names the singular column it matches.
+   *
+   * Set membership like `facility`/`primary_payers`: a NON-EMPTY array narrows, empty/absent is NO
+   * restriction (the condition is omitted entirely — never `= any(ARRAY[]::text[])`, which matches
+   * nothing). Emitted as a semi-join on `id` because employer_name is not on the rollup the grid
+   * reads; see the emitter in cmdExplorerBaseConds for why that is exact rather than approximate.
+   */
+  employer_names?: string[] | null;
+  /**
+   * The employer SEGMENT toggle: 'all' (default) · 'employer' · 'individual'.
+   *
+   * 'individual' means "this policy has no plan sponsor" — a self-funded individual policy rather
+   * than a group plan — and is derived from `employer_name IS NULL`. NOTHING IS EVER WRITTEN TO
+   * MARK A ROW INDIVIDUAL (ruled 2026-08-15): storing a literal 'Individual' would make a real
+   * employer of that name indistinguishable, push ~600k identical strings into the trigram index
+   * the employer search depends on, and be irreversible once written.
+   *
+   * ⚠ NULL IS "NOT YET POPULATED", WHICH IS ONLY THE SAME AS "INDIVIDUAL" ONCE THE DATA LANDS.
+   * Employer arrives on rows inserted after the CMD reports started carrying the column, plus
+   * whatever the one-shot backfill matches. Before that, EVERY row is null and 'individual' would
+   * select the entire book while claiming a meaning it cannot yet support. The predicate here is
+   * honest either way — it is the CALLER's job not to offer the segment before coverage exists,
+   * which is what buildCmdEmployerCoverageQuery measures.
+   *
+   * 'all' (or absent) emits NO condition — never a tautology like `1=1`, which would defeat the
+   * planner's index selection on the semi-join path.
+   */
+  employerMode?: 'all' | 'employer' | 'individual' | null;
   from?: string | null; // 'YYYY-MM-DD' inclusive (payment_received >= from)
   to?: string | null; // 'YYYY-MM-DD' exclusive (payment_received < to)
   q?: string | null; // substring term (matched literally; LIKE metachars escaped)
@@ -170,6 +211,51 @@ export function cmdExplorerBaseConds(
   // every summary aggregate; "no-VOB excluded" is intrinsic when either filter is active.
   const vobMarket = buildVobMarketSemiJoin(filter, add);
   if (vobMarket) conds.push(vobMarket);
+  // COLLECTIONS-NATIVE employer narrow (migration 0101) — NOT the VOB one directly above.
+  //
+  // A semi-join on `id` rather than a plain column predicate, because employer_name lives on the
+  // base table and every builder sharing these conds reads the 0059 rollup, which has no such
+  // column and deliberately never will (see migration 0101's grain note).
+  //
+  // This is EXACT, not an approximation: the rollup's `id` IS the latest snapshot's real
+  // cmd_explorer_rows.id, so the inner set resolves 1:1 against outer rows — it can neither fan out
+  // nor drop a charge. `id in (...)` (not EXISTS) so the trigram/PK path builds a bounded id set
+  // once and hash-semi-joins it, instead of probing per outer row across the whole tenant slice.
+  //
+  // The inner select is NOT re-scoped by business_entity_id: `e.id = <rollup id>` already pins a
+  // single base row, and the outer tenant scope is applied to that same row on the line above — a
+  // second entity predicate would be redundant and would only mislead a future reader into thinking
+  // this set is independently reachable. It is not; it is keyed by an id the outer query owns.
+  //
+  // Same empty-array discipline as facility/primary_payers: NON-EMPTY narrows, empty/absent omits.
+  if (Array.isArray(filter.employer_names) && filter.employer_names.length > 0) {
+    conds.push(
+      `id in (select e.id from collections.cmd_explorer_rows e ` +
+        `where e.employer_name = any(${add(filter.employer_names)}::text[]))`,
+    );
+  }
+  // Employer SEGMENT toggle. Same id semi-join shape as the name filter above and exact for the
+  // same reason (rollup id IS the base row id, 1:1).
+  //
+  // 'employer' tests `is not null AND <> ''` rather than just `is not null`: mapRow coerces a blank
+  // CMD cell to null, but the 622k CSV-backfilled rows predate that path, so an empty string is a
+  // reachable state. Treating '' as "has an employer" would put a blank-labelled bucket in the
+  // segment and an unpickable blank option in the type-ahead.
+  //
+  // 'individual' is the exact complement, INCLUDING the empty string, so the two segments always
+  // partition the book — every row is in exactly one, and 'employer' + 'individual' always sums to
+  // 'all'. A reader comparing segment counts to the unfiltered total must never find a gap.
+  if (filter.employerMode === 'employer') {
+    conds.push(
+      `id in (select e.id from collections.cmd_explorer_rows e ` +
+        `where e.employer_name is not null and e.employer_name <> '')`,
+    );
+  } else if (filter.employerMode === 'individual') {
+    conds.push(
+      `id in (select e.id from collections.cmd_explorer_rows e ` +
+        `where e.employer_name is null or e.employer_name = '')`,
+    );
+  }
   if (filter.from) conds.push(`payment_received >= ${add(filter.from)}::date`);
   if (filter.to) conds.push(`payment_received < ${add(filter.to)}::date`);
   const term = typeof filter.q === 'string' ? filter.q.trim() : '';
@@ -401,6 +487,85 @@ export function buildCmdEmployerOptionsQuery(
   return { sql, params };
 }
 
+/**
+ * COLLECTIONS-NATIVE employer options for the guided employer type-ahead (migration 0101).
+ *
+ * ⚠ THIS IS NOT buildCmdEmployerOptionsQuery ABOVE, AND THE TWO MUST NOT BE MERGED. That one reads
+ * vob.member_benefits_latest.employer_norm and exists to serve QUALIFY's market filter. This one
+ * reads collections.cmd_explorer_rows.employer_name — the value that arrives on the CMD report
+ * itself — and exists to serve COLLECTIONS. Ruled 2026-08-15: Collections reads collections data
+ * only, no VOB. The practical difference is coverage, not style: the VOB set only knows members who
+ * have a VOB on file, while this one covers every charge the CMD report carried an employer for.
+ *
+ * Server-side per-keystroke (not a load-whole-vocabulary dropdown like facility/payer, which are
+ * ~260 entries each): the employer vocabulary is large — the VOB side alone carries ~11.6k distinct
+ * values — so the client sends a typed `term` and this returns a bounded page.
+ *
+ * `term` is a LITERAL substring (LIKE metachars escaped by likeContains); every value is bound
+ * ($1 entityIds, $2 pattern, $3 limit) and every identifier is a fixed literal — no user text ever
+ * reaches SQL as an identifier. Tenant-scoped by the caller's entitled entity ids, so a picked
+ * option always has rows the caller can actually see.
+ *
+ * The leading-wildcard ILIKE is served by 0101's trigram GIN (claims.gin_trgm_ops). Callers MUST
+ * gate on CMD_SEARCH_TERM_MIN — a 1–2 char term matches a large fraction of the book and is the
+ * single most expensive query here.
+ *
+ * ⚠ COST IS UNMEASURED UNTIL THE BACKFILL LANDS: the column is 100% NULL today, so any timing taken
+ * now is meaningless. If this measures slow once ~650k rows carry employers, the fix is a small
+ * distinct-employer matview in the 48 kB class of cmd_explorer_filter_options — NOT a column on
+ * cmd_explorer_charge_rollup, which is 165 MB + 313 MB of indexes and whose grain excludes employer
+ * by design (migration 0101's grain note). Measure before building either.
+ */
+/**
+ * Does this tenant scope have ANY employer data yet? (migration 0101)
+ *
+ * The employer segment toggle needs this because `employer_name IS NULL` is ambiguous until the
+ * data lands: it means "individual policy" AFTER the CMD reports start carrying the column and the
+ * one-shot backfill runs, but "not yet populated" before. Offering an Individual segment in the
+ * second state would select the entire book and label it something it is not — wrong in the most
+ * expensive way, because it looks like a working filter.
+ *
+ * So the UI asks this first and degrades honestly: no coverage ⇒ show the toggle disabled with a
+ * "no employer data yet" note instead of a filter that silently means "everything".
+ *
+ * EXISTS, not COUNT: the answer is a boolean and the question is asked on every page load. A count
+ * over 650k rows would be a seq scan every time to compute a number nobody displays; EXISTS
+ * short-circuits at the first matching row. The `employer_name <> ''` half matters — the CSV
+ * backfill predates mapRow's blank→null coercion, so empty strings are reachable and must not
+ * count as coverage.
+ *
+ * Served by 0101's PARTIAL index (business_entity_id) WHERE employer_name is not null — which is
+ * what makes the NEGATIVE case fast too. Without it, "no coverage yet" is the slowest possible
+ * answer (a full scan finding nothing), and that is precisely the state this exists to detect.
+ */
+export function buildCmdEmployerCoverageQuery(entityIds: string[]): { sql: string; params: unknown[] } {
+  return {
+    sql:
+      'select exists(select 1 from collections.cmd_explorer_rows ' +
+      'where business_entity_id = any($1::uuid[]) ' +
+      "and employer_name is not null and employer_name <> '') as has_employer_data",
+    params: [entityIds],
+  };
+}
+
+export function buildCmdCollectionsEmployerOptionsQuery(
+  entityIds: string[],
+  term: string,
+  limit: number,
+): { sql: string; params: unknown[] } {
+  const params: unknown[] = [entityIds, likeContains(term), limit];
+  const sql =
+    'select employer_name ' +
+    'from collections.cmd_explorer_rows ' +
+    'where business_entity_id = any($1::uuid[]) ' +
+    'and employer_name is not null and employer_name <> \'\' ' +
+    'and employer_name ilike $2 ' +
+    // GROUP BY (not DISTINCT) to mirror the VOB sibling above and keep the shape obvious: one row
+    // per employer, deduped server-side so the picker never shows the same name twice.
+    'group by employer_name order by employer_name limit $3';
+  return { sql, params };
+}
+
 // --- saved grid views (per-user column layout) ------------------------------
 
 /**
@@ -418,6 +583,9 @@ export const CMD_EXPLORER_COLUMN_KEYS = [
   'cpt_code',
   'revenue_code',
   'primary_payer',
+  // Collections-native plan sponsor (migration 0101). A DISPLAY key like any other — non-PHI, so
+  // unlike the three identifier keys below it renders in the clear with no reveal gate.
+  'employer_name',
   'patient_name',
   'member_id_raw',
   'group_number',
@@ -563,7 +731,7 @@ export const CMD_EXPLORER_SELECT =
   "select id, to_char(charge_date, 'YYYY-MM-DD') as charge_date, " +
   "to_char(payment_received, 'YYYY-MM-DD') as payment_received, cpt_code, revenue_code, " +
   'facility, charge_amount, allowed_amount, insurance_payments, adjustments, ' +
-  'patient_balance_due, primary_payer, pct_allowed, pct_paid, ' +
+  'patient_balance_due, primary_payer, pct_allowed, pct_paid, employer_name, ' +
   `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
   // Aliased `t` SO THE ORDER BY CAN TARGET THE RAW COLUMN: the two date columns are projected as
   // `to_char(<date>, 'YYYY-MM-DD') AS <date>` (output name == column name), and an UNQUALIFIED
@@ -622,6 +790,17 @@ export function buildCmdExplorerQuery(
 
   // Physical sort column (fixed literal from the map — allowed_amount → allowed_reliable).
   const col = CMD_EXPLORER_SORT_SQL[sort.column];
+  // OUTPUT name for the OUTER order-by (see the employer join below), re-validated against the
+  // closed allowlist HERE rather than trusted from the argument.
+  //
+  // The distinction matters: `col` above is a MAP LOOKUP, so a garbage column yields `undefined`
+  // and produces broken-but-inert SQL — safe BY CONSTRUCTION even if a caller skips validation.
+  // The outer clause needs the OUTPUT name, which is `sort.column` itself, and interpolating that
+  // directly would be safe only BY CONVENTION (resolveCmdExplorerSort is called at the action
+  // boundary, app/lib/actions.ts). This function is exported, so a future caller could reach it
+  // without that boundary. One Set membership test restores safe-by-construction: an unrecognised
+  // column falls back to the default instead of reaching the SQL text.
+  const outCol = CMD_EXPLORER_SORTABLE.has(sort.column) ? sort.column : CMD_EXPLORER_DEFAULT_SORT.column;
   const cmp = sort.direction === 'asc' ? '>' : '<';
   if (cursor !== null) {
     if (cursor.value === null) {
@@ -644,14 +823,54 @@ export function buildCmdExplorerQuery(
   // The CmdExplorerRow shape (same output names/casts the grid has always returned). Dates and
   // ingested_at to_char'd to stable strings. `t.<col>` / `t.id` bind the RAW columns so the sort is
   // column-driven, never the to_char text alias (see CMD_EXPLORER_SELECT's alias note).
+  // EMPLOYER JOIN — deliberately OUTSIDE the paged subquery.
+  //
+  // employer_name lives ONLY on the base table: the rollup has no such column and must never gain
+  // one (migration 0101's grain note — employer is not in the rollup's GROUP BY, so adding it there
+  // would split a charge into two rows whenever employer varies across its postings, reintroducing
+  // the snapshot-grain double-count 0050/0059 exist to fix; and adding it at all would force a
+  // DROP + CREATE MATERIALIZED VIEW, destroying 313 MB of indexes including 0092's covering pair).
+  //
+  // The join is sound because the rollup's `id` IS the latest snapshot's real cmd_explorer_rows.id
+  // (see CMD_EXPLORER_CHARGE_ROLLUP's docblock), so it resolves 1:1 — never fanning out.
+  //
+  // THE NESTING IS LOad-BEARING, not style. `p` applies the tenant scope, the filters, the ORDER BY
+  // and the LIMIT against the rollup ALONE, so the join runs against exactly `limit` rows (50) as a
+  // primary-key lookup each. Joining before the limit would invite the planner to hash-join the
+  // whole 349 MB base table against the filtered 165 MB rollup slice on every keystroke.
+  //
+  // LEFT, never INNER: an inner join would silently DROP any grid row whose base row is missing,
+  // turning a lookup miss into vanished collections data. A missing employer must render as an
+  // em dash, never as one fewer row.
+  //
+  // `p.*` is safe here (not a `select *` over a table): `p` is this function's own fixed projection
+  // immediately above, so the column list stays explicit and allowlisted.
   const sql =
-    `select id, to_char(charge_date, 'YYYY-MM-DD') as charge_date, ` +
-    `to_char(payment_received, 'YYYY-MM-DD') as payment_received, cpt_code, revenue_code, ` +
-    `facility, charge_amount, allowed_reliable as allowed_amount, insurance_payments, adjustments, ` +
-    `patient_balance_due, primary_payer, pct_allowed, pct_paid, ` +
-    `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
+    `select p.*, e.employer_name from (` +
+    `select t.id, to_char(t.charge_date, 'YYYY-MM-DD') as charge_date, ` +
+    `to_char(t.payment_received, 'YYYY-MM-DD') as payment_received, t.cpt_code, t.revenue_code, ` +
+    `t.facility, t.charge_amount, t.allowed_reliable as allowed_amount, t.insurance_payments, ` +
+    `t.adjustments, t.patient_balance_due, t.primary_payer, t.pct_allowed, t.pct_paid, ` +
+    `to_char(t.ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} ` +
-    `order by t.${col} ${dir} nulls last, t.id ${dir} limit ${add(limit)}`;
+    `order by t.${col} ${dir} nulls last, t.id ${dir} limit ${add(limit)}` +
+    `) p left join collections.cmd_explorer_rows e on e.id = p.id ` +
+    // Re-stated on the OUTER query: a LEFT JOIN does not preserve the subquery's ordering, and the
+    // keyset cursor is built from the LAST ROW of this result set — an unordered page would hand
+    // back a cursor for an arbitrary row and silently skip or repeat pages. This re-sort is over
+    // 50 already-materialized rows, so it costs nothing.
+    //
+    // ⚠ `sort.column` HERE, NOT `col`. `col` is the PHYSICAL rollup column and the two differ for
+    // exactly one key: allowed_amount → allowed_reliable. The subquery projects that as
+    // `t.allowed_reliable AS allowed_amount`, so `p` exposes the OUTPUT name only — `p.allowed_reliable`
+    // does not exist and would 42703. sort.column is a member of the closed CMD_EXPLORER_SORTABLE_COLUMNS
+    // allowlist (never user text), so it is safe as a literal, exactly as `col` is.
+    //
+    // The two date keys are `to_char(...,'YYYY-MM-DD')` TEXT on `p` rather than dates. Sorting them
+    // as text is order-identical to sorting the underlying dates because ISO-8601 is lexicographically
+    // ordered — and the inner query already established the true order against the real date columns;
+    // this only has to preserve it.
+    `order by p.${outCol} ${dir} nulls last, p.id ${dir}`;
   return { sql, params };
 }
 

@@ -8,6 +8,7 @@ import {
   buildQualifyFacilityOptionsQuery,
   buildCmdPayerOptionsQuery,
   buildCmdEmployerOptionsQuery,
+  buildCmdCollectionsEmployerOptionsQuery,
   CMD_FUNDING_MARKETS,
   buildCohortCurveQueries,
   buildCohortDrilldownQueries,
@@ -217,7 +218,8 @@ test('allowed_amount / pct_allowed / pct_paid are SORTABLE AGAIN (0059 ③) — 
   // Projection: displayed allowed IS the tiered value; pcts read straight off the matview.
   const { sql } = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
   assert.match(sql, /allowed_reliable as allowed_amount/);
-  assert.match(sql, /pct_allowed, pct_paid/);
+  // qualified `t.` since the employer join (0101) made bare column names ambiguous
+  assert.match(sql, /t\.pct_allowed, t\.pct_paid/);
   assert.doesNotMatch(sql, /round\(/, 'no per-page pct re-derivation left');
 });
 
@@ -562,8 +564,22 @@ test('grain: every aggregate reads the 0050 charge rollup; row-browsing reads st
   // (snaps/sel/picked) is DELETED; allowed_reliable/pct_allowed/pct_paid are read materialized.
   const grid = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
   assert.match(grid.sql, /from collections\.cmd_explorer_charge_rollup t/);
-  assert.doesNotMatch(grid.sql, /cmd_explorer_rows/);
   assert.doesNotMatch(grid.sql, /snaps|picked|recon_val|latest_pos/, 'the X-era override CTEs are gone');
+  // The base table IS referenced now (0101's employer join), so a blanket doesNotMatch on
+  // cmd_explorer_rows no longer expresses the invariant. State the invariant DIRECTLY instead —
+  // it is strictly stronger than the old proxy, not a relaxation of it:
+  //   the ONLY base-table reference is the 1:1 LEFT JOIN for the single non-money employer column,
+  //   and no grain-bearing value is sourced from it.
+  const baseRefs = [...grid.sql.matchAll(/collections\.cmd_explorer_rows/g)];
+  assert.equal(baseRefs.length, 1, 'exactly one base-table reference — the employer join');
+  assert.match(grid.sql, /left join collections\.cmd_explorer_rows e on e\.id = p\.id/);
+  // e.* supplies employer_name and NOTHING else. Money/ratio columns re-derived per page from
+  // snapshot-grain base rows is precisely the >100%-ratio bug the 0050/0059 grain audit fixed.
+  const eRefs = [...grid.sql.matchAll(/\be\.(\w+)/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(eRefs)].sort(), ['employer_name', 'id']);
+  for (const money of ['allowed_amount', 'allowed_reliable', 'charge_amount', 'insurance_payments', 'pct_allowed', 'pct_paid']) {
+    assert.doesNotMatch(grid.sql, new RegExp(`e\\.${money}`), `${money} must come from the rollup, never the base table`);
+  }
 });
 
 test('grain: the %-paid denominator floor is the SHARED select everywhere ratios render', () => {
@@ -853,4 +869,160 @@ test('employer options query: tenant-scoped, ILIKE on employer_norm, term escape
   assert.match(sql, /select employer_norm, employer_norm as employer_name/);
   // LIKE metacharacter in the term is escaped, never interpolated
   assert.deepEqual(params, [ENTITY, '%boe\\%ing%', 25]);
+});
+
+// --- collections-native employer (migration 0101) ---------------------------
+// These cover the dimension that arrives on the CMD report itself. They must never touch the VOB
+// plane — Collections reads collections data only (ruled 2026-08-15). Several assertions below are
+// deliberately NEGATIVE for that reason: a regression that "helpfully" routes Collections employer
+// through vob.member_benefits_latest would otherwise look like a passing feature.
+
+test('grid: employer comes from a LEFT JOIN on the base table, never from the rollup', () => {
+  const { sql, params } = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
+  // the join is LEFT (an INNER would silently drop grid rows whose base row is missing)
+  assert.match(sql, /left join collections\.cmd_explorer_rows e on e\.id = p\.id/);
+  assert.match(sql, /select p\.\*, e\.employer_name from \(/);
+  // the rollup must NOT be asked for a column it does not have
+  assert.doesNotMatch(sql, /t\.employer_name/, 'the rollup has no employer column and never will');
+  assertAllBound(sql, params);
+});
+
+test('grid: the LIMIT is inside the subquery so the join runs on one page, not the whole table', () => {
+  const { sql, params } = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
+  // limit is bound INSIDE the parenthesised subquery, before the join
+  const inner = sql.slice(sql.indexOf('from ('), sql.indexOf(') p left join'));
+  assert.match(inner, /limit \$\d+/, 'LIMIT must be inside the subquery');
+  assert.doesNotMatch(sql.slice(sql.indexOf(') p left join')), /limit /, 'no LIMIT after the join');
+  assertAllBound(sql, params);
+});
+
+test('grid: the outer ORDER BY uses the OUTPUT name, so allowed_amount does not 42703', () => {
+  // allowed_amount is the ONE key whose physical rollup column differs (allowed_reliable). The
+  // subquery projects it as `t.allowed_reliable AS allowed_amount`, so the OUTER query — which
+  // selects from that subquery — can only reference the output name. Referencing the physical
+  // name there is an undefined-column error, and because the grid's keyset cursor is built from
+  // the LAST ROW of this result, an unordered outer query would also silently skip/repeat pages.
+  const sort: CmdExplorerSort = { column: 'allowed_amount', direction: 'desc' };
+  const { sql } = buildCmdExplorerQuery(null, {}, sort, 51, ENTITY);
+  assert.match(sql, /t\.allowed_reliable as allowed_amount/, 'inner projects the physical column');
+  assert.match(sql, /order by t\.allowed_reliable desc/, 'inner sorts on the physical column');
+  assert.match(sql, /order by p\.allowed_amount desc nulls last, p\.id desc/, 'outer sorts on the alias');
+  assert.doesNotMatch(sql, /p\.allowed_reliable/, 'p exposes the alias only — p.allowed_reliable would 42703');
+});
+
+test('grid: every sortable column produces an outer ORDER BY that exists on the subquery', () => {
+  // Guards the whole allowlist, not just the one remapped key: if a future column is projected
+  // under an alias, this catches the mismatch instead of leaving a runtime 42703 for one sort.
+  const projected = new Set([
+    'id', 'charge_date', 'payment_received', 'cpt_code', 'revenue_code', 'facility',
+    'charge_amount', 'allowed_amount', 'insurance_payments', 'adjustments',
+    'patient_balance_due', 'primary_payer', 'pct_allowed', 'pct_paid', 'ingested_at',
+  ]);
+  for (const column of CMD_EXPLORER_SORTABLE_COLUMNS) {
+    assert.ok(projected.has(column), `${column} must be projected by the subquery to be sortable`);
+    const { sql } = buildCmdExplorerQuery(null, {}, { column, direction: 'asc' }, 51, ENTITY);
+    assert.match(sql, new RegExp(`order by p\\.${column} asc nulls last, p\\.id asc`));
+  }
+});
+
+test('employer_names: a non-empty array emits an id semi-join over the BASE table', () => {
+  const filter: CmdExplorerFilter = { employer_names: ['BOEING', 'STARBUCKS'] };
+  const { sql, params } = buildCmdExplorerQuery(null, filter, SORT, 51, ENTITY);
+  assert.match(
+    sql,
+    /id in \(select e\.id from collections\.cmd_explorer_rows e where e\.employer_name = any\(\$2::text\[\]\)\)/,
+  );
+  assert.deepEqual(params[1], ['BOEING', 'STARBUCKS']);
+  assertAllBound(sql, params);
+});
+
+test('employer_names: an EMPTY array is no restriction, never match-nothing', () => {
+  // Same discipline as facility/primary_payers. Emitting `= any(ARRAY[]::text[])` here would
+  // silently return zero rows the moment the picker is cleared.
+  const { sql, params } = buildCmdExplorerQuery(null, { employer_names: [] }, SORT, 51, ENTITY);
+  // The PROJECTION always carries e.employer_name (the display join is unconditional) — what must
+  // be absent is the FILTER predicate. Asserting on the bare column name would be vacuous here.
+  assert.doesNotMatch(sql, /where e\.employer_name = any/);
+  assert.doesNotMatch(sql, /id in \(select e\.id/);
+  assert.equal(params.length, 2, 'only entity ids + limit remain bound');
+  assertAllBound(sql, params);
+});
+
+test('employer_names is the COLLECTIONS dimension — it must never reach the VOB plane', () => {
+  const filter: CmdExplorerFilter = { employer_names: ['BOEING'] };
+  const { sql } = buildCmdExplorerQuery(null, filter, SORT, 51, ENTITY);
+  assert.doesNotMatch(sql, /vob\./, 'Collections reads collections data only');
+  assert.doesNotMatch(sql, /member_benefits_latest/);
+  assert.doesNotMatch(sql, /employer_norm/);
+  assert.doesNotMatch(sql, /member_id_bidx/, 'the VOB semi-join keys on bidx; this one keys on id');
+});
+
+test('the two employer dimensions stay separable: VOB `employers` still uses the bidx semi-join', () => {
+  // Both filters set at once must emit BOTH predicates against their own planes — proving the
+  // collections dimension was added ALONGSIDE the VOB one and did not quietly replace it (which
+  // would break Qualify's market filter).
+  const filter: CmdExplorerFilter = { employers: ['BOEING'], employer_names: ['BOEING'] };
+  const { sql } = buildCmdExplorerQuery(null, filter, SORT, 51, ENTITY);
+  assert.match(sql, /member_id_bidx in \(select member_id_bidx from vob\.member_benefits_latest/);
+  assert.match(sql, /id in \(select e\.id from collections\.cmd_explorer_rows e/);
+});
+
+test('employer_name is an allowlisted grid column key (saved views may show it)', () => {
+  assert.ok(CMD_EXPLORER_COLUMN_KEYS.includes('employer_name'));
+  assert.deepEqual(sanitizeGridColumns(['employer_name', 'facility']), ['employer_name', 'facility']);
+});
+
+test('employer_name is NOT sortable — it is not on the rollup the keyset pages', () => {
+  // Sorting the grid by employer would require the keyset to drive off a column the paged matview
+  // does not have. Adding it to the sortable allowlist without moving it onto the rollup would
+  // produce an undefined-column error on the inner query.
+  assert.ok(!(CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes('employer_name'));
+});
+
+test('collections employer options: reads the base table, escapes the term, binds every value', () => {
+  const { sql, params } = buildCmdCollectionsEmployerOptionsQuery(ENTITY, 'boe%ing', 25);
+  assert.match(sql, /from collections\.cmd_explorer_rows/);
+  assert.match(sql, /employer_name ilike \$2/);
+  assert.match(sql, /business_entity_id = any\(\$1::uuid\[\]\)/, 'tenant-scoped');
+  assert.match(sql, /group by employer_name order by employer_name limit \$3/);
+  // blank-but-present employers are excluded so the picker never offers an empty option
+  assert.match(sql, /employer_name is not null and employer_name <> ''/);
+  // NOT the VOB sibling
+  assert.doesNotMatch(sql, /vob\./);
+  assert.doesNotMatch(sql, /employer_norm/);
+  // LIKE metacharacter escaped, never interpolated
+  assert.deepEqual(params, [ENTITY, '%boe\\%ing%', 25]);
+});
+
+test('grid: an UNVALIDATED sort column can never reach the SQL text', () => {
+  // Defence in depth. resolveCmdExplorerSort gates the live path (app/lib/actions.ts), but
+  // buildCmdExplorerQuery is EXPORTED and the outer ORDER BY interpolates the output column name
+  // rather than a map lookup — so the builder must re-validate rather than trust its argument.
+  const evil = "payment_received desc, id; drop table collections.cmd_explorer_rows --";
+  const { sql, params } = buildCmdExplorerQuery(
+    null,
+    {},
+    { column: evil as never, direction: 'desc' },
+    51,
+    ENTITY,
+  );
+  assert.doesNotMatch(sql, /drop table/i, 'no unvalidated column text may reach the statement');
+  assert.doesNotMatch(sql, /--/, 'no comment sequence either');
+  // falls back to the default sort key rather than emitting `p.undefined`
+  assert.match(sql, /order by p\.payment_received desc nulls last, p\.id desc/);
+  assert.doesNotMatch(sql, /p\.undefined/);
+  assertAllBound(sql, params);
+});
+
+test('grid: a bogus sort DIRECTION cannot reach the SQL either', () => {
+  const { sql } = buildCmdExplorerQuery(
+    null,
+    {},
+    { column: 'payment_received', direction: 'asc; drop table x --' as never },
+    51,
+    ENTITY,
+  );
+  // `dir` is a ternary over two literals, so anything not exactly 'asc' becomes 'desc'
+  assert.doesNotMatch(sql, /drop table/i);
+  assert.match(sql, /order by p\.payment_received desc nulls last, p\.id desc/);
 });

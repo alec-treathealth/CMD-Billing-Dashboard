@@ -114,6 +114,8 @@ const INSERT_COLS = [
   // Pull provenance (0084) — non-PHI roster facilityCode, appended after ②a. NOT in the
   // fingerprint (see PlainRow.pull_facility_code); NULL from the seed/adapter paths.
   'pull_facility_code',
+  // Plan sponsor (0101) — non-PHI, appended LAST. NOT encrypted, NOT in the fingerprint.
+  'employer_name',
 ] as const;
 
 const BATCH = 500;
@@ -152,6 +154,19 @@ export interface PlainRow {
    *  change because a different account returned identical content. ON CONFLICT DO NOTHING means
    *  the FIRST writer's provenance sticks — first-seen semantics, like ingested_at. */
   pull_facility_code?: string | null;
+  /** Plan sponsor / group employer (0101) — non-PHI, same class as primary_payer. NOT the
+   *  employee/subscriber name (that is patient_name, PHI, encrypted).
+   *
+   *  NOT part of the LOCKED row_fingerprint, and this is the load-bearing detail: the dedup key
+   *  must not change because a column was ADDED to the CMD report. If employer joined the hash,
+   *  every one of the 650,696 existing rows would compute a new key, ON CONFLICT DO NOTHING would
+   *  never fire, and the next hourly run would re-insert the entire book. Same fence and same
+   *  reasoning as the ②a Feed-1 columns and pull_facility_code.
+   *
+   *  Consequence to know: because the cron is ON CONFLICT DO NOTHING, employer lands ONLY on rows
+   *  inserted AFTER the report started carrying it. Every pre-existing row stays null until the
+   *  one-shot fingerprint-matched backfill sets it. That is intended, not a gap. */
+  employer_name?: string | null;
 }
 
 type MapResult = { ok: true; row: PlainRow } | { ok: false; label: string };
@@ -279,6 +294,16 @@ export function mapRow(full: CmdExplorerFullRow, sourceFile: string): MapResult 
       claim_status_category: claimStatusCategory,
       source_file: sourceFile,
       row_fingerprint: fingerprint,
+      // Plan sponsor (0101). Trimmed to null when blank so an empty CSV cell never becomes a
+      // zero-length employer the type-ahead would offer as a pickable option. Assigned AFTER
+      // `fingerprint` above deliberately — the hash is already sealed at this point, which is the
+      // whole fence: employer can never influence the dedup key.
+      // ⚠ `?? null` COERCION, NOT `=== null`. `undefined === null` is FALSE, so an ABSENT field
+      // would fall through to `.trim()` and throw — the exact trap that has bitten this repo
+      // before. CmdExplorerFullRow types this as required, but a caller constructing the shape by
+      // hand (adapters, fixtures) can and does omit it, and a TypeError here would abort the whole
+      // ingest batch rather than skip one row. Coerce first, then narrow.
+      employer_name: (full.employer_name ?? null)?.trim() || null,
     },
   };
 }
@@ -394,6 +419,10 @@ async function buildInsertParams(row: PlainRow, businessEntityId: string): Promi
     row.charge_id, row.charge_entered_date, row.charge_to_date, row.claim_status_raw, row.claim_status_category,
     // Pull provenance (0084) — null when the source carries none (seed CSV, Indigo adapter).
     row.pull_facility_code ?? null,
+    // Plan sponsor (0101) — non-PHI plaintext, NOT encrypted and NOT blind-indexed. It is ruled
+    // non-PHI precisely so it can be read and searched in the clear; running it through encryptPhi
+    // would make the whole feature impossible. Null for any source whose report predates the column.
+    row.employer_name ?? null,
   ];
 }
 

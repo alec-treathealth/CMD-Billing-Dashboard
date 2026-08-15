@@ -528,9 +528,9 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **22 cron entries across 20 distinct routes**
-(`billing-audit-consolidated` runs on three schedules; the previous 21/19 count
-predated `pipeline-tick`):
+`app/vercel.json` declares **23 cron entries across 21 distinct routes**
+(`billing-audit-consolidated` runs on three schedules; the previous 22/20 count
+predated `indigo-era-835`, and 21/19 predated `pipeline-tick`):
 
 | Route | Cadence |
 |---|---|
@@ -543,7 +543,7 @@ predated `pipeline-tick`):
 | `facility-outcomes` | daily 04:10 |
 | `qualify-rating-history` | daily 05:10 — DB-only; inert 500 until mig 0093 applies |
 | `cmd-explorer-catchup` | daily 07:52 |
-| `era-835` | daily 08:50 |
+| `era-835` (BXR) · `indigo-era-835` | daily 08:50 / 09:50 |
 | `vob-sync` | daily 09:17 |
 | `refresh-cmd-payer` | daily 10:50 |
 | `reconcile-deposits` | daily 11:50 |

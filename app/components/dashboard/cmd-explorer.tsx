@@ -82,6 +82,8 @@ import {
   loadCmdSearchSummary,
   loadCmdExplorerFacilities,
   loadCmdExplorerPayers,
+  loadCollectionsEmployerCoverage,
+  searchCollectionsEmployers,
   loadCohortCurve,
   loadCohortDrilldown,
   generateCollectionsAiAnalysis,
@@ -132,6 +134,11 @@ const COLUMNS: readonly { key: ColKey; label: string; phi: boolean; numeric: boo
   { key: 'cpt_code', label: 'CPT Code', phi: false, numeric: false },
   { key: 'revenue_code', label: 'Revenue Code', phi: false, numeric: false },
   { key: 'primary_payer', label: 'Primary Payer', phi: false, numeric: false },
+  // Plan sponsor (migration 0101). Sits beside Primary Payer because it is the same KIND of
+  // fact — a plan-level attribute of the coverage, not an attribute of the person. phi:false is
+  // the 2026-08-14 ruling: this is the EMPLOYER, never the employee (that is Patient Name, two
+  // rows down, which stays phi:true). Rendering it masked would defeat the whole feature.
+  { key: 'employer_name', label: 'Employer', phi: false, numeric: false },
   { key: 'patient_name', label: 'Patient Name', phi: true, numeric: false },
   { key: 'member_id_raw', label: 'Member ID', phi: true, numeric: false },
   { key: 'group_number', label: 'Group Number', phi: true, numeric: false },
@@ -144,6 +151,15 @@ const COLUMNS: readonly { key: ColKey; label: string; phi: boolean; numeric: boo
   { key: 'adjustments', label: 'Adjustments', phi: false, numeric: true },
   { key: 'patient_balance_due', label: 'Patient Balance Due', phi: false, numeric: true },
 ];
+/**
+ * Minimum characters before the employer type-ahead queries the server. MIRRORS
+ * CMD_SEARCH_TERM_MIN in src/collections/cmdExplorerQuery.ts — this copy exists only to avoid
+ * firing a request the server would reject anyway, and is NOT the boundary: searchCollectionsEmployers
+ * enforces the same floor server-side, because a client-side gate is a UX optimisation and never a
+ * guarantee. A 1–2 character term matches a large fraction of a 650k-row table.
+ */
+const MIN_SEARCH_LEN = 3;
+
 const COLUMN_LABEL: Record<string, string> = Object.fromEntries(COLUMNS.map((c) => [c.key, c.label]));
 const IS_PHI = new Set<string>(COLUMNS.filter((c) => c.phi).map((c) => c.key));
 const IS_NUMERIC = new Set<string>(COLUMNS.filter((c) => c.numeric).map((c) => c.key));
@@ -366,6 +382,19 @@ export function CmdCollectionsExplorer({
   // Payer multi-select (guided payer search). The distinct-payer vocabulary is near-static, so it's
   // loaded once per view (like facilities) and filtered client-side as the user types.
   const [payerOptions, setPayerOptions] = useState<string[]>([]);
+  // Employer segment (migration 0101). 'all' is the default and emits NO server predicate.
+  const [employerMode, setEmployerMode] = useState<'all' | 'employer' | 'individual'>('all');
+  // Picked employers for the guided type-ahead, meaningful only while employerMode === 'employer'.
+  const [employerSelection, setEmployerSelection] = useState<string[]>([]);
+  // Whether ANY employer value exists in this tenant scope — see the coverage effect below.
+  const [hasEmployerData, setHasEmployerData] = useState(false);
+  // Employer type-ahead is SERVER-driven (the vocabulary is far too large to load whole, unlike
+  // the ~260-entry facility/payer lists). The picker reports the typed query; we debounce it and
+  // hand back whatever the server returned, unfiltered — re-filtering client-side would drop rows
+  // the server deliberately matched.
+  const [employerOptions, setEmployerOptions] = useState<string[]>([]);
+  const [employerLoading, setEmployerLoading] = useState(false);
+  const [employerQuery, setEmployerQuery] = useState('');
   const [payerSelection, setPayerSelection] = useState<string[]>([]);
 
   // Searchable PHI (gated to canRevealPhi + audited server-side). These are matched via keyed
@@ -490,6 +519,10 @@ export function CmdCollectionsExplorer({
     hasPhiSearch;
   // Stable dep keys for the selection sets (array identity changes on every toggle otherwise).
   const payerKey = payerSelection.join('\n');
+  // Stable string proxy for employerSelection's CONTENTS, mirroring payerKey. A raw array in a
+  // dependency list is compared by identity, so a new array with identical contents would refetch
+  // every render; the newline join is safe because employer names cannot contain one.
+  const employerKey = employerSelection.join('\n');
   const facilityKey = facilitySelection.join(''); // control char can't appear in a facility name
 
   // --- dual-mode yield + AI-analysis input assembly ------------------------
@@ -571,6 +604,23 @@ export function CmdCollectionsExplorer({
     () => payerOptions.map((p) => ({ value: p, display: p })),
     [payerOptions],
   );
+  const employerPickerOptions = useMemo(
+    () => employerOptions.map((e) => ({ value: e, display: e })),
+    [employerOptions],
+  );
+  const toggleEmployer = useCallback((v: string) => {
+    setEmployerSelection((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]));
+  }, []);
+  const clearEmployers = useCallback(() => setEmployerSelection([]), []);
+  // Switching segment CLEARS the picked employers. A selection left behind by moving to All or
+  // Individual would be invisible (the picker is unmounted) while still describing the grid the
+  // next time Employer is selected — a filter the user cannot see is a filter they cannot trust.
+  const selectEmployerMode = useCallback((m: 'all' | 'employer' | 'individual') => {
+    setEmployerMode(m);
+    setEmployerSelection([]);
+    setEmployerQuery('');
+    setEmployerOptions([]);
+  }, []);
   // Load the tenant-scoped facility options for the multi-select whenever the view changes.
   useEffect(() => {
     // Server-seeded on first mount → skip the initial fetch (the seed is for this view already).
@@ -607,6 +657,60 @@ export function CmdCollectionsExplorer({
     };
   }, [view]);
 
+  // Does this tenant have ANY employer data yet? Gates the segment toggle AND the "Individual"
+  // cell label. Both are wrong before the data lands: `employer_name IS NULL` cannot tell
+  // "individual policy" from "not yet populated", so an ungated toggle would select the entire
+  // book and an ungated label would call every row Individual.
+  //
+  // Fails CLOSED to false on error or refusal — the toggle stays hidden and cells stay em-dashed.
+  // Defaulting to true on failure would surface a filter that looks functional and lies.
+  useEffect(() => {
+    let live = true;
+    loadCollectionsEmployerCoverage(view)
+      .then((r) => {
+        if (live) setHasEmployerData(r.ok ? r.hasEmployerData : false);
+      })
+      .catch(() => {
+        if (live) setHasEmployerData(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [view]);
+
+  // Debounced employer search. The 250ms wait and the MIN_SEARCH_LEN floor both exist to keep a
+  // per-keystroke server query off a 650k-row table; the SERVER enforces the same floor, so this is
+  // an optimisation, never the security boundary.
+  // Only runs while the Employer segment is active — typing cannot be reached in the other modes,
+  // and firing anyway would search on a stale query after a mode switch.
+  useEffect(() => {
+    if (employerMode !== 'employer') return;
+    const q = employerQuery.trim();
+    if (q.length < MIN_SEARCH_LEN) {
+      setEmployerOptions([]);
+      setEmployerLoading(false);
+      return;
+    }
+    let live = true;
+    setEmployerLoading(true);
+    const t = setTimeout(() => {
+      searchCollectionsEmployers(q, view)
+        .then((r) => {
+          if (!live) return;
+          setEmployerOptions(r.ok ? r.employers : []);
+          setEmployerLoading(false);
+        })
+        .catch(() => {
+          if (!live) return;
+          setEmployerOptions([]);
+          setEmployerLoading(false);
+        });
+    }, 250);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [employerQuery, employerMode, view]);
 
   // Dismiss the Month/Year popover on outside pointer-down or Escape — the SAME dismiss behavior as
   // the view-switcher dropdown (D). Listeners attach only while it's open. (The popover holds
@@ -674,6 +778,8 @@ export function CmdCollectionsExplorer({
       facility?: string[];
       primary_payer?: string;
       primary_payers?: string[];
+      employer_names?: string[];
+      employerMode?: 'all' | 'employer' | 'individual';
       cpt_code?: string;
       revenue_code?: string;
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
@@ -686,6 +792,12 @@ export function CmdCollectionsExplorer({
       f.month = month;
     }
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
+    // Employer segment (0101). 'all' emits NOTHING — the server treats absent as unrestricted, and
+    // sending an explicit 'all' would only add a no-op branch to every query plan.
+    if (employerMode !== 'all') f.employerMode = employerMode;
+    // Picked employers narrow WITHIN the Employer segment. Guarded on the mode so a stale selection
+    // left behind by toggling back to All or Individual cannot silently keep filtering the grid.
+    if (employerMode === 'employer' && employerSelection.length > 0) f.employer_names = employerSelection;
     // Facility multi-select is a top-level scope; a facility drill-down chip narrows to that ONE
     // facility (overriding the dropdown). Payer/CPT chips stay exact single-value refinements.
     if (facilitySelection.length > 0) f.facility = facilitySelection;
@@ -718,7 +830,7 @@ export function CmdCollectionsExplorer({
     // year only matters when a specific month is chosen (see original rationale); facilityKey is the
     // stable proxy for facilitySelection's contents (payerKey likewise).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, employerMode, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
   const loadPage = useCallback(
     async (
@@ -799,9 +911,17 @@ export function CmdCollectionsExplorer({
       recencyDays?: number;
       facility?: string[];
       primary_payers?: string[];
+      employer_names?: string[];
+      employerMode?: 'all' | 'employer' | 'individual';
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
     } = {};
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
+    // Employer segment (0101). 'all' emits NOTHING — the server treats absent as unrestricted, and
+    // sending an explicit 'all' would only add a no-op branch to every query plan.
+    if (employerMode !== 'all') f.employerMode = employerMode;
+    // Picked employers narrow WITHIN the Employer segment. Guarded on the mode so a stale selection
+    // left behind by toggling back to All or Individual cannot silently keep filtering the grid.
+    if (employerMode === 'employer' && employerSelection.length > 0) f.employer_names = employerSelection;
     // Top-level scope (date window + facility set) applies to the summary too — so the drill lists
     // describe the SAME population the grid shows. The chip refinement does NOT (it's a within-
     // results drill; the chips stay a stable facet navigator while drilling).
@@ -831,7 +951,7 @@ export function CmdCollectionsExplorer({
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, view]);
+  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, employerMode, view]);
 
   // Fetch the alpha-prefix cohort curve when a ≥3-char alpha-prefix search is active (PHI-gated).
   // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
@@ -1057,6 +1177,14 @@ export function CmdCollectionsExplorer({
     const v = row[key as keyof CmdExplorerRow] as string | null;
     if (IS_PERCENT.has(key)) return formatPercent(v);
     if (IS_NUMERIC.has(key)) return formatMoney(v);
+    // Employer: a null means "this policy has no plan sponsor" — an individual policy — but ONLY
+    // once employer data actually exists for this tenant. Before the CMD reports carry the column
+    // and the one-shot backfill lands, EVERY row is null, and printing "Individual" across the
+    // whole book would state a fact we do not have. Gate on coverage and fall back to the ordinary
+    // em dash, which correctly reads as "no value" rather than as a classification.
+    // Nothing is ever written to the row to mark it individual (ruled 2026-08-15) — this label is
+    // derived at render time only.
+    if (key === 'employer_name') return v ?? (hasEmployerData ? 'Individual' : '—');
     return v ?? '—';
   }
 
@@ -1101,6 +1229,67 @@ export function CmdCollectionsExplorer({
             onToggle={togglePayer}
             onClear={clearPayers}
           />
+          {/* Employer segment (migration 0101): [All][Employer][Individual].
+              RENDERED ONLY WHEN THE TENANT ACTUALLY HAS EMPLOYER DATA. Before the CMD reports carry
+              the column and the one-shot backfill lands, every row's employer is NULL — so an
+              "Individual" segment would silently select the entire book while claiming a meaning
+              the data cannot yet support. Hiding it is the honest degradation; it appears by itself
+              once coverage exists (loadCollectionsEmployerCoverage). */}
+          {hasEmployerData && (
+            <div
+              className="inline-flex items-center gap-0.5 rounded-lg border border-line bg-surface p-0.5"
+              role="group"
+              aria-label="Employer segment"
+            >
+              {([
+                ['all', 'All'],
+                ['employer', 'Employer'],
+                ['individual', 'Individual'],
+              ] as const).map(([mode, text]) => {
+                const active = employerMode === mode;
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    aria-pressed={active}
+                    title={
+                      mode === 'individual'
+                        ? 'Policies with no plan sponsor on the claim'
+                        : mode === 'employer'
+                          ? 'Policies sponsored by an employer'
+                          : 'No employer restriction'
+                    }
+                    onClick={() => selectEmployerMode(mode)}
+                    className={[
+                      'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                      active
+                        ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]'
+                        : 'text-muted-foreground hover:bg-[var(--brand-soft)]',
+                    ].join(' ')}
+                  >
+                    {text}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {/* The employer picker narrows WITHIN the Employer segment, so it only exists there.
+              serverDriven: onQueryChange feeds the debounced search and the returned set is passed
+              through unfiltered (the server already matched it). */}
+          {hasEmployerData && employerMode === 'employer' && (
+            <MultiSelectTagPicker
+              label="Employer"
+              placeholder="Type to find employers…"
+              icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+              options={employerPickerOptions}
+              selected={employerSelection}
+              onToggle={toggleEmployer}
+              onClear={clearEmployers}
+              onQueryChange={setEmployerQuery}
+              loading={employerLoading}
+              minChars={MIN_SEARCH_LEN}
+            />
+          )}
           {/* Unified time window (A): ONE segmented control — [7d][14d][30d][90d][Month/Year ▾].
               DEFAULT is 90d (see recencyDays init) so the first-load summary hits the index path;
               re-clicking the active chip or picking a Month/Year reaches the "All months" state (no
