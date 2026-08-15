@@ -55,6 +55,7 @@ function fullRow(override: RowOverride = {}): CmdExplorerFullRow {
     charge_entered_date: '2/17/2026',
     charge_to_date: '5/4/2026',
     claim_status_raw: 'PAID',
+    employer_name: null,
     ...rest,
     phi: { patient_name: 'SMITH, JOHN', member_id_raw: 'PGE081', group_number: 'GRP123', ...phiOverride },
   };

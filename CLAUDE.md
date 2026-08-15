@@ -319,9 +319,9 @@ library from `../src` and is the Vercel app root.
 
 Two **separate** migration planes — never mix the directories:
 
-| Plane | Directory | Next number (as of 2026-08-12) |
+| Plane | Directory | Next number (as of 2026-08-15) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0101** — re-derived from the live ledger later on 2026-08-12: **0099 (etl_run + pipeline_state) APPLIED LIVE 2026-08-12**, ledger `20260812203336` (it was authored-only when the previous "next = 0100" note was written); **0100 (`facility_assignments_guard` search_path pin, audit P1-13) is AUTHORED on `fix/qualify-audit-wave1`, NOT applied** — apply is gated like any migration. 0098 applied live 2026-08-11 (`20260811040852`); 0096's file is tracked. |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0103** — **0101 AND 0102 ARE BOTH APPLIED LIVE 2026-08-15**; do not reuse either. **0101** (`cmd_explorer_rows.employer_name` + trigram GIN + partial index + column-scoped `update (employer_name)` grant) went in as **autocommit `execute_sql`, NOT `apply_migration`** — two `CREATE INDEX CONCURRENTLY` — so it left **no ledger row of its own** and one was **inserted by hand** as `20260815103136`. ⚠ An `execute_sql` apply is invisible to the ledger: if you apply that way, insert the row yourself or the next session re-issues your number. **0102** (`cmd_explorer_writer_update` RLS policy) used `apply_migration`, ledger `20260815103354`. **0102 exists because 0101 was incomplete**: the table has RLS enabled and `cmd_rollup_writer` is not `rolbypassrls`, so the column-scoped UPDATE grant matched **zero rows and raised nothing** until an UPDATE policy existed — a GRANT is half the gate (see 0089/0090). Earlier context, re-derived from the live ledger on 2026-08-12: | **0099 (etl_run + pipeline_state) APPLIED LIVE 2026-08-12**, ledger `20260812203336` (it was authored-only when the previous "next = 0100" note was written); **0100 (`facility_assignments_guard` search_path pin, audit P1-13) is AUTHORED on `fix/qualify-audit-wave1`, NOT applied** — apply is gated like any migration. 0098 applied live 2026-08-11 (`20260811040852`); 0096's file is tracked. |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **035** — 032/033/034 applied live 2026-08-10 |
 
 **0097 (Qualify watchers + recent searches) is APPLIED LIVE 2026-08-10** (ledger `20260810120258`),
@@ -528,9 +528,9 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **22 cron entries across 20 distinct routes**
-(`billing-audit-consolidated` runs on three schedules; the previous 21/19 count
-predated `pipeline-tick`):
+`app/vercel.json` declares **23 cron entries across 21 distinct routes**
+(`billing-audit-consolidated` runs on three schedules; the previous 22/20 count
+predated `indigo-era-835`, and 21/19 predated `pipeline-tick`):
 
 | Route | Cadence |
 |---|---|
@@ -543,7 +543,7 @@ predated `pipeline-tick`):
 | `facility-outcomes` | daily 04:10 |
 | `qualify-rating-history` | daily 05:10 — DB-only; inert 500 until mig 0093 applies |
 | `cmd-explorer-catchup` | daily 07:52 |
-| `era-835` | daily 08:50 |
+| `era-835` (BXR) · `indigo-era-835` | daily 08:50 / 09:50 |
 | `vob-sync` | daily 09:17 |
 | `refresh-cmd-payer` | daily 10:50 |
 | `reconcile-deposits` | daily 11:50 |

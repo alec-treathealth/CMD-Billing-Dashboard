@@ -48,6 +48,8 @@ import {
   type CollectionsAiInput,
   cmdExplorerFacilities,
   cmdExplorerPayers,
+  cmdExplorerCollectionsEmployers,
+  cmdExplorerEmployerCoverage,
   recordAccess,
   revealCmdExplorerRow,
   revealCmdExplorerRows,
@@ -1887,6 +1889,69 @@ export async function loadCmdExplorerPayers(view?: DashboardView): Promise<CmdPa
   if (entityIds === null) return { ok: false };
   try {
     return { ok: true, payers: await cmdExplorerPayers(entityIds) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/** Max employer options one type-ahead keystroke may return. Bounds the payload AND the work. */
+const COLLECTIONS_EMPLOYER_OPTIONS_LIMIT = 25;
+
+export type CmdCollectionsEmployersResult = { ok: true; employers: string[] } | { ok: false };
+
+/**
+ * COLLECTIONS employer type-ahead (migration 0101) — reads collections.cmd_explorer_rows, NOT the
+ * VOB. Ruled 2026-08-15: Collections reads collections data only; CMD is always the most current
+ * source for collections, so a VOB-derived employer would both under-cover and disagree with the
+ * grid beside it.
+ *
+ * Unlike facility/payer (~260 options each, loaded whole and filtered client-side), the employer
+ * vocabulary is large, so this searches SERVER-SIDE per keystroke. The term floor is enforced HERE
+ * as well as in the client: a 1–2 character term matches a huge fraction of the book and is the
+ * single most expensive query on this surface, so the server must not depend on the client to gate
+ * it. Returns [] rather than an error for a short term — a mid-typing request is not a failure.
+ *
+ * RBAC-clamped by `view` through the server-derived entity scope. Non-PHI: an employer is a
+ * plan-level attribute in the same class as the payer name.
+ */
+export async function searchCollectionsEmployers(
+  term: string,
+  view?: DashboardView,
+): Promise<CmdCollectionsEmployersResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false };
+  const t = typeof term === 'string' ? term.trim() : '';
+  if (t.length < CMD_SEARCH_TERM_MIN) return { ok: true, employers: [] };
+  try {
+    return {
+      ok: true,
+      employers: await cmdExplorerCollectionsEmployers(entityIds, t, COLLECTIONS_EMPLOYER_OPTIONS_LIMIT),
+    };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export type CmdEmployerCoverageResult = { ok: true; hasEmployerData: boolean } | { ok: false };
+
+/**
+ * Whether the caller's tenant has any employer data yet — gates the All/Employer/Individual toggle.
+ *
+ * Without this the Individual segment would silently mean "every row" until the backfill lands,
+ * because `employer_name IS NULL` cannot distinguish "individual policy" from "not yet populated".
+ * The UI uses this to disable the segment and say so, rather than render a filter that looks like
+ * it works and is wrong.
+ *
+ * Fails CLOSED: an error returns ok:false and the client leaves the toggle on All. Defaulting to
+ * "coverage exists" on failure would re-introduce exactly the misleading filter this prevents.
+ */
+export async function loadCollectionsEmployerCoverage(
+  view?: DashboardView,
+): Promise<CmdEmployerCoverageResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) return { ok: false };
+  try {
+    return { ok: true, hasEmployerData: await cmdExplorerEmployerCoverage(entityIds) };
   } catch {
     return { ok: false };
   }
