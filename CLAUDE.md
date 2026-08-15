@@ -97,6 +97,18 @@ fresh clone and in CI, not only on Alec's machine.
   browser's only data path is Next Server Actions.
 - **Tests stay hermetic** — `node:test` only, no new test-runner deps, no live
   LLM/DB in `npm test`. `src/liveProbe.ts` is the separate manual live probe.
+  **`jsdom` is the ONE sanctioned exception** (app devDependency, added
+  2026-08-15): `node:test` is still the runner, and jsdom exists solely so
+  FOCUS and KEYBOARD behaviour can be executed rather than asserted as markup —
+  `useDialog`'s effect is SSR-inert, so a `renderToStaticMarkup` test can prove
+  `role="dialog"` is present but never that focus moved, that Escape closed, or
+  that Tab was trapped. Those are WCAG 2.1.1 / 2.4.3 claims and a compliance PR
+  should not assert them untested. **Scope it hard:** jsdom has no layout engine
+  and no paint, so it must NEVER be used for contrast, target size
+  (`getBoundingClientRect()` returns zeros), sticky-header overlap, or what a
+  screen reader actually announces — those stay browser-verified. See
+  `app/test/helpers/dom.tsx` for the full boundary and
+  `app/test/dialog-focus.test.tsx` for the pattern.
 - **Never add a `Co-Authored-By` trailer** to a commit or PR.
 - **Gate outward-facing actions.** Show results and HOLD before applying a
   migration, committing, pushing, or deploying. Don't add or alter SQL query
