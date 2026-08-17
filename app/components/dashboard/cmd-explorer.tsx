@@ -924,7 +924,7 @@ export function CmdCollectionsExplorer({
     // year only matters when a specific month is chosen (see original rationale); facilityKey is the
     // stable proxy for facilitySelection's contents (payerKey likewise).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, employerMode, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, employerMode, refinement, hasPhiSearch, dMember, dAlpha, dGroup, nameMatchIds]);
 
   const loadPage = useCallback(
     async (
@@ -1050,7 +1050,7 @@ export function CmdCollectionsExplorer({
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, employerMode, view]);
+  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, employerMode, view, nameMatchIds]);
 
   // Fetch the alpha-prefix cohort curve when a ≥3-char alpha-prefix search is active (PHI-gated).
   // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
