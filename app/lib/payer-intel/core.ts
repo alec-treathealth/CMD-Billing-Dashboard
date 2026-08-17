@@ -158,6 +158,10 @@ function stripResultAmounts(result: PayerIntelResult): PayerIntelResult {
     byFacility: result.byFacility.map((g) => ({ ...g, charge: null })),
     placement: result.placement.map((p) => ({ ...p, paidPerPatient: null, billed: null })),
     combos: result.combos.map((c) => ({ ...c, charge: null })),
+    // The embedded first grid page rides the SAME strip — it is a dollar-bearing wire that now
+    // travels inside the result, and a second list that skipped the choke point is exactly how
+    // Qualify's bookFacilities leaked (see this file's header).
+    grid: stripGridAmounts(result.grid),
   };
 }
 
@@ -549,7 +553,18 @@ export async function runPayerIntelSearchCore(
     byPayer: [],
     byFacility: [],
   };
-  const agg = termUnresolved ? empty : await deps.loadAggregates(filter, gate.entityIds);
+  // Aggregates · the first grid page · the live census, in ONE fan-out. The grid rides the SEARCH
+  // (see PayerIntelResult.grid) rather than a second Server Action; the census is what turns the
+  // placement table's bed columns from a column of em dashes into the capacity half of
+  // "capacity × collectability" — and without it `derivePlacementFlags` can never fire, because
+  // every flag it assigns is conditioned on openBeds.
+  const [agg, page, censusRaw] = await Promise.all([
+    termUnresolved ? Promise.resolve(empty) : deps.loadAggregates(filter, gate.entityIds),
+    termUnresolved
+      ? Promise.resolve({ rows: [], nextCursor: null })
+      : deps.loadGridRows(filter, null, gate.entityIds),
+    deps.loadCensus(),
+  ]);
 
   // Rating off the nightly table (pair when a prefix resolved, payer-wide otherwise).
   let rating: PayerIntelResult['rating'] = { value: null, band: null, deltaPts: null, asOf: null, subject: 'none' };
@@ -592,22 +607,38 @@ export async function runPayerIntelSearchCore(
     revenue,
     windowDays,
   };
+  // Live census by facility_code. RESIDENTIAL ONLY carries bed meaning: an outpatient board
+  // stores open_beds = 0 to mean "not applicable", and reading that as "full" is the exact
+  // misread the 0078 contract forbids — so an OP facility keeps null beds here and renders a
+  // dash, the same as a facility with no census row at all.
+  const censusByCode = new Map(
+    censusRaw
+      .filter((c) => c.board_family === RESIDENTIAL)
+      .map((c) => [c.facility_code, c] as const),
+  );
   const placement = derivePlacementFlags(
-    agg.placement.map((p) => ({
-      facility: p.facility,
-      facilityCode: p.facility_code,
-      careSetting: p.care_setting,
-      lineCount: p.line_count,
-      distinctMembers: p.distinct_members,
-      pctCollected: p.pct_collected,
-      paidPerPatient: p.paid_per_patient,
-      billed: p.billed,
-      openBeds: null,
-      bedCapacity: null,
-      pendingAdmits: null,
-      censusSyncedAt: null,
-      flag: null,
-    })),
+    agg.placement.map((p) => {
+      const c = p.facility_code !== null ? censusByCode.get(p.facility_code) : undefined;
+      return {
+        facility: p.facility,
+        facilityCode: p.facility_code,
+        careSetting: p.care_setting,
+        lineCount: p.line_count,
+        distinctMembers: p.distinct_members,
+        pctCollected: p.pct_collected,
+        paidPerPatient: p.paid_per_patient,
+        billed: p.billed,
+        openBeds: c?.open_beds ?? null,
+        bedCapacity: c?.bed_capacity ?? null,
+        // Still an honest null everywhere: the Monday sync drops non-admitted statuses before it
+        // writes, so no pending count exists to join. The RENDERER no longer shows a column for
+        // it (reported twice as "not loading") — restoring the column means an aggregation change
+        // plus a census-table migration, not a UI change.
+        pendingAdmits: null,
+        censusSyncedAt: c?.synced_at ?? null,
+        flag: null,
+      };
+    }),
   );
   const groupOf = (g: { label: string | null; count: number; charge: number }): PayerIntelGroupItem => ({
     label: g.label,
@@ -641,6 +672,7 @@ export async function runPayerIntelSearchCore(
       pctZeroPaid: c.pct_zero_paid,
     })),
     window: { from, to, days: windowDays },
+    grid: shapeGridPage(page),
     viewerHasAmountsCapability: gate.hasAmounts,
   };
   return gate.hasAmounts ? result : stripResultAmounts(result); // strip LAST
@@ -648,19 +680,13 @@ export async function runPayerIntelSearchCore(
 
 // ── Charge-line grid core ────────────────────────────────────────────────────────────────────────
 
-export async function getPayerIntelGridCore(
-  deps: PayerIntelDeps,
-  input: PayerIntelSearchInput,
-  cursor: PayerIntelGridCursor | null,
-): Promise<PayerIntelGridPage> {
-  const gate = await deps.requirePrincipal();
-  if (!gate.ok) throw new Error(gate.error);
-
-  const resolved = await resolvePayerIntelSearch(deps, gate, input);
-  if (resolved.termUnresolved) return { rows: [], nextCursor: null };
-
-  const page = await deps.loadGridRows(resolved.filter, cursor, gate.entityIds);
-  const shaped: PayerIntelGridPage = {
+/** Row shaping shared by the embedded first page and the Load-more page, so the two can never
+ *  disagree about a column. */
+function shapeGridPage(page: {
+  rows: CmdExplorerRow[];
+  nextCursor: PayerIntelGridCursor | null;
+}): PayerIntelGridPage {
+  return {
     rows: page.rows.map((r) => ({
       id: r.id,
       chargeDate: r.charge_date,
@@ -679,6 +705,22 @@ export async function getPayerIntelGridCore(
     })),
     nextCursor: page.nextCursor,
   };
+}
+
+/** LOAD MORE ONLY. Page 1 rides `runPayerIntelSearchCore` (see PayerIntelResult.grid) — this
+ *  exists for the explicit "Load more charge lines" click, where a cursor is always present. */
+export async function getPayerIntelGridCore(
+  deps: PayerIntelDeps,
+  input: PayerIntelSearchInput,
+  cursor: PayerIntelGridCursor | null,
+): Promise<PayerIntelGridPage> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) throw new Error(gate.error);
+
+  const resolved = await resolvePayerIntelSearch(deps, gate, input);
+  if (resolved.termUnresolved) return { rows: [], nextCursor: null };
+
+  const shaped = shapeGridPage(await deps.loadGridRows(resolved.filter, cursor, gate.entityIds));
   return gate.hasAmounts ? shaped : stripGridAmounts(shaped); // strip LAST
 }
 

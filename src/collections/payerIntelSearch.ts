@@ -27,11 +27,7 @@ import {
   type CmdExplorerFilter,
   type ParamAdder,
 } from './cmdExplorerQuery.js';
-import {
-  QUALIFY_TAPE_DELTA_DAYS,
-  QUALIFY_TAPE_MIN_MEMBERS,
-  QUALIFY_TAPE_TOP_N,
-} from './qualifyRatingHistory.js';
+import { QUALIFY_TAPE_DELTA_DAYS, QUALIFY_TAPE_TOP_N } from './qualifyRatingHistory.js';
 
 // ── Tunables ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -40,10 +36,34 @@ import {
 export const PAYER_INTEL_DECLINE_THRESHOLD_PTS = 5;
 /** Decliners rail window (days). Current window = trailing N; prior = the N before it. */
 export const PAYER_INTEL_DECLINE_WINDOW_DAYS = 90;
-/** Floors applied to BOTH windows, in the buildFacilityTrendQuery idiom (lines 3 / patients 5):
- *  a facility thin in either window can produce a 40-point "decline" from two claims. */
+/** Line floor, applied to BOTH windows: a facility thin in either one can manufacture a 40-point
+ *  "decline" out of two claims. */
 export const PAYER_INTEL_DECLINE_MIN_LINES = 3;
-export const PAYER_INTEL_DECLINE_MIN_PATIENTS = 5;
+
+/**
+ * The CLIENT floor a window must clear before this tab will put a score on it — SCALED BY THE
+ * WINDOW, ruled by Alec 2026-08-17: "only 1 client in the time window if it's 7d, 2 if it's 14,
+ * then 3 if it's 30d or beyond."
+ *
+ * The reasoning it encodes: a fixed floor asks a 7-day window to produce as many distinct clients
+ * as a quarter, which at this book's scale means the short windows are structurally silent — the
+ * measured shape is that a prefix is usually ONE PERSON, and the flat 5 this rail shipped with
+ * suppressed most real movement rather than most noise. Scaling ties the confidence bar to how
+ * much time the window actually had to accumulate people.
+ *
+ * Applies to BOTH rails (the decliners' two windows and the gainers' rating horizon), so the two
+ * halves of the board agree on what "enough to score" means.
+ *
+ * ⚠ NOT the same knob as `COHORT_MIN_PATIENTS` (5, cmdExplorerQuery.ts) and it must not be
+ * conflated with it: that one is a live SUPPRESSION floor on the Collections cohort curve — a
+ * k-anonymity bound on a shipped production surface, not a display threshold. Lowering it shrinks
+ * the smallest publishable bucket for every reader of that panel and needs its own ruling.
+ */
+export function payerIntelMinClientsFor(windowDays: number): number {
+  if (!Number.isFinite(windowDays) || windowDays <= 7) return 1;
+  if (windowDays <= 14) return 2;
+  return 3;
+}
 /** Rail length bound. */
 export const PAYER_INTEL_DECLINE_TOP_N = 12;
 
@@ -74,7 +94,13 @@ export function buildPayerIntelGainersQuery(opts?: {
   limit?: number;
 }): { sql: string; params: unknown[] } {
   const deltaDays = Math.min(Math.max(Math.trunc(opts?.deltaDays ?? QUALIFY_TAPE_DELTA_DAYS), 1), 3650);
-  const minMembers = Math.min(Math.max(Math.trunc(opts?.minMembers ?? QUALIFY_TAPE_MIN_MEMBERS), 0), 1000);
+  // The window-scaled client floor (1 / 2 / 3 by horizon) — the SAME rule the decliners rail
+  // applies, so the two halves of the board agree on what "enough to score" means. The shipped
+  // Qualify tape keeps its flat QUALIFY_TAPE_MIN_MEMBERS; this is a fork, not an edit.
+  const minMembers = Math.min(
+    Math.max(Math.trunc(opts?.minMembers ?? payerIntelMinClientsFor(deltaDays)), 0),
+    1000,
+  );
   const limit = Math.min(Math.max(Math.trunc(opts?.limit ?? QUALIFY_TAPE_TOP_N), 1), 100);
   // Same inner/outer split as the tape: the INNER order picks WHICH pairs ride (biggest gain
   // first); the OUTER re-sorts for reading (rating desc — scannable, the delta rides each card).
@@ -202,7 +228,9 @@ export function buildFacilityDeclinersQuery(
       windowDays,
       QUALIFY_NO_FACILITY_SQL,
       PAYER_INTEL_DECLINE_MIN_LINES,
-      PAYER_INTEL_DECLINE_MIN_PATIENTS,
+      // Window-SCALED, not a constant: 1 client at 7d, 2 at 14d, 3 at 30d and beyond (the
+      // 2026-08-17 ruling on payerIntelMinClientsFor). Both windows must clear it.
+      payerIntelMinClientsFor(windowDays),
       thresholdPts,
       limit,
     ],

@@ -9,7 +9,7 @@
  * counts render for everyone. Count-ups run only here (RESULT never SSRs — no hydration risk) and
  * bail under prefers-reduced-motion inside useCountUp.
  */
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import type {
   PayerIntelComboItem,
   PayerIntelFacetKey,
@@ -21,6 +21,42 @@ import type {
 import { TAPE_PALETTE } from '../qualify/tokens';
 import { EM_DASH, fmtInt, fmtMoney, fmtPct, fmtPstTime } from './format';
 import { useCountUp } from './useCountUp';
+
+// ── One box, divided into sections ───────────────────────────────────────────────────────────────
+
+/**
+ * The RESULT screen's analysis sections live in ONE card split by dividers (Alec, 2026-08-17:
+ * "all the other components should be together in 1 box divided up into little sections … just
+ * like collections"). Each section therefore renders WITHOUT its own border/shadow — the box owns
+ * the chrome, and a section that draws its own would read as a card inside a card.
+ *
+ * The charge-line grid stays OUTSIDE the box on purpose: it is row-level detail with its own
+ * paging control and its own failure state, not a panel of the summary.
+ */
+export function PayerIntelSectionBox({ children }: { children: ReactNode }) {
+  return (
+    <div className="divide-y divide-line overflow-hidden rounded-md border border-line bg-surface shadow-ths-sm">
+      {children}
+    </div>
+  );
+}
+
+function SectionHead({ title, meta, right }: { title: string; meta?: string; right?: ReactNode }) {
+  return (
+    <div className="mb-2 flex flex-wrap items-baseline gap-x-2.5 gap-y-1 px-1">
+      <h2 className="font-head text-[15px] font-medium tracking-tight text-ink900">{title}</h2>
+      {meta !== undefined ? (
+        <span className="font-mono text-[10px] font-medium uppercase tracking-wider text-ink400">{meta}</span>
+      ) : null}
+      {right !== undefined ? (
+        <>
+          <span className="flex-1" />
+          {right}
+        </>
+      ) : null}
+    </div>
+  );
+}
 
 // ── Hero ─────────────────────────────────────────────────────────────────────────────────────────
 
@@ -216,8 +252,8 @@ function GroupCard({
   onDrill: (label: string) => void;
 }) {
   return (
-    <div className="rounded-md border border-line bg-surface p-4 shadow-ths-sm">
-      <h3 className="text-[11px] font-bold uppercase tracking-wide text-ink600">{title}</h3>
+    <div>
+      <h3 className="px-1 text-[11px] font-bold uppercase tracking-wide text-ink600">{title}</h3>
       {items.length === 0 ? (
         <p className="mt-2 text-sm text-ink400">{EM_DASH}</p>
       ) : (
@@ -262,19 +298,21 @@ export function PayerIntelTopGroups({
   if (byPayer.length === 0 && byFacility.length === 0) return null;
   return (
     <section aria-label="Top payers and facilities" data-pi-section="groups">
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:divide-x md:divide-line">
         <GroupCard
           title="Top payers"
           items={byPayer}
           drillLabel={(l) => `Narrow this search to payer ${l}`}
           onDrill={onDrillPayer}
         />
-        <GroupCard
-          title="Top facilities"
-          items={byFacility}
-          drillLabel={(l) => `Narrow this search to facility ${l}`}
-          onDrill={onDrillFacility}
-        />
+        <div className="md:pl-4">
+          <GroupCard
+            title="Top facilities"
+            items={byFacility}
+            drillLabel={(l) => `Narrow this search to facility ${l}`}
+            onDrill={onDrillFacility}
+          />
+        </div>
       </div>
     </section>
   );
@@ -289,41 +327,31 @@ export function PayerIntelPlacementTable({
   cohortLabel,
 }: {
   items: readonly PayerIntelPlacementItem[];
-  window: { from: string; to: string };
+  window: { from: string; to: string; days: number };
   censusSyncedAt: string | null;
   cohortLabel: string;
 }) {
   const asOfLive = `live · ${fmtPstTime(censusSyncedAt)}`;
-  const asOfTrailing = `${'90d thru'} ${window.to}`;
+  const asOfTrailing = `${window.days}d thru ${window.to}`;
   return (
     <section aria-label="Where this policy places" data-pi-section="placement">
-      <div className="mb-2 flex items-baseline gap-2.5 px-0.5">
-        <h2 className="font-head text-[17px] font-medium tracking-tight text-ink900">Where this policy places</h2>
-        <span className="font-mono text-[10px] font-medium uppercase tracking-wider text-ink400">
-          capacity × collectability
-        </span>
-      </div>
+      <SectionHead title="Where this policy places" meta="capacity × collectability" />
       {items.length === 0 ? (
-        <p className="rounded-md border border-line bg-surface px-4 py-3 text-sm text-ink400">
-          No facility carries charges for this search.
-        </p>
+        <p className="px-1 text-sm text-ink400">No facility carries charges for this search.</p>
       ) : (
-        <div className="overflow-x-auto rounded-md border border-line bg-surface shadow-ths-sm">
+        <div className="overflow-x-auto">
           <table className="w-full border-collapse text-[13px]">
             <thead>
               <tr className="bg-teal50 text-left text-[10px] font-semibold uppercase tracking-wide text-ink600">
                 <th className="px-4 py-2">Facility</th>
+                {/* PENDING ADMITS HAS NO COLUMN, deliberately. The Monday census sync drops every
+                    non-admitted status before it writes, so the number does not exist anywhere in
+                    the database — a column of em dashes read as "broken" twice in review. It comes
+                    back when the aggregation stores pending and the census table gains the column,
+                    not before. Open beds ARE joined (residential only; OP boards store 0 to mean
+                    N/A — the 0078 contract). */}
                 <th className="px-4 py-2 text-right">
                   Open beds
-                  <span className="mt-0.5 block font-mono text-[9px] font-normal normal-case tracking-normal text-ink400">
-                    {asOfLive}
-                  </span>
-                </th>
-                <th
-                  className="px-4 py-2 text-right"
-                  title="Pending admits are not stored by the census sync yet"
-                >
-                  Pending
                   <span className="mt-0.5 block font-mono text-[9px] font-normal normal-case tracking-normal text-ink400">
                     {asOfLive}
                   </span>
@@ -362,9 +390,17 @@ export function PayerIntelPlacementTable({
                       </span>
                     ) : null}
                   </td>
-                  <td className="px-4 py-2.5 text-right font-mono tabular-nums">{p.openBeds !== null ? fmtInt(p.openBeds) : EM_DASH}</td>
-                  <td className="px-4 py-2.5 text-right font-mono tabular-nums text-ink400">
-                    {p.pendingAdmits !== null ? fmtInt(p.pendingAdmits) : EM_DASH}
+                  <td className="px-4 py-2.5 text-right font-mono tabular-nums">
+                    {p.openBeds !== null ? (
+                      <>
+                        {fmtInt(p.openBeds)}
+                        {p.bedCapacity !== null ? (
+                          <span className="text-ink400"> / {fmtInt(p.bedCapacity)}</span>
+                        ) : null}
+                      </>
+                    ) : (
+                      EM_DASH
+                    )}
                   </td>
                   <td className="px-4 py-2.5 text-right font-mono tabular-nums">{fmtPct(p.pctCollected)}</td>
                   <td className="px-4 py-2.5 text-right font-mono tabular-nums">{fmtMoney(p.paidPerPatient)}</td>
@@ -417,15 +453,11 @@ export function PayerIntelChargeLines({
   const csv = useMemo(() => combosToCsv(combos), [combos]);
   return (
     <section aria-label="CPT by revenue-code combinations" data-pi-section="chargelines">
-      <div className="mb-2 flex items-baseline gap-2.5 px-0.5">
-        <h2 className="font-head text-[17px] font-medium tracking-tight text-ink900">
-          Top CPT × revenue-code combinations
-        </h2>
-        <span className="font-mono text-[10px] font-medium uppercase tracking-wider text-ink400">
-          {fmtInt(totalLines)} lines matched
-        </span>
-        <span className="flex-1" />
-        {combos.length > 0 ? (
+      <SectionHead
+        title="Top CPT × revenue-code combinations"
+        meta={`${fmtInt(totalLines)} lines matched`}
+        right={
+          combos.length > 0 ? (
           <button
             type="button"
             onClick={() => {
@@ -444,12 +476,13 @@ export function PayerIntelChargeLines({
           >
             {copied ? 'Exported ✓' : 'Export'}
           </button>
-        ) : null}
-      </div>
+          ) : undefined
+        }
+      />
       {combos.length === 0 ? (
-        <p className="rounded-md border border-line bg-surface px-4 py-3 text-sm text-ink400">No charge lines match.</p>
+        <p className="px-1 text-sm text-ink400">No charge lines match.</p>
       ) : (
-        <div className="overflow-x-auto rounded-md border border-line bg-surface shadow-ths-sm">
+        <div className="overflow-x-auto">
           <table className="w-full border-collapse text-[13px]">
             <thead>
               <tr className="bg-teal50 text-left text-[10px] font-semibold uppercase tracking-wide text-ink600">

@@ -146,16 +146,25 @@ test('railActive: a nullish pathname (pre-hydration) still lets the rail render'
 
 const hrefs = (role: Parameters<typeof linksFor>[0]) => linksFor(role).map((l) => l.href);
 
-test('nav: admissions_seat sees its two admissions surfaces — Qualify then Payer Intel', () => {
-  // Widened from single-surface 2026-08-17: /payer-intel admits the seat (names yes, dollars
+test('nav: admissions_seat is a PAYER-INTEL-only persona — the Qualify tab is down', () => {
+  // 2026-08-17 ruling: no role sees Qualify. /payer-intel admits the seat (names yes, dollars
   // never — the strip lives in the payer-intel core, not the nav).
-  assert.deepEqual(hrefs('admissions_seat'), ['/qualify', '/payer-intel']);
+  assert.deepEqual(hrefs('admissions_seat'), ['/payer-intel']);
 });
 
-test('nav: super_admin sees Qualify + Payer Intel slotted between Overview and Collections', () => {
+test('nav: NO role gets a Qualify link — the tab is taken down, not just hidden from most', () => {
+  for (const role of ['super_admin', 'admissions_seat', 'admin', 'user', undefined] as const) {
+    assert.equal(
+      linksFor(role).some((l) => l.href === '/qualify'),
+      false,
+      `${String(role)} still sees a Qualify link`,
+    );
+  }
+});
+
+test('nav: super_admin sees Payer Intel slotted between Overview and Collections', () => {
   assert.deepEqual(hrefs('super_admin'), [
     '/dashboard',
-    '/qualify',
     '/payer-intel',
     '/dashboard/collections',
     '/billing-audit',
@@ -184,11 +193,11 @@ test('nav: every link carries a rail icon — an icon-first rail cannot render w
   }
 });
 
-test('nav: Claims Desk, Qualify and Payer Intel are the Beta-flagged surfaces', () => {
+test('nav: Claims Desk and Payer Intel are the Beta-flagged surfaces', () => {
   const beta = linksFor('super_admin')
     .filter((l) => l.isBeta)
     .map((l) => l.href);
-  assert.deepEqual(beta.sort(), ['/billing-audit', '/payer-intel', '/qualify']);
+  assert.deepEqual(beta.sort(), ['/billing-audit', '/payer-intel']);
 });
 
 // ---------------------------------------------------------------------------

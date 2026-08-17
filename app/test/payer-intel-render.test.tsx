@@ -226,6 +226,9 @@ const RESULT: PayerIntelResult = {
     { cpt: 'H0017', revenue: '0158', count: 84, charge: null, pctAllowed: 48.6, pctPaid: 70.2, pctZeroPaid: 4.8 },
   ],
   window: { from: '2026-05-20', to: '2026-08-18', days: 90 },
+  // Page 1 of the charge-line grid now rides the RESULT (see PayerIntelResult.grid) rather than a
+  // second Server Action — the fixture carries it so the shape is exercised here too.
+  grid: { rows: [], nextCursor: null },
   viewerHasAmountsCapability: false,
 };
 

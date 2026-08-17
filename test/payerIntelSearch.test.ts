@@ -15,7 +15,6 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   PAYER_INTEL_DECLINE_MIN_LINES,
-  PAYER_INTEL_DECLINE_MIN_PATIENTS,
   PAYER_INTEL_DECLINE_THRESHOLD_PTS,
   PAYER_INTEL_RECENT_MAX,
   PAYER_INTEL_STARRED_MAX,
@@ -28,6 +27,7 @@ import {
   buildPayerIntelPlacementQuery,
   buildPayerIntelRatingQuery,
   buildPayerIntelSavedSearchesQuery,
+  payerIntelMinClientsFor,
 } from '../src/collections/payerIntelSearch.js';
 import type { CmdExplorerFilter } from '../src/collections/cmdExplorerQuery.js';
 
@@ -73,7 +73,9 @@ test('decliners: tenant-scoped, floors on BOTH windows, threshold + placeholder 
   assert.ok(q.params.includes('No Facility'), 'the No Facility placeholder is excluded as a bound value');
   assert.ok(q.params.includes(PAYER_INTEL_DECLINE_THRESHOLD_PTS));
   assert.ok(q.params.includes(PAYER_INTEL_DECLINE_MIN_LINES));
-  assert.ok(q.params.includes(PAYER_INTEL_DECLINE_MIN_PATIENTS));
+  // The client floor is WINDOW-SCALED, not a constant (Alec, 2026-08-17): the default 90d window
+  // binds 3.
+  assert.ok(q.params.includes(payerIntelMinClientsFor(90)));
   // Reads the CHARGE-GRAIN rollup, never the raw snapshot table.
   assert.match(q.sql, /from collections\.cmd_explorer_charge_rollup/);
   assert.doesNotMatch(q.sql, /from collections\.cmd_explorer_rows/);
@@ -192,4 +194,40 @@ test('facility names: fixed literals only', () => {
   const q = buildPayerIntelFacilityNamesQuery();
   assert.match(q.sql, /from collections\.facilities/);
   assert.equal(q.params.length, 0);
+});
+
+test('client floor scales with the window: 1 at 7d, 2 at 14d, 3 at 30d and beyond', () => {
+  // Alec, 2026-08-17: "only 1 client in the time window if it's 7d, 2 if it's 14, then 3 if it's
+  // 30d or beyond." A flat floor asks a week to produce as many distinct clients as a quarter,
+  // which silences the short windows entirely at this book's scale.
+  assert.equal(payerIntelMinClientsFor(7), 1);
+  assert.equal(payerIntelMinClientsFor(14), 2);
+  assert.equal(payerIntelMinClientsFor(30), 3);
+  assert.equal(payerIntelMinClientsFor(90), 3);
+  assert.equal(payerIntelMinClientsFor(365), 3);
+  // Degenerate inputs floor at the most permissive value rather than throwing — the caller has
+  // already clamped the window, and a NaN must not silently become an unreachable bar.
+  assert.equal(payerIntelMinClientsFor(0), 1);
+  assert.equal(payerIntelMinClientsFor(Number.NaN), 1);
+});
+
+test('BOTH rails take the scaled floor — the two halves of the board agree on "enough to score"', () => {
+  for (const [days, expected] of [
+    [7, 1],
+    [14, 2],
+    [30, 3],
+    [90, 3],
+  ] as const) {
+    assert.equal(
+      buildPayerIntelGainersQuery({ deltaDays: days }).params[1],
+      expected,
+      `gainers rail at ${days}d must bind ${expected}`,
+    );
+    assert.ok(
+      buildFacilityDeclinersQuery(['af504ab6-3dcd-4aa4-a93c-27bc58de4088'], { windowDays: days }).params.includes(
+        expected,
+      ),
+      `decliners rail at ${days}d must bind ${expected}`,
+    );
+  }
 });

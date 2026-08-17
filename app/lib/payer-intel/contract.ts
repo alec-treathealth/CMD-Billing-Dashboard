@@ -225,6 +225,20 @@ export interface PayerIntelResult {
   byFacility: PayerIntelGroupItem[];
   placement: PayerIntelPlacementItem[];
   combos: PayerIntelComboItem[];
+  /**
+   * The FIRST keyset page of row-level charge lines, returned BY THE SEARCH ITSELF.
+   *
+   * ⚠ This is deliberately not a second Server Action. The first build fetched page 1 through its
+   * own `loadPayerIntelChargeRows` call chained off the search's resolution, and that second
+   * round-trip is what produced the "charge lines will not load" report twice: the SQL was 50ms
+   * (verified as both `postgres` and `claims_reader`) and the server logged no 5xx, so the
+   * failure lived entirely in the extra hop. Folding page 1 into the search removes the hop, the
+   * duplicate `resolvePayerIntelSearch` (which re-classified the term, re-loaded the payer
+   * vocabulary and wrote a SECOND access-audit row for every PHI-tokened search), and the extra
+   * page re-render Next.js performs after every action. `loadPayerIntelChargeRows` survives for
+   * "Load more" only — a user-initiated click with its own visible pending state.
+   */
+  grid: PayerIntelGridPage;
   /** Window stamps for the column headers and the "how far back" disclosure: payment-received
    *  window [from, to) — `to` is EXCLUSIVE (today + 1, so today's payments ride). */
   window: { from: string; to: string; days: number };

@@ -539,3 +539,83 @@ test('placement flags: fewer than two rated rows means no flags at all', () => {
   };
   assert.ok(derivePlacementFlags([one]).every((p) => p.flag === null));
 });
+
+// ── Page 1 of the grid rides the SEARCH, and the census joins the placement table ───────────────
+
+test('search: page 1 of the charge-line grid comes back WITH the result, not on a second hop', async () => {
+  // Reported twice as "charge lines will not load". The SQL was never the problem (50ms live as
+  // both postgres and claims_reader, zero 5xx logged) — the second Server Action was. Page 1 is
+  // part of the search now, so there is no second hop to fail.
+  const { deps } = makeDeps(SUPER);
+  const r = await runPayerIntelSearchCore(deps, { payer: 'AETNA' });
+  assert.equal(r.grid.rows.length, 1);
+  assert.equal(r.grid.rows[0]?.facility, 'LONESTAR MENTAL HEALTH LLC');
+  assert.equal(r.grid.rows[0]?.employerName, 'VANDERBILT UMC');
+  assert.deepEqual(r.grid.nextCursor, { id: 15, value: '2026-08-18' });
+});
+
+test('search: the embedded grid rides the SAME amounts strip — a blind session gets null dollars', async () => {
+  // A second dollar-bearing list that skipped the choke point is exactly how Qualify's
+  // bookFacilities leaked. Ratios and labels survive; the sentinel dollar must not appear.
+  const { deps } = makeDeps(SEAT);
+  const r = await runPayerIntelSearchCore(deps, { payer: 'AETNA' });
+  const row = r.grid.rows[0];
+  assert.equal(row?.chargeAmount, null);
+  assert.equal(row?.allowedAmount, null);
+  assert.equal(row?.insurancePayments, null);
+  assert.equal(row?.pctAllowed, '20.06'); // ratios survive
+  assert.ok(!JSON.stringify(r.grid).includes(GRID_CHARGE_STR));
+});
+
+test('placement: live census beds join by facility_code — residential lends beds, OP never does', async () => {
+  // Reported as "not loading open beds": the placement mapping hardcoded openBeds:null, so the
+  // capacity half of "capacity × collectability" was structurally dead — and with it every
+  // derivePlacementFlags outcome, since each flag is conditioned on openBeds.
+  //
+  // The OP row is the other half of the assertion: 0078 stores open_beds = 0 on an outpatient
+  // board to mean "beds do not apply", and reading that as "full" is the exact misread the
+  // contract exists to prevent, so TREAT_CA must stay null rather than inherit a 0.
+  const { deps } = makeDeps(SUPER, {
+    loadAggregates: async () => ({
+      totals: { total_count: 100, total_charge: 1000, total_allowed: 500, total_paid: 400 },
+      distinctMembers: 12,
+      placement: [
+        {
+          facility: 'Lonestar Mental Health',
+          facility_code: 'LSMH',
+          care_setting: 'IP' as const,
+          line_count: 61,
+          distinct_members: 9,
+          pct_collected: 41.6,
+          paid_per_patient: 100,
+          billed: 1000,
+        },
+        {
+          facility: 'Treat MH California',
+          facility_code: 'TREAT_CA',
+          care_setting: 'OP' as const,
+          line_count: 40,
+          distinct_members: 7,
+          pct_collected: 33.1,
+          paid_per_patient: 90,
+          billed: 900,
+        },
+      ],
+      combos: [],
+      byPayer: [],
+      byFacility: [],
+    }),
+  });
+  const r = await runPayerIntelSearchCore(deps, { payer: 'AETNA' });
+  const lsmh = r.placement.find((p) => p.facilityCode === 'LSMH');
+  assert.equal(lsmh?.openBeds, 1);
+  assert.equal(lsmh?.bedCapacity, 12);
+  assert.equal(lsmh?.censusSyncedAt, '2026-08-17T16:40:00Z');
+  // Pending admits stay an honest null everywhere — the Monday sync drops non-admitted statuses
+  // before it writes, so there is nothing to join and the renderer shows no column.
+  assert.equal(lsmh?.pendingAdmits, null);
+
+  const op = r.placement.find((p) => p.facilityCode === 'TREAT_CA');
+  assert.equal(op?.openBeds, null);
+  assert.equal(op?.bedCapacity, null);
+});

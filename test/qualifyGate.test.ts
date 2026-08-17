@@ -39,10 +39,13 @@ test('Q-A gate: no-auth fallback / unauthenticated / unprovisioned all fail-clos
   assert.equal(requireQualifyPrincipalFromAccess({ ok: false, reason: 'unprovisioned' }).ok, false);
 });
 
-test('route guard: only admissions_seat is Qualify-only; QUALIFY_HOME is /qualify', () => {
+test('route guard: only admissions_seat is single-surface; its home is /payer-intel', () => {
   assert.equal(isQualifyOnlyRole('admissions_seat'), true);
   for (const role of ['super_admin', 'admin', 'user'] as const) {
     assert.equal(isQualifyOnlyRole(role), false, `${role} is NOT redirected off other routes`);
   }
-  assert.equal(QUALIFY_HOME, '/qualify');
+  // REPOINTED 2026-08-17 with the Qualify tab takedown: the constant keeps its name (eight route
+  // guards import it) but the seat's home is Payer Intel now — redirecting a single-surface
+  // persona to a surface with no nav entry is a dead end.
+  assert.equal(QUALIFY_HOME, '/payer-intel');
 });

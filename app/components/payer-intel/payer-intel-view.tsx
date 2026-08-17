@@ -54,6 +54,7 @@ import {
   PayerIntelHero,
   PayerIntelPctBand,
   PayerIntelPlacementTable,
+  PayerIntelSectionBox,
   PayerIntelTopGroups,
 } from './result-sections';
 import { PayerIntelAiPanel } from './ai-panel';
@@ -179,12 +180,15 @@ export function PayerIntelView({
       lastInput.current = withWindow;
       setGrid(null);
       setGridFailed(false);
+      setGridLoading(true); // page 1 rides the search, so the grid is pending for exactly as long
       void runPayerIntelSearch(withWindow)
         .then((r) => {
           if (searchSeq.current !== seq) return; // superseded
           setBusy(false);
           if (!r.ok) {
             setFailed(true);
+            setGridLoading(false);
+            setGridFailed(true);
             setAnnounce('The search failed.');
             return;
           }
@@ -196,12 +200,15 @@ export function PayerIntelView({
             `${r.result.totals.lineCount.toLocaleString('en-US')} charge lines over the past ${r.result.facets.windowDays} days.`,
           );
           syncUrl(r.result, r.result.facets.windowDays);
-          // The row-level grid rides along with every search, and the board refresh (the search we
-          // just ran lands in Recent) waits for it — DELIBERATELY SEQUENCED, not concurrent. One
-          // reader pool serves this tab with max 4 connections and a 10s acquire timeout; the
-          // board is five more queries, so firing them alongside the grid puts the one read the
-          // user is actually waiting on at the back of a twelve-deep queue.
-          void loadGrid(withWindow, null).then(() => refreshBoard(r.result.facets.windowDays));
+          // PAGE 1 ARRIVES WITH THE SEARCH — no second Server Action, so there is no second hop
+          // to fail. The previous two builds fetched it separately and it never landed; the SQL
+          // was 50ms as both postgres and claims_reader and the server logged no 5xx, so the
+          // failure was the hop itself. `loadGrid` now serves "Load more" only.
+          gridSeq.current += 1; // any in-flight Load-more from the previous result is superseded
+          setGrid(r.result.grid);
+          setGridLoading(false);
+          setGridFailed(false);
+          refreshBoard(r.result.facets.windowDays); // the search we just ran lands in Recent
           // Focus the result heading so keyboard/AT users land on the new content (SC 2.4.3).
           window.requestAnimationFrame(() => resultHeadingRef.current?.focus());
         })
@@ -209,6 +216,8 @@ export function PayerIntelView({
           if (searchSeq.current !== seq) return;
           setBusy(false);
           setFailed(true);
+          setGridLoading(false);
+          setGridFailed(true);
           setAnnounce('The search failed.');
         });
     },
@@ -532,26 +541,39 @@ export function PayerIntelView({
               onClearAll={clearAll}
             />
           </div>
+          {/* The three percentages sit DIRECTLY under the hero (2026-08-17 ruling) — they are the
+              answer to "how does this policy pay", and everything below is the breakdown of it. */}
+          <PayerIntelPctBand result={result} />
           <div className={SPLIT}>
             <div className="min-w-0 space-y-7">
-              <PayerIntelTopGroups
-                byPayer={result.byPayer}
-                byFacility={result.byFacility}
-                onDrillPayer={drillPayer}
-                onDrillFacility={drillFacility}
-              />
-              <PayerIntelPctBand result={result} />
-              <PayerIntelPlacementTable
-                items={result.placement}
-                window={result.window}
-                censusSyncedAt={board.census.syncedAt}
-                cohortLabel={result.facets.prefix ?? result.facets.payer ?? 'this search'}
-              />
-              <PayerIntelChargeLines
-                combos={result.combos}
-                totalLines={result.totals.lineCount}
-                onDrillCombo={drillCombo}
-              />
+              {/* ONE box, divided into sections — the Collections summary-card shape. */}
+              <PayerIntelSectionBox>
+                <div className="p-4">
+                  <PayerIntelTopGroups
+                    byPayer={result.byPayer}
+                    byFacility={result.byFacility}
+                    onDrillPayer={drillPayer}
+                    onDrillFacility={drillFacility}
+                  />
+                </div>
+                <div className="p-4">
+                  <PayerIntelPlacementTable
+                    items={result.placement}
+                    window={result.window}
+                    censusSyncedAt={board.census.syncedAt}
+                    cohortLabel={result.facets.prefix ?? result.facets.payer ?? 'this search'}
+                  />
+                </div>
+                <div className="p-4">
+                  <PayerIntelChargeLines
+                    combos={result.combos}
+                    totalLines={result.totals.lineCount}
+                    onDrillCombo={drillCombo}
+                  />
+                </div>
+              </PayerIntelSectionBox>
+              {/* Charge lines stay their OWN section: row-level detail with its own paging and
+                  its own failure state, not a panel of the summary. */}
               <PayerIntelGridTable
                 page={grid}
                 loading={gridLoading}
