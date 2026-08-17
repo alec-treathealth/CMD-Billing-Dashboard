@@ -1087,3 +1087,52 @@ test('employer coverage returns TWO booleans — "any tenant" gates the filter, 
   // two answers describe different tenant sets.
   assert.equal(q.params.length, 1, 'exactly one bound param, reused by both halves');
 });
+
+// --- row_ids must be RANGE-safe for ::bigint, not merely digit-shaped ------------------------
+
+test('row_ids: accepts bigint MAX and rejects one past it (a 19-digit check is not a range check)', () => {
+  const MAX = '9223372036854775807';        // 19 digits, the largest bigint
+  const OVER = '9223372036854775808';       // 19 digits, ONE past — the bug this pins
+  const WAY_OVER = '9999999999999999999';   // 19 digits, the original regex accepted this
+
+  const ok = buildCmdExplorerQuery(null, { row_ids: [MAX] }, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+  assert.match(ok.sql, /id = any\(\$\d+::bigint\[\]\)/, 'the max itself is legal and must survive');
+  assert.ok(ok.params.some((p) => Array.isArray(p) && (p as string[]).includes(MAX)));
+
+  // Out-of-range ids are dropped rather than bound: casting them raises 22003 at EXECUTION —
+  // a 500, not an empty result. Dropping is semantically free (no row can carry such an id).
+  for (const bad of [OVER, WAY_OVER]) {
+    const q = buildCmdExplorerQuery(null, { row_ids: [bad] }, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+    assert.ok(
+      !q.params.some((p) => Array.isArray(p) && (p as string[]).includes(bad)),
+      `${bad} must never reach a ::bigint cast`,
+    );
+  }
+});
+
+test('row_ids: an ALL-INVALID list matches NOTHING — it must not widen back to every row', () => {
+  // The dangerous shape. Filtering every id away leaves an empty set, and "empty" elsewhere in this
+  // builder means "no condition" — which would turn a name search into a full-table browse.
+  const q = buildCmdExplorerQuery(
+    null,
+    { row_ids: ['9999999999999999999', 'abc', ''] },
+    CMD_EXPLORER_DEFAULT_SORT,
+    50,
+    ENTITY,
+  );
+  assert.match(q.sql, /\bfalse\b/, 'must emit an impossible predicate, not omit the condition');
+  assert.doesNotMatch(q.sql, /::bigint\[\]/, 'nothing may be cast to bigint');
+});
+
+test('row_ids: a MIXED list keeps the valid ids and still constrains', () => {
+  const q = buildCmdExplorerQuery(
+    null,
+    { row_ids: ['12', '9999999999999999999', '34'] },
+    CMD_EXPLORER_DEFAULT_SORT,
+    50,
+    ENTITY,
+  );
+  const bound = q.params.find((p) => Array.isArray(p) && (p as string[]).includes('12')) as string[];
+  assert.deepEqual(bound, ['12', '34'], 'valid ids survive, the out-of-range one is dropped');
+  assert.doesNotMatch(q.sql, /\bfalse\b/, 'still a real id predicate, not match-nothing');
+});

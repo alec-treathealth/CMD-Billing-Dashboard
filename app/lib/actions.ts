@@ -1320,6 +1320,27 @@ function applyEmployerFilter(
 }
 
 /**
+ * Is this a string Postgres will accept as `bigint`?
+ *
+ * ⚠ A DIGIT-COUNT CHECK IS NOT ENOUGH, which is what this replaced. `^[0-9]{1,19}$` accepts
+ * 9999999999999999999 — nineteen digits, but larger than bigint's max of 9223372036854775807. That
+ * passes validation here and then raises 22003 `bigint out of range` when the array is cast at
+ * query time: a 500 from a value the boundary claimed it had already validated. The max is 19
+ * digits, so length and range are NOT interchangeable at the top of the domain.
+ *
+ * BigInt() is exact at this magnitude; Number() is not (it loses precision above 2^53, so
+ * 9223372036854775808 would compare equal to the max and slip through).
+ *
+ * Rejects the empty string, signs, whitespace, decimals and exponent forms by construction — the
+ * regex runs first, so BigInt() only ever sees plain digits and cannot throw.
+ */
+const PG_BIGINT_MAX = 9223372036854775807n;
+function isPgBigintString(v: unknown): v is string {
+  if (typeof v !== 'string' || !/^[0-9]{1,19}$/.test(v)) return false;
+  return BigInt(v) <= PG_BIGINT_MAX;
+}
+
+/**
  * Copy the patient-name search's resolved row ids into the reader filter.
  *
  * ⚠ AN EMPTY ARRAY IS MEANINGFUL and is deliberately NOT treated as "absent": it means the search
@@ -1335,7 +1356,7 @@ function applyRowIds(
   if (ids === undefined) return true;
   if (!Array.isArray(ids)) return false;
   if (ids.length > CMD_ROW_IDS_MAX) return false;
-  if (!ids.every((v) => typeof v === 'string' && /^[0-9]{1,19}$/.test(v))) return false;
+  if (!ids.every(isPgBigintString)) return false;
   readerFilter.row_ids = ids;
   return true;
 }

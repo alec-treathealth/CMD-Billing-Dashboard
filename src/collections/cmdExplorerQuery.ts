@@ -192,6 +192,18 @@ export function buildVobMarketSemiJoin(filter: VobMarketFilter, add: ParamAdder)
  * `add` pushes a bound parameter and returns its `$n` placeholder — every VALUE is bound, and
  * every column name is a fixed literal (search columns resolve through the closed allowlist).
  */
+/** Postgres `bigint` upper bound. 19 digits, so a digit-COUNT check cannot stand in for a range
+ *  check at the top of the domain: 9999999999999999999 is 19 digits and out of range. */
+const PG_BIGINT_MAX = 9223372036854775807n;
+
+/** A string Postgres will accept as `bigint`. BigInt() is exact here where Number() is not — above
+ *  2^53 a float compares equal to the max and would slip through. The regex runs first, so BigInt()
+ *  only ever parses plain digits and cannot throw. */
+function isPgBigintText(v: unknown): v is string {
+  if (typeof v !== 'string' || !/^[0-9]{1,19}$/.test(v)) return false;
+  return BigInt(v) <= PG_BIGINT_MAX;
+}
+
 export function cmdExplorerBaseConds(
   filter: CmdExplorerFilter,
   entityIds: string[],
@@ -245,8 +257,25 @@ export function cmdExplorerBaseConds(
   // Patient-name search result. Direct id equality — no join, no subquery: the ids were already
   // resolved server-side against this same tenant scope, so re-deriving them here would be
   // redundant work over a 670k-row table.
+  //
+  // ⚠ RANGE-FILTERED, NOT JUST BOUND. These are cast to ::bigint[], and a numeric string ABOVE
+  // 9223372036854775807 raises 22003 `bigint out of range` at execution — a 500, not an empty
+  // result. The action layer validates (applyRowIds → isPgBigintString), but this function is
+  // EXPORTED and the same defence-in-depth argument the sort column already makes applies here: a
+  // future caller could reach it without going through that boundary.
+  //
+  // Dropping an out-of-range id is semantically FREE, not a silent narrowing — no row can carry an
+  // id bigint cannot represent, so it could never have matched anything.
   if (Array.isArray(filter.row_ids) && filter.row_ids.length > 0) {
-    conds.push(`id = any(${add(filter.row_ids)}::bigint[])`);
+    const safe = filter.row_ids.filter(isPgBigintText);
+    if (safe.length > 0) {
+      conds.push(`id = any(${add(safe)}::bigint[])`);
+    } else {
+      // Every id was unusable, but the caller DID ask for a set. Omitting the condition here would
+      // widen the grid back to every row — the opposite of the request, and the same trap the empty
+      // `row_ids: []` case documents. Emit an impossible predicate instead so the result is empty.
+      conds.push('false');
+    }
   }
   // Employer SEGMENT toggle. Same id semi-join shape as the name filter above and exact for the
   // same reason (rollup id IS the base row id, 1:1).
