@@ -281,3 +281,47 @@ test('insertCensusRows: counts rows_new vs rows_refreshed from the (xmax = 0) RE
   const stats = await insertCensusRows(pool, [plain({ charge_id: 'A' }), plain({ charge_id: 'B' }), plain({ charge_id: 'C' })], BXR_ENTITY_ID, 9);
   assert.deepEqual(stats, { inserted: 2, refreshed: 1 });
 });
+
+// --- BXR census report 10093963 relabel (2026-08-17 incident) ----------------
+//
+// The census report was relabelled the way the explorer's was, but its two aliases were never
+// added: 'Charge Current Payer Name' for the payer and 'Charge Status' for the claim status. The
+// census runs UNGUARDED (expectedColumns is deliberately not wired for it), so nothing failed —
+// mapReportRows just picked nothing and 67.9% of BXR's cmd_charge_census landed with NULL payer
+// and NULL claim_status_category, the Qualify openCount denominator. Indigo was 0.0%.
+
+test('census relabel: Charge Current Payer Name / Charge Status map, they do not silently drop', () => {
+  const relabelled = reportRow({
+    'Charge ID': 'REL1',
+    'Charge Current Payer Name': 'ANTHEM BLUE CROSS CALIFORNIA',
+    'Charge Status': 'ON HOLD',
+  });
+  // The canonical labels are absent on the relabelled report — remove them so the fixture is the
+  // real shape rather than one that passes because the old names happen to still be there.
+  delete (relabelled as Record<string, unknown>)['Charge Primary Payer Name'];
+  delete (relabelled as Record<string, unknown>)['Claim Status'];
+
+  const out = mapCensusRows([relabelled]);
+  const row = out.rows[0];
+  assert.equal(row?.primary_payer, 'ANTHEM BLUE CROSS CALIFORNIA');
+  assert.equal(row?.claim_status_raw, 'ON HOLD');
+  // Derived, and the reason this defect mattered: a null raw status yields a null category.
+  assert.notEqual(row?.claim_status_category, null);
+});
+
+test('census relabel: the new aliases are LAST — a canonical label always wins the pick', () => {
+  // ⚠ THE FINGERPRINT GUARD. primary_payer is field 13 of the LOCKED 14-field row_fingerprint, so
+  // if 'Charge Current Payer Name' ever out-ranked 'Payer Name' / 'Charge Primary Payer Name',
+  // every explorer row carrying both labels would hash differently and the cron would re-insert
+  // the entire book. A report carrying BOTH must still resolve to the canonical value.
+  const both = reportRow({
+    'Charge ID': 'BOTH1',
+    'Charge Primary Payer Name': 'AETNA',
+    'Charge Current Payer Name': 'SOMEONE ELSE',
+    'Claim Status': 'PAID',
+    'Charge Status': 'ON HOLD',
+  });
+  const row = mapCensusRows([both]).rows[0];
+  assert.equal(row?.primary_payer, 'AETNA', 'canonical payer label must win — fingerprint stability');
+  assert.equal(row?.claim_status_raw, 'PAID', 'canonical status label must win');
+});
