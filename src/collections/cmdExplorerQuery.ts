@@ -102,6 +102,14 @@ export interface CmdExplorerFilter {
    */
   employer_names?: string[] | null;
   /**
+   * Row ids the PATIENT-NAME search resolved to. Non-PHI: bigserial keys, the same ids the per-row
+   * reveal already uses. The searched NAME never appears here, never reaches SQL, and never leaves
+   * the server — only the ids it matched do, which is what makes this safe to put in a filter at
+   * all. Empty/absent omits the condition; a search that matched NOTHING must pass `[]` plus its
+   * own "no matches" state rather than an empty filter, or it would silently widen to every row.
+   */
+  row_ids?: string[] | null;
+  /**
    * The employer SEGMENT toggle: 'all' (default) · 'employer' · 'individual'.
    *
    * 'individual' means "this policy has no plan sponsor" — a self-funded individual policy rather
@@ -233,6 +241,12 @@ export function cmdExplorerBaseConds(
       `id in (select e.id from collections.cmd_explorer_rows e ` +
         `where e.employer_name = any(${add(filter.employer_names)}::text[]))`,
     );
+  }
+  // Patient-name search result. Direct id equality — no join, no subquery: the ids were already
+  // resolved server-side against this same tenant scope, so re-deriving them here would be
+  // redundant work over a 670k-row table.
+  if (Array.isArray(filter.row_ids) && filter.row_ids.length > 0) {
+    conds.push(`id = any(${add(filter.row_ids)}::bigint[])`);
   }
   // Employer SEGMENT toggle. Same id semi-join shape as the name filter above and exact for the
   // same reason (rollup id IS the base row id, 1:1).
@@ -772,6 +786,72 @@ export const CMD_EXPLORER_SELECT =
  * row.allowed_amount IS allowed_reliable). `entityIds` is the server-derived RBAC tenant scope,
  * applied as a mandatory WHERE so a page never crosses tenants.
  */
+/**
+ * PATIENT-NAME SEARCH, part 1 of 2: how many rows the current filters narrow to.
+ *
+ * Name matching CANNOT happen in SQL — patient_name is libsodium ciphertext, so the only way to
+ * compare it is to decrypt each candidate in-process. That makes the work strictly proportional to
+ * the candidate count, which is why the feature is GATED on narrowing rather than offered over the
+ * whole book (669,942 rows as of 2026-08-17).
+ *
+ * RULED BY ALEC 2026-08-17: do NOT use patient_name_bidx for this. Nothing reads that column on
+ * cmd_explorer_rows (its only consumers are in src/billingAudit/, a different table), it is NULL on
+ * ~95% of rows because it postdates most of the ingest, and a blind index answers only EQUALITY on
+ * a whole normalized name — it cannot do the substring match this search needs. Decrypting a
+ * bounded candidate set is both simpler and complete, and it works on every row regardless of
+ * whether the index was ever populated.
+ *
+ * Counts against the ROLLUP (charge grain) so the number the user is told matches the number of
+ * rows the grid would show them.
+ */
+export function buildCmdExplorerNameCandidateCountQuery(
+  filter: CmdExplorerFilter,
+  entityIds: string[],
+): { sql: string; params: unknown[] } {
+  const params: unknown[] = [];
+  const add: ParamAdder = (v) => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+  const conds = cmdExplorerBaseConds(filter, entityIds, add);
+  const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
+  return { sql: `select count(*)::int as n from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where}`, params };
+}
+
+/**
+ * PATIENT-NAME SEARCH, part 2 of 2: the ciphertext for the narrowed candidates.
+ *
+ * Projects ONLY `id` and the encrypted name — never a money column, never another identifier. The
+ * caller decrypts in-process, matches, and returns row ids; the plaintext never leaves the server
+ * and never reaches a log, a URL, or the response.
+ *
+ * `limit` is a HARD ceiling applied in SQL, not a suggestion to the caller: even if the count guard
+ * were bypassed, this cannot pull an unbounded number of ciphertexts into memory.
+ */
+export function buildCmdExplorerNameCandidatesQuery(
+  filter: CmdExplorerFilter,
+  entityIds: string[],
+  limit: number,
+): { sql: string; params: unknown[] } {
+  const params: unknown[] = [];
+  const add: ParamAdder = (v) => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+  const conds = cmdExplorerBaseConds(filter, entityIds, add);
+  const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
+  // The rollup's `id` IS the latest snapshot's real row id, so joining the base table on it gets
+  // the ciphertext for exactly the row the grid displays.
+  return {
+    sql:
+      `select p.id, e.patient_name from (` +
+      `select t.id from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} limit ${add(limit)}` +
+      `) p join collections.cmd_explorer_rows e on e.id = p.id ` +
+      `where e.patient_name is not null`,
+    params,
+  };
+}
+
 export function buildCmdExplorerQuery(
   cursor: CmdExplorerCursor | null,
   filter: CmdExplorerFilter,

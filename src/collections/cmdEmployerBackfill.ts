@@ -69,6 +69,7 @@ import { makeClient } from './db.js';
 import { withTenant } from '../veris/withTenant.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
 import { BXR_CUSTOMERS, INDIGO_CUSTOMERS } from './cmdCustomers.js';
+import { blindIndexesForRowSafe } from './blindIndex.js';
 
 /** How many (fingerprint, employer) pairs go in one UPDATE round trip. */
 const BATCH = 500;
@@ -87,6 +88,14 @@ export interface Args {
    *  filter from a different report returns INVALID CRITERIA (the 2026-08-01 census incident). */
   reportId: string;
   tenant: 'bxr' | 'indigo';
+  /**
+   * Which key joins the report to the table.
+   *   'charge'      (DEFAULT) — charge identity. Reaches historical rows; see ChargeKey.
+   *   'fingerprint' — the locked 14-field row_fingerprint. Exact, but only matches rows that were
+   *                   themselves written from the SAME report shape (17.5% of the BXR history as
+   *                   measured 2026-08-17). Kept for the CSV path and for diagnosis.
+   */
+  key: 'charge' | 'fingerprint';
 }
 
 export function parseArgs(argv: string[]): Args {
@@ -96,8 +105,14 @@ export function parseArgs(argv: string[]): Args {
   let filterId = '';
   let reportId = '';
   let tenant: 'bxr' | 'indigo' | '' = '';
+  let key: 'charge' | 'fingerprint' = 'charge';
   for (const arg of argv.slice(2)) {
     if (arg === '--commit') commit = true;
+    else if (arg.startsWith('--key=')) {
+      const k = arg.slice('--key='.length).toLowerCase();
+      if (k !== 'charge' && k !== 'fingerprint') throw new Error(`--key must be charge or fingerprint (got ${k})`);
+      key = k;
+    }
     else if (arg.startsWith('--file=')) file = arg.slice('--file='.length);
     else if (arg.startsWith('--filter=')) filterId = arg.slice('--filter='.length).trim();
     else if (arg.startsWith('--report=')) reportId = arg.slice('--report='.length).trim();
@@ -118,7 +133,34 @@ export function parseArgs(argv: string[]): Args {
     reportId = reportId || (process.env.CMD_EXPLORER_REPORT_ID?.trim() ?? '');
     if (reportId === '') throw new Error('--report=<report id> is required for --source=api when CMD_EXPLORER_REPORT_ID is unset');
   }
-  return { commit, source, file, filterId, reportId, tenant };
+  return { commit, source, file, filterId, reportId, tenant, key };
+}
+
+/**
+ * One row's CHARGE IDENTITY — the grain collections.cmd_explorer_charge_rollup already groups by,
+ * minus the tenant (which is passed separately).
+ *
+ * WHY THIS EXISTS: row_fingerprint cannot reach historical rows. Measured 2026-08-17 against the
+ * full BXR history (filter 10148846, 153,989 rows): only 17.5% of fingerprints matched, and the
+ * ones that did were essentially the rows the 07:52 catch-up had just written from the SAME report.
+ * Field-by-field comparison of old-vs-new rows for the same charge showed revenue_code 100%,
+ * patient_balance_due 99.7%, adjustments 99.5%, allowed 92.4%, insurance 92.0%, and member_id +
+ * group_number agreeing via their blind indexes — leaving patient_name (field #5 of the locked 14)
+ * as the only unexplained input. It could not be measured directly: the plaintext is libsodium-
+ * encrypted and patient_name_bidx is NULL on 77% of the old rows (0067's name backfill was never
+ * applied), so that is an inference, not a measurement.
+ *
+ * Charge identity sidesteps the question entirely — it contains NO name and NO posting-snapshot
+ * money column. It is also the semantically correct grain: an employer is a property of the CLAIM,
+ * not of an individual payment snapshot, so every snapshot of one charge shares one employer.
+ */
+export interface ChargeKey {
+  memberIdBidx: string;
+  chargeDate: string;
+  cptCode: string;
+  revenueKey: string; // COALESCE(revenue_code, '') — matches the rollup's revenue_key
+  facility: string;
+  chargeAmount: string;
 }
 
 export interface BackfillPlan {
@@ -132,6 +174,18 @@ export interface BackfillPlan {
   withEmployer: number;
   /** (fingerprint → employer) for every mapped row carrying an employer. */
   pairs: Map<string, string>;
+  /** (charge identity → employer), deduped. The --key=charge path's input. */
+  chargeKeys: Map<string, { key: ChargeKey; employer: string }>;
+  /** Charge identities the SOURCE disagreed with itself about (two employers, one charge). Counted
+   *  rather than silently resolved — a nonzero value means the report is ambiguous, not that the
+   *  matcher is broken. */
+  chargeConflicts: number;
+}
+
+/** Stable string form of a charge identity, for in-process dedup. The unit separator cannot occur
+ *  in any component (they are dates, codes, facility mnemonics and decimal strings). */
+function chargeKeyString(k: ChargeKey): string {
+  return [k.memberIdBidx, k.chargeDate, k.cptCode, k.revenueKey, k.facility, k.chargeAmount].join('');
 }
 
 /**
@@ -165,8 +219,10 @@ export function planEmployerBackfillFromRows(
 
   const skips: Record<string, number> = {};
   const pairs = new Map<string, string>();
+  const chargeKeys = new Map<string, { key: ChargeKey; employer: string }>();
   let mapped = 0;
   let withEmployer = 0;
+  let chargeConflicts = 0;
 
   for (const f of full) {
     const res = mapRow(f, sourceLabel);
@@ -184,9 +240,32 @@ export function planEmployerBackfillFromRows(
     // for the same row. Differing employers on one fingerprint would mean the source disagrees with
     // itself; that is surfaced as a count below rather than silently resolved.
     pairs.set(res.row.row_fingerprint, emp);
+
+    // Charge identity. member_id_bidx is derived here the same way the ingest derives it
+    // (blindIndexesForRowSafe over the SAME normalized member id mapRow produced), so the token
+    // is byte-identical to the one stored — the whole reason this reuses the production chain.
+    const bidx = blindIndexesForRowSafe(res.row.member_id, res.row.group_number);
+    const mb = bidx.member_id_bidx;
+    if (mb !== null && mb !== '') {
+      const key: ChargeKey = {
+        memberIdBidx: mb,
+        chargeDate: res.row.charge_date,
+        cptCode: res.row.cpt_code,
+        revenueKey: res.row.revenue_code ?? '',
+        facility: res.row.facility,
+        chargeAmount: res.row.charge_amount,
+      };
+      const ks = chargeKeyString(key);
+      const prior = chargeKeys.get(ks);
+      // Every posting snapshot of one charge carries the same employer, so a repeat is expected and
+      // collapses. A DIFFERENT employer on one charge means the SOURCE disagrees with itself —
+      // surfaced as a count, first-write-wins, never silently overwritten.
+      if (prior === undefined) chargeKeys.set(ks, { key, employer: emp });
+      else if (prior.employer !== emp) chargeConflicts += 1;
+    }
   }
 
-  return { parsed: rows.length, mapped, skips, withEmployer, pairs };
+  return { parsed: rows.length, mapped, skips, withEmployer, pairs, chargeKeys, chargeConflicts };
 }
 
 /**
@@ -251,8 +330,16 @@ function mergePlan(into: BackfillPlan, add: BackfillPlan): void {
   into.parsed += add.parsed;
   into.mapped += add.mapped;
   into.withEmployer += add.withEmployer;
+  into.chargeConflicts += add.chargeConflicts;
   for (const [label, n] of Object.entries(add.skips)) into.skips[label] = (into.skips[label] ?? 0) + n;
   for (const [fp, emp] of add.pairs) into.pairs.set(fp, emp);
+  // Charge identity includes member_id_bidx and facility, so cross-customer collision is not a
+  // concern; a repeat across customers would be the same claim seen twice.
+  for (const [ks, v] of add.chargeKeys) {
+    const prior = into.chargeKeys.get(ks);
+    if (prior === undefined) into.chargeKeys.set(ks, v);
+    else if (prior.employer !== v.employer) into.chargeConflicts += 1;
+  }
 }
 
 /**
@@ -264,7 +351,10 @@ function mergePlan(into: BackfillPlan, add: BackfillPlan): void {
  */
 async function planFromApi(tenant: 'bxr' | 'indigo', reportId: string, filterId: string): Promise<BackfillPlan> {
   const customers = tenant === 'bxr' ? BXR_CUSTOMERS : INDIGO_CUSTOMERS;
-  const merged: BackfillPlan = { parsed: 0, mapped: 0, skips: {}, withEmployer: 0, pairs: new Map() };
+  const merged: BackfillPlan = {
+    parsed: 0, mapped: 0, skips: {}, withEmployer: 0,
+    pairs: new Map(), chargeKeys: new Map(), chargeConflicts: 0,
+  };
   console.log(`pulling report ${reportId} / filter ${filterId} across ${customers.length} ${tenant} customers (sequential)`);
   for (const [i, c] of customers.entries()) {
     const rows = await cmdReportRows(cmdConfigFor(c.customerId, reportId, filterId));
@@ -276,8 +366,103 @@ async function planFromApi(tenant: 'bxr' | 'indigo', reportId: string, filterId:
   return merged;
 }
 
+/**
+ * PHASE 1 of the charge-identity path, run as **claims_reader**: resolve charge identities to the
+ * row_fingerprints of the rows that still need an employer.
+ *
+ * ⚠ THE ROLE SPLIT IS THE DESIGN, NOT AN ACCIDENT. Matching on charge identity means READING
+ * member_id_bidx, charge_date, cpt_code, revenue_code, facility and charge_amount — six columns
+ * cmd_rollup_writer deliberately cannot SELECT (0103 grants it exactly three:
+ * business_entity_id, employer_name, row_fingerprint). Rather than widen the writer's read surface
+ * over a PHI table to six more columns, the SEMANTIC match happens as the reader — which is what
+ * the standing rule wants anyway ("reads run as claims_reader") — and the WRITE is then keyed on
+ * row_fingerprint, which the writer can already read. No new grant, no new migration.
+ *
+ * Returns (fingerprint → employer), so the existing applyEmployerBackfill applies it unchanged.
+ * One charge fans out to EVERY snapshot row of that charge, which is correct: they are all the same
+ * claim and all share the employer.
+ */
+export async function resolveChargeKeyTargets(
+  readDb: { query: (sql: string, params: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  chargeKeys: Map<string, { key: ChargeKey; employer: string }>,
+  businessEntityId: string,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const entries = [...chargeKeys.values()];
+  for (let i = 0; i < entries.length; i += BATCH) {
+    const slice = entries.slice(i, i + BATCH);
+    const { rows } = await readDb.query(
+      'select t.row_fingerprint, v.employer from (' +
+        'select unnest($1::text[]) as mb, unnest($2::date[]) as cd, unnest($3::text[]) as cpt, ' +
+        'unnest($4::text[]) as rev, unnest($5::text[]) as fac, unnest($6::numeric[]) as amt, ' +
+        'unnest($7::text[]) as employer' +
+        ') v join collections.cmd_explorer_rows t ' +
+        'on t.member_id_bidx = v.mb and t.charge_date = v.cd and t.cpt_code = v.cpt ' +
+        "and coalesce(t.revenue_code, '') = v.rev and t.facility = v.fac and t.charge_amount = v.amt " +
+        'where t.business_entity_id = $8::uuid and t.employer_name is null',
+      [
+        slice.map((e) => e.key.memberIdBidx),
+        slice.map((e) => e.key.chargeDate),
+        slice.map((e) => e.key.cptCode),
+        slice.map((e) => e.key.revenueKey),
+        slice.map((e) => e.key.facility),
+        slice.map((e) => e.key.chargeAmount),
+        slice.map((e) => e.employer),
+        businessEntityId,
+      ],
+    );
+    for (const r of rows) {
+      const fp = r['row_fingerprint'];
+      const emp = r['employer'];
+      if (typeof fp === 'string' && typeof emp === 'string') out.set(fp, emp);
+    }
+  }
+  return out;
+}
+
+/**
+ * READ-ONLY match measurement for the dry run. Answers the only question that decides whether
+ * committing is safe, WITHOUT writing anything.
+ *
+ * The dry run used to stop at "how many pairs did the report yield", which is a property of the
+ * REPORT alone — it says nothing about whether those fingerprints exist in the table. The match
+ * rate was therefore first observable at --commit time, i.e. after the write. That is backwards for
+ * a one-shot, per-row-irreversible fill, so this measures it up front.
+ *
+ * Returns:
+ *   present  — fingerprints that exist in this tenant at all. THE normalization signal: a low
+ *              number means the CSV/API normalizes differently than ingest did, NOT missing data.
+ *   fillable — of those, how many still have employer_name IS NULL. This is what --commit would
+ *              actually update; the gap between present and fillable is rows the cron already filled.
+ */
+export async function measureBackfillMatch(
+  db: { query: (sql: string, params: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  pairs: Map<string, string>,
+  businessEntityId: string,
+): Promise<{ present: number; fillable: number }> {
+  const fps = [...pairs.keys()];
+  let present = 0;
+  let fillable = 0;
+  for (let i = 0; i < fps.length; i += BATCH) {
+    const slice = fps.slice(i, i + BATCH);
+    const { rows } = await db.query(
+      'select count(*)::int as present, ' +
+        'count(*) filter (where t.employer_name is null)::int as fillable ' +
+        'from collections.cmd_explorer_rows t ' +
+        'where t.row_fingerprint = any($1::text[]) and t.business_entity_id = $2::uuid',
+      [slice, businessEntityId],
+    );
+    const r = rows[0];
+    // pg returns ::int as a number, but count(*) without the cast would be a STRING (int8) — the
+    // cast above is load-bearing, not cosmetic.
+    present += Number(r?.present ?? 0);
+    fillable += Number(r?.fillable ?? 0);
+  }
+  return { present, fillable };
+}
+
 async function main(): Promise<void> {
-  const { commit, source, file, filterId, reportId, tenant } = parseArgs(process.argv);
+  const { commit, source, file, filterId, reportId, tenant, key } = parseArgs(process.argv);
   const entityId = tenant === 'bxr' ? BXR_ENTITY_ID : INDIGO_ENTITY_ID;
 
   // sourceLabel only reaches mapRow's source_file field, which this script never writes — the
@@ -287,11 +472,12 @@ async function main(): Promise<void> {
       ? await planFromApi(tenant, reportId, filterId)
       : planEmployerBackfill(readFileSync(file, 'utf8'), tenant, 'employer-backfill');
 
-  console.log(source === 'api' ? `tenant=${tenant} report=${reportId} filter=${filterId}` : `tenant=${tenant} file=${file}`);
+  console.log(source === 'api' ? `tenant=${tenant} report=${reportId} filter=${filterId} key=${key}` : `tenant=${tenant} file=${file} key=${key}`);
   console.log(`  parsed rows      : ${plan.parsed}`);
   console.log(`  mapped ok        : ${plan.mapped}`);
   console.log(`  with employer    : ${plan.withEmployer}`);
   console.log(`  distinct fps     : ${plan.pairs.size}`);
+  console.log(`  distinct charges : ${plan.chargeKeys.size}${plan.chargeConflicts > 0 ? `  (⚠ ${plan.chargeConflicts} charge(s) carried CONFLICTING employers in the source — first wins)` : ''}`);
   const skipTotal = Object.values(plan.skips).reduce((a, b) => a + b, 0);
   if (skipTotal > 0) {
     console.log(`  skipped          : ${skipTotal}`);
@@ -300,15 +486,54 @@ async function main(): Promise<void> {
     }
   }
 
+  const url = process.env.CMD_ROLLUP_WRITER_DATABASE_URL?.trim();
+
   if (!commit) {
-    console.log('\nDRY-RUN — nothing written. Re-run with --commit once the numbers look right.');
-    console.log('A LOW match rate at commit time means a NORMALIZATION MISMATCH, not missing rows —');
-    console.log('diagnose before committing, because a silent partial fill is indistinguishable');
-    console.log('from a complete one afterwards.');
+    console.log('\nDRY-RUN — nothing will be written.');
+    // MEASURE AS THE READER, NOT THE WRITER. Two independent reasons:
+    //   1. The standing rule: reads run as claims_reader, writes as the narrow writer role.
+    //   2. It would not work as the writer anyway. cmd_rollup_writer has NO table SELECT on
+    //      collections.cmd_explorer_rows (measured 2026-08-17: SELECT false on the table,
+    //      false on business_entity_id and employer_name, true only on row_fingerprint), so the
+    //      measuring query raises 42501 `permission denied for table cmd_explorer_rows`.
+    const readUrl = process.env.CLAIMS_READER_DATABASE_URL?.trim();
+    if (!readUrl) {
+      console.log('CLAIMS_READER_DATABASE_URL not set, so the MATCH RATE cannot be measured.');
+      console.log('The counts above describe the REPORT only — they say nothing about whether these');
+      console.log('fingerprints exist in the table. Set the var to get the number that matters.');
+      return;
+    }
+    // Read-only. Still inside withTenant: the SELECT is subject to the same RLS policies as the
+    // write, so measuring outside the tenant GUC would report 0 present and read as a total
+    // normalization failure — the same false signal migration 0102 was needed to remove.
+    const pool = makeClient(readUrl);
+    try {
+      if (key === 'charge') {
+        const targets = await withTenant(pool, entityId, (client) =>
+          resolveChargeKeyTargets(client, plan.chargeKeys, entityId),
+        );
+        const pctC = (n: number) => (plan.chargeKeys.size === 0 ? 0 : Math.round((n / plan.chargeKeys.size) * 1000) / 10);
+        console.log(`\n  KEY = charge identity (member_id_bidx, charge_date, cpt, revenue, facility, charge_amount)`);
+        console.log(`  charges in report    : ${plan.chargeKeys.size}`);
+        console.log(`  ROWS --commit would fill : ${targets.size}`);
+        console.log(`  (one charge fans out to every snapshot row of that charge — ${pctC(targets.size)}% of charges, rows can exceed charges)`);
+      } else {
+        const { present, fillable } = await withTenant(pool, entityId, (client) =>
+          measureBackfillMatch(client, plan.pairs, entityId),
+        );
+        const pct = (n: number) => (plan.pairs.size === 0 ? 0 : Math.round((n / plan.pairs.size) * 1000) / 10);
+        console.log(`\n  KEY = row_fingerprint (exact 14-field match)`);
+        console.log(`  fingerprints matched : ${present} of ${plan.pairs.size} pairs (${pct(present)}%)`);
+        console.log(`  of those, fillable   : ${fillable} (${pct(fillable)}%) — employer_name still null`);
+        console.log(`  already populated    : ${present - fillable}`);
+      }
+      console.log('\n  Nothing was written. Re-run with --commit to apply.');
+    } finally {
+      await pool.end();
+    }
     return;
   }
 
-  const url = process.env.CMD_ROLLUP_WRITER_DATABASE_URL?.trim();
   if (!url) throw new Error('CMD_ROLLUP_WRITER_DATABASE_URL not set (required for --commit; never hardcode or log it)');
   const pool = makeClient(url);
   try {

@@ -29,6 +29,8 @@ import {
   deriveYield,
   type CmdExplorerFilter,
   type CmdExplorerSort,
+  buildCmdExplorerNameCandidateCountQuery,
+  buildCmdExplorerNameCandidatesQuery,
 } from '../src/collections/cmdExplorerQuery.js';
 
 const ENTITY = ['af504ab6-3dcd-4aa4-a93c-27bc58de4088'];
@@ -1025,4 +1027,47 @@ test('grid: a bogus sort DIRECTION cannot reach the SQL either', () => {
   // `dir` is a ternary over two literals, so anything not exactly 'asc' becomes 'desc'
   assert.doesNotMatch(sql, /drop table/i);
   assert.match(sql, /order by p\.payment_received desc nulls last, p\.id desc/);
+});
+
+// --- patient-name search + row_ids filter (2026-08-17) --------------------------------------
+
+test('row_ids: a NON-EMPTY list narrows by id; absent omits the condition entirely', () => {
+  const withIds = buildCmdExplorerQuery(null, { row_ids: ['12', '34'] }, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+  assert.match(withIds.sql, /id = any\(\$\d+::bigint\[\]\)/);
+  assert.ok(withIds.params.some((p) => Array.isArray(p) && (p as string[]).includes('12')));
+
+  // Absent must emit NO condition — never a tautology, which would defeat index selection.
+  const without = buildCmdExplorerQuery(null, {}, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+  assert.doesNotMatch(without.sql, /bigint\[\]/);
+});
+
+test('row_ids: an EMPTY list must not silently widen the grid to every row', () => {
+  // [] means "the name search ran and matched nothing". The pure builder treats empty as absent
+  // (same discipline as facility/payer), so the ACTION layer is what must preserve the distinction
+  // — this test pins the builder's half of that contract so the two cannot drift silently.
+  const empty = buildCmdExplorerQuery(null, { row_ids: [] }, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+  assert.doesNotMatch(empty.sql, /bigint\[\]/, 'empty array emits no id condition');
+});
+
+test('name candidate COUNT query is tenant-scoped and counts the ROLLUP, not the base table', () => {
+  const q = buildCmdExplorerNameCandidateCountQuery({ facility: ['CAMH'] }, ENTITY);
+  assert.match(q.sql, /^select count\(\*\)::int as n from /);
+  assert.match(q.sql, /cmd_explorer_charge_rollup/);
+  // The number shown to the user must be the number of rows the GRID would show, and the grid
+  // reads the rollup — counting the base table would over-state it by the snapshot fan-out (~2.15x).
+  assert.doesNotMatch(q.sql, /from collections\.cmd_explorer_rows/);
+  assert.ok(q.params.some((p) => Array.isArray(p) && (p as string[]).includes(ENTITY[0]!)));
+});
+
+test('name CANDIDATES query projects ONLY id + ciphertext, and caps in SQL', () => {
+  const q = buildCmdExplorerNameCandidatesQuery({ facility: ['CAMH'] }, ENTITY, 2000);
+  // No money, no other identifier — a name search must not become a bulk PHI export.
+  assert.match(q.sql, /select p\.id, e\.patient_name from/);
+  for (const leaked of ['member_id', 'group_number', 'charge_amount', 'insurance_payments', 'employer_name']) {
+    assert.doesNotMatch(q.sql, new RegExp(`e\\.${leaked}`), `must not project ${leaked}`);
+  }
+  // The cap is enforced in SQL as a bound param, not left to the caller.
+  assert.match(q.sql, /limit \$\d+/);
+  assert.ok(q.params.includes(2000), 'cap is a BOUND parameter');
+  assert.match(q.sql, /e\.patient_name is not null/);
 });

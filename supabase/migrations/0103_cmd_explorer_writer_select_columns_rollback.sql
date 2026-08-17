@@ -1,0 +1,23 @@
+-- 0103_cmd_explorer_writer_select_columns_rollback.sql — reverses 0103. Apply as `postgres`.
+--
+-- Revoking these two column SELECTs returns collections.cmd_explorer_rows to the state 0102 left it
+-- in: cmd_rollup_writer keeps its column-scoped `update (employer_name)` grant and the UPDATE RLS
+-- policy, but the backfill's UPDATE raises 42501 `permission denied for table cmd_explorer_rows`
+-- again, because its WHERE reads business_entity_id and employer_name.
+--
+-- ⚠ UNLIKE the 0102 rollback, THIS FAILURE IS LOUD. A missing SELECT raises; a missing RLS policy
+-- silently matched zero rows. That makes this the safer of the two to roll back — but it still
+-- breaks the backfill, so do not run it while one is pending.
+--
+-- Safe to run once the one-shot backfill has completed and been verified: the hourly cron does NOT
+-- need either column (it is INSERT ... ON CONFLICT DO NOTHING and never reads them), so revoking
+-- removes standing read privilege on a PHI table with no live caller. Consider also revoking the
+-- write grant from 0101 and dropping 0102's policy at the same time, in this order:
+--   revoke select (business_entity_id, employer_name) on collections.cmd_explorer_rows from cmd_rollup_writer;
+--   drop policy if exists cmd_explorer_writer_update on collections.cmd_explorer_rows;
+--   revoke update (employer_name) on collections.cmd_explorer_rows from cmd_rollup_writer;
+--
+-- NOTE: row_fingerprint's SELECT is NOT revoked here — it predates 0103 and this migration did not
+-- grant it. Revoking it would exceed this rollback's scope and could break the ingest path.
+
+revoke select (business_entity_id, employer_name) on collections.cmd_explorer_rows from cmd_rollup_writer;
