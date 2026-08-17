@@ -85,7 +85,19 @@ export const HEADERS = {
     'Insurance Adjustment Amount',
   ],
   patient_balance_due: ['Charge Balance Due Pat'],
-  primary_payer: ['Charge Primary Payer Name', 'Payer Name'],
+  // ⚠ 'Charge Current Payer Name' IS LAST, and here that ordering is load-bearing in the strictest
+  // sense in this file: primary_payer is fingerprint field 13 of 14 (cmdExplorerSeed.ts). Appended
+  // last, the alias is reached ONLY when neither canonical label is present — and BOTH explorer
+  // reports (10093959 and 10094775) project 'Payer Name', so no existing explorer row's dedup key
+  // can move and the book is not re-inserted. Put it first and every fingerprint in the table
+  // changes.
+  //
+  // It exists for the BXR CENSUS report 10093963, which was relabelled the same way the explorer
+  // report was and whose aliases nobody added: measured 2026-08-17, 10,327 of BXR's 15,200
+  // cmd_charge_census rows (67.9%) carried NULL payer AND NULL status, every one first seen on or
+  // after 08-02. Indigo was 0.0% — its report (10092391) kept the old labels, which is what makes
+  // the tenant split diagnostic rather than coincidental.
+  primary_payer: ['Charge Primary Payer Name', 'Payer Name', 'Charge Current Payer Name'],
   // Feed-1 dimension columns (Qualify v2, artifact ②a) — non-PHI. Present on the 21-col report
   // for BOTH tenants (Step-0 header proof, 2026-07-21). claim_status_category is NOT here — it is
   // DERIVED from claim_status_raw in mapRow (cmdExplorerSeed.ts), not picked from a CSV column.
@@ -101,7 +113,12 @@ export const HEADERS = {
   // nothing on the collections plane reads charge_to_date — the readers are all billing_audit_row,
   // a different table. New rows carry NULL here. Not in the fingerprint, so no dedup impact.
   charge_to_date: ['Charge To Date'],
-  claim_status_raw: ['Claim Status'],
+  // 'Charge Status' is the BXR census report's label for the same field (10093963, relabelled ~08-02
+  // — see the primary_payer note above). Appended last by the same discipline, though the stakes
+  // are lower here: claim_status_raw is explicitly NOT a fingerprint input, so no ordering could
+  // move a dedup key. It DOES drive claim_status_category, which mapRow derives from it — and that
+  // is the Qualify openCount DENOMINATOR, which is why two weeks of nulls mattered.
+  claim_status_raw: ['Claim Status', 'Charge Status'],
   // Plan sponsor / group employer (migration 0101). CMD's label is 'Primary Ins Emp Name' — NOT
   // 'Employer Name'; verified by live probe 2026-08-15 on BOTH tenants' reports. "Emp" here is
   // EMPLOYER (the insurance plan's sponsor), not EMPLOYEE: the subscriber's own name is
