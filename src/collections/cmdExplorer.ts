@@ -118,7 +118,8 @@ export const HEADERS = {
   // into one row and silently shrink the openCount denominator. The census report (10093963)
   // projects 'Payment Charge ID', which is found FIRST, so it never reaches this candidate.
   // cmdCensus.test.ts pins exactly that.
-  charge_id: ['Charge ID', 'Payment Charge ID', 'Claim ID'],
+  // Census must only use charge-grain identifiers; Claim ID is scoped to explorer ingestion below.
+  charge_id: ['Charge ID', 'Payment Charge ID'],
   // 'Payment Entered' is 10094775's label for the CLAIM-ENTRY date — RULED BY ALEC 2026-08-16,
   // and it occupies the exact slot 'Charge Entered Date' held before that edit. Appended LAST per
   // the ordering invariant above. Safe regardless: charge_entered_date is NOT one of the locked 14
@@ -449,6 +450,10 @@ export function splitFacilityLabel(raw: string | null): { name: string | null; i
   return { name: m[1]!.trim(), id: m[2]! };
 }
 
+// Claim ID is a claim-grain fallback used only by Explorer. It must not be part of HEADERS,
+// because census mapping shares mapReportRows but requires a charge-grain key.
+const EXPLORER_CHARGE_ID_HEADERS = [...HEADERS.charge_id, 'Claim ID'] as const;
+
 export function mapReportRows(rows: CmdReportRow[]): CmdExplorerFullRow[] {
   return rows.map((row) => {
     const nonPhi = {
@@ -463,7 +468,7 @@ export function mapReportRows(rows: CmdReportRow[]): CmdExplorerFullRow[] {
       adjustments: pick(row, HEADERS.adjustments),
       patient_balance_due: pick(row, HEADERS.patient_balance_due),
       primary_payer: pick(row, HEADERS.primary_payer),
-      charge_id: pick(row, HEADERS.charge_id),
+      charge_id: pick(row, EXPLORER_CHARGE_ID_HEADERS),
       charge_entered_date: pick(row, HEADERS.charge_entered_date),
       charge_to_date: pick(row, HEADERS.charge_to_date),
       claim_status_raw: pick(row, HEADERS.claim_status_raw),

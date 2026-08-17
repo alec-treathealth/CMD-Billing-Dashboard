@@ -346,5 +346,7 @@ test('charge_id: a census row carrying BOTH labels keeps the CHARGE-grain id, no
 test('charge_id: with NO charge-grain label present, Claim ID is the fallback (report 10094775)', () => {
   const claimOnly = reportRow({ 'Claim ID': 'CLM-777' });
   delete (claimOnly as Record<string, unknown>)['Charge ID'];
-  assert.equal(mapCensusRows([claimOnly]).rows[0]?.charge_id, 'CLM-777');
+  assert.equal(mapCensusRows([claimOnly]).rows.length, 0);
+});
+_id, 'CLM-777');
 });
