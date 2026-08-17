@@ -19,6 +19,7 @@ import { qualifySmokeShellEnabled, qualifyV3FlowEnabled } from '@/lib/qualify/v3
 import { QualifyTab } from '@/components/qualify/qualify-tab';
 import { ResolutionFlowClient } from '@/components/qualify/v3/resolution-flow-client';
 import { PolicyTapeMount } from '@/components/qualify/policy-tape-mount';
+import { PayerIntelPointerBanner } from '@/components/payer-intel/pointer-banner';
 
 export const metadata: Metadata = { title: 'Qualify | CMD Billing' };
 
@@ -65,7 +66,17 @@ export default async function QualifyPage() {
     // INTO the board (the client mounts it in the tape stack), so the standalone mount below is
     // exclusively the single-column fallback's. Kill switch: QUALIFY_SMOKE_SHELL=off.
     if (qualifySmokeShellEnabled()) {
-      return <ResolutionFlowClient viewerHasAmountsCapability={viewerHasAmountsCapability} shellMode />;
+      // The pointer banner rides ABOVE the shell in a fragment — the route layout supplies no
+      // chrome here, so the banner brings its own container/padding. THIS is the live prod branch
+      // (both flags default ON): a banner added only to the fallbacks below would never render.
+      return (
+        <>
+          <div className="mx-auto max-w-[1680px] px-6 pt-4 sm:px-8">
+            <PayerIntelPointerBanner from="qualify" />
+          </div>
+          <ResolutionFlowClient viewerHasAmountsCapability={viewerHasAmountsCapability} shellMode />
+        </>
+      );
     }
     // The policy tape sits ABOVE the flow and owns its own fetch, so it adds no latency to the
     // page and no state to the flow shell. It renders as ABSENT (not as an empty bar) whenever
@@ -74,6 +85,9 @@ export default async function QualifyPage() {
     return (
       <>
         <div className="mx-auto max-w-[1680px] px-6 pt-6 sm:px-8 sm:pt-8">
+          <PayerIntelPointerBanner from="qualify" />
+        </div>
+        <div className="mx-auto max-w-[1680px] px-6 pt-4 sm:px-8">
           <PolicyTapeMount />
         </div>
         <ResolutionFlowClient viewerHasAmountsCapability={viewerHasAmountsCapability} />
@@ -82,6 +96,11 @@ export default async function QualifyPage() {
   }
 
   return (
-    <QualifyTab viewerHasAmountsCapability={viewerHasAmountsCapability} canRevealPhi={access.access.canRevealPhi} />
+    <>
+      <div className="mx-auto max-w-[1680px] px-6 pt-4 sm:px-8">
+        <PayerIntelPointerBanner from="qualify" />
+      </div>
+      <QualifyTab viewerHasAmountsCapability={viewerHasAmountsCapability} canRevealPhi={access.access.canRevealPhi} />
+    </>
   );
 }

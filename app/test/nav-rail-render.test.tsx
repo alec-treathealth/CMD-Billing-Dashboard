@@ -38,24 +38,26 @@ function render(opts: {
 
 test('rail: super_admin renders every destination, labelled', () => {
   const html = render({ role: 'super_admin' });
-  for (const label of ['Overview', 'Qualify', 'Collections', 'Claims Desk', 'Code Reference']) {
+  for (const label of ['Overview', 'Payer Intel', 'Collections', 'Claims Desk', 'Code Reference']) {
     assert.ok(html.includes(label), `missing destination: ${label}`);
   }
 });
 
-test('rail: admissions_seat is Qualify-only — no dashboard destinations leak in', () => {
-  const html = render({ role: 'admissions_seat', pathname: '/qualify' });
-  assert.ok(html.includes('Qualify'));
+test('rail: admissions_seat is PAYER-INTEL-only — no dashboard destinations leak in', () => {
+  // The Qualify tab came down 2026-08-17; the seat's single surface is Payer Intel now.
+  const html = render({ role: 'admissions_seat', pathname: '/payer-intel' });
+  assert.ok(html.includes('Payer Intel'));
   assert.ok(!html.includes('Collections'));
   assert.ok(!html.includes('Claims Desk'));
   assert.ok(!html.includes('Code Reference'));
   assert.ok(!html.includes('href="/dashboard"'));
 });
 
-test('rail: an entity role gets no Qualify destination', () => {
-  const html = render({ role: 'admin' });
-  assert.ok(!html.includes('href="/qualify"'));
-  assert.ok(html.includes('Collections'));
+test('rail: NO role gets a Qualify destination — the tab is down', () => {
+  for (const role of ['super_admin', 'admissions_seat', 'admin', 'user'] as const) {
+    assert.ok(!render({ role }).includes('href="/qualify"'), `${role} still sees Qualify`);
+  }
+  assert.ok(render({ role: 'admin' }).includes('Collections'));
 });
 
 test('rail: the tenant scope rides onto view-scoped hrefs only', () => {
@@ -63,10 +65,10 @@ test('rail: the tenant scope rides onto view-scoped hrefs only', () => {
   assert.ok(html.includes('href="/dashboard?view=bxr"'));
   assert.ok(html.includes('href="/dashboard/collections?view=bxr"'));
   assert.ok(html.includes('href="/billing-audit?view=bxr"'));
-  // Qualify is cross-tenant; Code Reference is global. Neither may carry the scope.
-  assert.ok(html.includes('href="/qualify"'));
+  // Payer Intel is cross-tenant; Code Reference is global. Neither may carry the scope.
+  assert.ok(html.includes('href="/payer-intel"'));
   assert.ok(html.includes('href="/code-reference"'));
-  assert.ok(!html.includes('/qualify?view='));
+  assert.ok(!html.includes('/payer-intel?view='));
   assert.ok(!html.includes('/code-reference?view='));
 });
 
@@ -86,7 +88,7 @@ test('rail: exactly one destination is aria-current, and it is the active route'
   // '/dashboard' must match EXACTLY — Collections must not also light up Overview.
   assert.equal(activeHref(render({ role: 'super_admin', pathname: '/dashboard/collections' })), '/dashboard/collections');
   assert.equal(activeHref(render({ role: 'super_admin', pathname: '/dashboard' })), '/dashboard');
-  assert.equal(activeHref(render({ role: 'super_admin', pathname: '/qualify' })), '/qualify');
+  assert.equal(activeHref(render({ role: 'super_admin', pathname: '/payer-intel' })), '/payer-intel');
   // A subroute still marks its parent destination active.
   assert.equal(activeHref(render({ role: 'super_admin', pathname: '/billing-audit/detail' })), '/billing-audit');
 });
@@ -111,7 +113,7 @@ test('rail: the active indicator is painted from the M3 token, not a hex', () =>
 
 test('rail: collapsed still carries every label — it is not icon-only for a screen reader', () => {
   const collapsed = render({ role: 'super_admin', expanded: false });
-  for (const label of ['Overview', 'Qualify', 'Collections', 'Claims Desk', 'Code Reference']) {
+  for (const label of ['Overview', 'Payer Intel', 'Collections', 'Claims Desk', 'Code Reference']) {
     assert.ok(collapsed.includes(label), `collapsed rail dropped: ${label}`);
   }
   // Collapsed leans on title= for the truncated label.
@@ -141,7 +143,8 @@ test('rail: Beta reads as a badge when expanded and a dot when collapsed', () =>
 
   const collapsed = render({ role: 'super_admin', expanded: false });
   assert.ok(!collapsed.includes('q-beta-badge'));
-  // Two Beta surfaces (Qualify + Claims Desk) → two collapsed dot markers.
+  // Two Beta surfaces (Payer Intel + Claims Desk) → two collapsed dot markers. Was three until
+  // the Qualify tab came down 2026-08-17.
   assert.equal(collapsed.match(/rounded-full bg-coral400/g)?.length, 2);
 });
 

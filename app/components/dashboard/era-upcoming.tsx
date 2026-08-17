@@ -366,6 +366,7 @@ export function EraUpcomingBody({
   onEdit,
   busy = false,
   facilityOptions = [],
+  facilityLabel = (code) => code,
 }: {
   data: EraUpcomingSummary;
   /**
@@ -390,6 +391,17 @@ export function EraUpcomingBody({
    * explanation rather than shown and then rejected server-side.
    */
   facilityOptions?: ForecastFacilityOption[];
+  /**
+   * facility_code → the name a human recognises.
+   *
+   * ⚠ WHY THIS EXISTS (Alec, 2026-08-17): BXR facility codes are readable short codes (PCMH,
+   * LSMH) but **Indigo's facility_code IS its CMD customer id** — `10020687` — so every Indigo
+   * row in this tile rendered as a bare 8-digit number. `collections.facilities` carries a name
+   * for all 32 numeric codes; the caller already builds that map for the IP/OP split, so this
+   * only has to be handed down. Defaults to the identity so a caller without the dimension
+   * (or a code the dimension has not seeded) still shows the code rather than an empty cell.
+   */
+  facilityLabel?: (code: string) => string;
 }) {
   // RESOLUTION FIRST, THEN PARTITION (Alec, 2026-08-03). Everything below renders the
   // forecast AFTER super-admin corrections and suppressions are applied, so a corrected
@@ -629,7 +641,14 @@ export function EraUpcomingBody({
 
       <div className="ths-item-list">
         {groups.map((g) => (
-          <UpcomingGroupRow key={g.key} group={g} canEdit={canEdit} busy={busy} onEdit={onEdit} />
+          <UpcomingGroupRow
+            key={g.key}
+            group={g}
+            canEdit={canEdit}
+            busy={busy}
+            onEdit={onEdit}
+            facilityLabel={facilityLabel}
+          />
         ))}
       </div>
 
@@ -645,6 +664,7 @@ export function EraUpcomingBody({
           canEdit={canEdit}
           busy={busy}
           onEdit={onEdit}
+          facilityLabel={facilityLabel}
         />
       )}
 
@@ -843,6 +863,7 @@ function OverdueStrip({
   canEdit = false,
   busy = false,
   onEdit,
+  facilityLabel = (code) => code,
 }: {
   rows: ResolvedForecastRow[];
   totalCents: number;
@@ -854,6 +875,8 @@ function OverdueStrip({
   canEdit?: boolean;
   busy?: boolean;
   onEdit?: (intent: ForecastEditIntent) => void;
+  /** See EraUpcomingBody.facilityLabel — Indigo codes are CMD customer ids, not names. */
+  facilityLabel?: (code: string) => string;
 }) {
   return (
     <div className="ths-notice flex-col items-stretch">
@@ -879,7 +902,7 @@ function OverdueStrip({
           <li key={forecastRowKey(r, i)} className="flex flex-wrap items-center gap-2">
             <span className="ths-num tabular-nums">{money(r.amount)}</span>
             <span>
-              {r.facility_code} · {r.payer_label} · {r.method_label}
+              {facilityLabel(r.facility_code)} · {r.payer_label} · {r.method_label}
             </span>
             <span className="ths-card-meta">
               expected {r.expected_date} · {count(wholeDaysBetween(r.expected_date, cutoff))} days
@@ -1204,11 +1227,13 @@ function UpcomingGroupRow({
   canEdit = false,
   busy = false,
   onEdit,
+  facilityLabel = (code) => code,
 }: {
   group: UpcomingGroup;
   canEdit?: boolean;
   busy?: boolean;
   onEdit?: (intent: ForecastEditIntent) => void;
+  facilityLabel?: (code: string) => string;
 }) {
   const payers = g.items.length;
   const hasForecast = g.forecastCents > 0;
@@ -1219,7 +1244,7 @@ function UpcomingGroupRow({
           ▸
         </span>
         <span className="ths-num whitespace-nowrap tabular-nums">{g.date}</span>
-        <span className="font-medium">{g.facilityCode}</span>
+        <span className="font-medium">{facilityLabel(g.facilityCode)}</span>
         <span className="ths-card-meta">
           {count(payers)} {payers === 1 ? 'payer' : 'payers'}
           {hasForecast && (

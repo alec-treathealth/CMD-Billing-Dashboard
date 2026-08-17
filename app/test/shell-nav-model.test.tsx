@@ -146,28 +146,40 @@ test('railActive: a nullish pathname (pre-hydration) still lets the rail render'
 
 const hrefs = (role: Parameters<typeof linksFor>[0]) => linksFor(role).map((l) => l.href);
 
-test('nav: admissions_seat is a single-surface persona — Qualify only', () => {
-  assert.deepEqual(hrefs('admissions_seat'), ['/qualify']);
+test('nav: admissions_seat is a PAYER-INTEL-only persona — the Qualify tab is down', () => {
+  // 2026-08-17 ruling: no role sees Qualify. /payer-intel admits the seat (names yes, dollars
+  // never — the strip lives in the payer-intel core, not the nav).
+  assert.deepEqual(hrefs('admissions_seat'), ['/payer-intel']);
 });
 
-test('nav: super_admin sees Qualify slotted between Overview and Collections', () => {
+test('nav: NO role gets a Qualify link — the tab is taken down, not just hidden from most', () => {
+  for (const role of ['super_admin', 'admissions_seat', 'admin', 'user', undefined] as const) {
+    assert.equal(
+      linksFor(role).some((l) => l.href === '/qualify'),
+      false,
+      `${String(role)} still sees a Qualify link`,
+    );
+  }
+});
+
+test('nav: super_admin sees Payer Intel slotted between Overview and Collections', () => {
   assert.deepEqual(hrefs('super_admin'), [
     '/dashboard',
-    '/qualify',
+    '/payer-intel',
     '/dashboard/collections',
     '/billing-audit',
     '/code-reference',
   ]);
 });
 
-test('nav: entity admin / user / unknown get the base set with NO Qualify entry', () => {
+test('nav: entity admin / user / unknown get the base set with NO cross-tenant entries', () => {
   const base = ['/dashboard', '/dashboard/collections', '/billing-audit', '/code-reference'];
   assert.deepEqual(hrefs('admin'), base);
   assert.deepEqual(hrefs('user'), base);
   assert.deepEqual(hrefs(undefined), base);
   for (const role of ['admin', 'user', undefined] as const) {
     assert.equal(
-      linksFor(role).some((l) => l.href === '/qualify'),
+      linksFor(role).some((l) => l.href === '/qualify' || l.href === '/payer-intel'),
       false,
     );
   }
@@ -181,11 +193,11 @@ test('nav: every link carries a rail icon — an icon-first rail cannot render w
   }
 });
 
-test('nav: Claims Desk and Qualify are the Beta-flagged surfaces', () => {
+test('nav: Claims Desk and Payer Intel are the Beta-flagged surfaces', () => {
   const beta = linksFor('super_admin')
     .filter((l) => l.isBeta)
     .map((l) => l.href);
-  assert.deepEqual(beta.sort(), ['/billing-audit', '/qualify']);
+  assert.deepEqual(beta.sort(), ['/billing-audit', '/payer-intel']);
 });
 
 // ---------------------------------------------------------------------------
@@ -196,8 +208,9 @@ test('navHref: the tenant scope rides along to view-scoped routes only', () => {
   assert.equal(navHref('/dashboard', 'bxr'), '/dashboard?view=bxr');
   assert.equal(navHref('/dashboard/collections', 'bxr'), '/dashboard/collections?view=bxr');
   assert.equal(navHref('/billing-audit', 'indigo'), '/billing-audit?view=indigo');
-  // Qualify is cross-tenant and pins its own scope; Code Reference is global.
+  // Qualify + Payer Intel are cross-tenant and pin their own scope; Code Reference is global.
   assert.equal(navHref('/qualify', 'bxr'), '/qualify');
+  assert.equal(navHref('/payer-intel', 'bxr'), '/payer-intel');
   assert.equal(navHref('/code-reference', 'bxr'), '/code-reference');
 });
 

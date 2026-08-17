@@ -1,0 +1,254 @@
+'use client';
+
+/**
+ * The two IDLE-state rails — "Policies gaining ground" (dark teal, the tape silhouette) and
+ * "Facilities losing ground" (dark WARM ground + coral accents, two-line ticks).
+ *
+ * MOVING, BY RULING (Alec, 2026-08-17 review: "there's just not movement, they are sitting
+ * still") — this supersedes the build spec's static-rail line. Both rails run the SAME machine as
+ * the Qualify tape: `useMarquee` over a real overflow-x container, hand-scrollable, pauses on
+ * hover/focus/gesture, auto-motion drops under prefers-reduced-motion while staying scrollable.
+ *
+ * ⚠ THE useMarquee CONTRACT, learned the hard way on policy-tape.tsx: the ref element's DIRECT
+ * children must be the items (the hook indexes `el.children`); the duplicate set renders only
+ * when `isOverflowing`, marked `data-dup` + `aria-hidden` + tabIndex -1 (the `.q-marquee` CSS
+ * hides duplicates under reduced motion — aria-hidden alone hides them from AT, not from eyes).
+ *
+ * WINDOW-AWARE: both rails render whatever window the board was loaded with — the recency toggle
+ * refetches the board, so `windowDays`/`deltaDays` here always names the ACTIVE window.
+ *
+ * PHI/DOLLARS: gainers items are the tape's non-dollar shape verbatim. Decliner ticks carry ONE
+ * dollar (current-window billed) which arrives ALREADY NULL for amounts-blind sessions (core
+ * choke point). `declineReason` is null in v1 (no attribution service exists); the tick renders
+ * without a why-tag rather than fabricating one.
+ */
+import type { QualifyPolicyTapeItem } from '../../lib/qualify/board';
+import { TAPE_PALETTE } from '../qualify/tokens';
+import { useMarquee } from '../qualify/useMarquee';
+import type { PayerIntelDeclinerItem } from '../../lib/payer-intel/contract';
+import { fmtMoneyCompact } from './format';
+
+/** The warm dark ground the losing-ground rail sits on. A component-local literal (the FLAT_HEX
+ *  precedent): TreatHealthOS has no warm-dark surface token, and minting a Tailwind token for one
+ *  rail would imply reuse this surface has not earned. White + coral400 both clear 4.5:1 on it. */
+const DOWN_RAIL_HEX = '#3B1D17';
+const DOWN_LINE = 'rgba(240,145,124,0.16)';
+const DOWN_DELTA_HEX = '#FF9B85';
+
+function gainerHandle(item: QualifyPolicyTapeItem): string {
+  return item.echo ?? item.prefix ?? `⋯${item.tokenTail.slice(-4)}`;
+}
+
+function gainerClause(item: QualifyPolicyTapeItem): string | null {
+  const parts: string[] = [];
+  if (item.careSetting !== null) parts.push(item.careSetting === 'BOTH' ? 'IP+OP' : item.careSetting);
+  if (item.facilityCount > 1) parts.push(`${item.facilityCount} facilities`);
+  else if (item.area !== null) parts.push(item.area);
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+export function PayerIntelGainersRail({
+  items,
+  asOf,
+  deltaDays,
+  onSeed,
+}: {
+  items: readonly QualifyPolicyTapeItem[];
+  asOf: string | null;
+  deltaDays: number;
+  /** Seed a search from a tick (prefix + payer). */
+  onSeed?: (item: QualifyPolicyTapeItem) => void;
+}) {
+  // Hook before any early return (rules of hooks). resetKey folds the window in so a recency
+  // toggle re-reads from the left.
+  const { ref: scrollRef, isOverflowing } = useMarquee<HTMLUListElement>(`${asOf}-${deltaDays}`, items.length);
+
+  const item = (p: QualifyPolicyTapeItem, dup: boolean) => {
+    const band = p.bandNow ?? '0';
+    const key = `${p.token}-${p.payer}`;
+    const clause = gainerClause(p);
+    const label =
+      `${gainerHandle(p)}, ${p.payer}${clause ? `, ${clause}` : ''}. ` +
+      `Rating ${p.ratingNow}, up ${p.deltaPts} points over ${deltaDays} days.` +
+      (onSeed ? ' Search this policy.' : '');
+    const body = (
+      <>
+        <span className="font-mono text-xs font-medium tracking-wide text-white">{gainerHandle(p)}</span>
+        <span className="max-w-[168px] truncate text-xs text-white/60">{p.payer}</span>
+        {clause ? <span className="whitespace-nowrap text-xs text-white/60">{clause}</span> : null}
+        {/* TAPE_PALETTE.band, never IQ_BAND_HEX — inverse-surface set (audit C-4). */}
+        <span className="font-mono text-[15px] font-semibold" style={{ color: TAPE_PALETTE.band[band] }}>
+          {p.ratingNow}
+        </span>
+        <span className="font-mono text-xs font-medium" style={{ color: TAPE_PALETTE.up }}>
+          ▲ +{p.deltaPts} pts
+        </span>
+      </>
+    );
+    return (
+      <li
+        key={dup ? `dup-${key}` : key}
+        aria-hidden={dup || undefined}
+        data-dup={dup ? 'true' : undefined}
+        className="flex flex-none border-r border-white/10"
+      >
+        {onSeed ? (
+          <button
+            type="button"
+            tabIndex={dup ? -1 : undefined}
+            aria-label={dup ? undefined : label}
+            onClick={() => onSeed(p)}
+            className="flex items-baseline gap-2.5 px-5 py-0.5 text-left transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/70"
+          >
+            {body}
+          </button>
+        ) : (
+          <span className="flex items-baseline gap-2.5 px-5">{body}</span>
+        )}
+      </li>
+    );
+  };
+
+  return (
+    <section aria-label="Policies gaining ground" data-pi-section="gainers">
+      <div className="mb-2 flex items-baseline gap-2 px-0.5">
+        <h2 className="font-head text-[15px] font-semibold tracking-tight text-ink900">Policies gaining ground</h2>
+        <span className="text-xs font-medium uppercase tracking-wide text-ink400">
+          {deltaDays}-day rating change{asOf ? ` · as of ${asOf}` : ''}
+        </span>
+      </div>
+      {items.length === 0 ? (
+        <p className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-ink400">
+          No policy has gained ground over the last {deltaDays} days — nothing to lead with yet.
+        </p>
+      ) : (
+        <div className="overflow-hidden rounded-xl bg-teal900 shadow-ths-sm">
+          {/* ⚠ THE SCROLL CONTAINER IS THE <ul> ITSELF — useMarquee indexes el.children directly;
+              a wrapper div silently kills auto-scroll (the shipped policy-tape bug, 2026-08-09). */}
+          <ul ref={scrollRef} className="q-marquee flex items-center py-2.5">
+            {items.map((p) => item(p, false))}
+            {isOverflowing && items.map((p) => item(p, true))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
+export function PayerIntelDeclinersRail({
+  items,
+  windowDays,
+  thresholdPts,
+  onSeed,
+}: {
+  items: readonly PayerIntelDeclinerItem[];
+  windowDays: number;
+  thresholdPts: number;
+  onSeed?: (item: PayerIntelDeclinerItem) => void;
+}) {
+  const { ref: scrollRef, isOverflowing } = useMarquee<HTMLUListElement>(
+    `${windowDays}-${items[0]?.facility ?? ''}`,
+    items.length,
+  );
+
+  const tick = (d: PayerIntelDeclinerItem, dup: boolean) => {
+    const label =
+      `${d.facility}${d.careSetting ? `, ${d.careSetting === 'BOTH' ? 'IP and OP' : d.careSetting}` : ''}. ` +
+      `Collecting ${d.pctCurrent ?? '—'} percent of billed, down ${Math.abs(d.deltaPts)} points over ${windowDays} days.` +
+      (onSeed ? ' Search this facility.' : '');
+    const microParts = [
+      `${d.lineCount.toLocaleString('en-US')} ln`,
+      ...(d.billedCurrent !== null ? [fmtMoneyCompact(d.billedCurrent)] : []),
+    ];
+    const body = (
+      <>
+        <span className="flex items-center gap-1.5">
+          <span className="whitespace-nowrap text-[13px] font-semibold tracking-wide text-white">{d.facility}</span>
+          {d.careSetting !== null ? (
+            <span
+              className="rounded-full border px-1.5 text-[9px] font-bold uppercase tracking-wider"
+              style={{ color: '#F0917C', borderColor: 'rgba(240,145,124,0.4)' }}
+            >
+              {d.careSetting === 'BOTH' ? 'IP+OP' : d.careSetting}
+            </span>
+          ) : null}
+          <span className="font-display text-[17px] font-medium" style={{ color: '#F0917C' }}>
+            {d.pctCurrent !== null ? `${Math.round(d.pctCurrent)}%` : '—'}
+          </span>
+          <span className="whitespace-nowrap font-mono text-xs font-medium" style={{ color: DOWN_DELTA_HEX }}>
+            ▼ −{Math.abs(d.deltaPts).toFixed(1)}
+          </span>
+        </span>
+        {/* Second micro-line. Sized 12px at white/70, NOT 10px at white/45 (Alec, 2026-08-17:
+            "make the small text ... bigger and easier to see"): white at 45% over this warm-dark
+            ground blends to ≈#938280, which measures 3.7:1 — under the 4.5:1 floor for text this
+            small. 70% blends to ≈#C4BBB9 ≈ 7.2:1, so the readability ask and SC 1.4.3 land in the
+            same change. NO why-tag in v1: decline_reason attribution does not exist server-side,
+            and fabricating one client-side is forbidden by spec.
+            TODO(payer-intel): render `declineReason` here once the attribution service ships. */}
+        <span className="flex items-center gap-2 whitespace-nowrap font-mono text-xs text-white/70">
+          {microParts.join(' · ')}
+        </span>
+      </>
+    );
+    return (
+      <li
+        key={dup ? `dup-${d.facility}` : d.facility}
+        aria-hidden={dup || undefined}
+        data-dup={dup ? 'true' : undefined}
+        className="flex flex-none"
+        style={{ borderRight: `1px solid ${DOWN_LINE}` }}
+      >
+        {onSeed ? (
+          <button
+            type="button"
+            tabIndex={dup ? -1 : undefined}
+            aria-label={dup ? undefined : label}
+            onClick={() => onSeed(d)}
+            className="flex flex-col justify-center gap-0.5 px-4 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/70 hover:bg-[rgba(240,145,124,0.06)]"
+          >
+            {body}
+          </button>
+        ) : (
+          <span className="flex flex-col justify-center gap-0.5 px-4 py-2">{body}</span>
+        )}
+      </li>
+    );
+  };
+
+  return (
+    <section aria-label="Facilities losing ground" data-pi-section="decliners">
+      <div className="mb-2 flex items-baseline gap-2 px-0.5">
+        {/* RATING_HEX.danger, not status-danger: small text on the light page ground needs the
+            text-safe darkened value (audit C-5); this heading sits on bg-ground, not the rail. */}
+        <h2 className="font-head text-[15px] font-semibold tracking-tight" style={{ color: '#B64138' }}>
+          Facilities losing ground
+        </h2>
+        <span className="text-xs font-medium uppercase tracking-wide text-ink400">
+          % collected of billed · {windowDays}d · decliners only
+        </span>
+      </div>
+      {items.length === 0 ? (
+        <p className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-ink600">
+          No facility is down more than {thresholdPts} pts in {windowDays} days — nothing to chase.
+        </p>
+      ) : (
+        <>
+          <div
+            className="overflow-hidden rounded-xl shadow-ths-sm"
+            style={{ background: DOWN_RAIL_HEX, borderTop: '2px solid #E2674F' }}
+          >
+            <ul ref={scrollRef} className="q-marquee flex items-stretch">
+              {items.map((d) => tick(d, false))}
+              {isOverflowing && items.map((d) => tick(d, true))}
+            </ul>
+          </div>
+          <p className="mt-1.5 px-0.5 text-xs text-ink400">
+            Decliners only, ≥{thresholdPts} pts over {windowDays} days on payment-date windows. Drill before acting —
+            a thin window can move without the payer changing anything.
+          </p>
+        </>
+      )}
+    </section>
+  );
+}

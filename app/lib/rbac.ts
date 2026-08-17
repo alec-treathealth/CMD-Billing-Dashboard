@@ -58,13 +58,23 @@ export function canManageUsers(role: Role): boolean {
   return role === 'super_admin' || role === 'admin';
 }
 
-/** Where an admissions_seat is sent when it hits any non-Qualify protected route. */
-export const QUALIFY_HOME = '/qualify';
+/**
+ * Where an admissions_seat is sent when it hits a protected route it may not use.
+ *
+ * ⚠ REPOINTED 2026-08-17 to `/payer-intel`, because the Qualify TAB came down that day (Alec) and
+ * a redirect to a nav-less surface is a dead end. The NAME is kept — eight route guards import it
+ * — and renaming them would be churn that hides the one thing that actually changed: the value.
+ * Read it as "the seat's home", not "the Qualify page".
+ */
+export const QUALIFY_HOME = '/payer-intel';
 
 /**
- * admissions_seat sees ONLY the Qualify tab (nav-hidden AND route-blocked). Every non-Qualify
- * protected route calls this and redirects to QUALIFY_HOME when true — server-side, not just
- * nav-hiding. Pure so the guard is unit-testable without a live session.
+ * admissions_seat is a SINGLE-SURFACE persona (nav-hidden AND route-blocked everywhere else).
+ * Every protected route that excludes it calls this and redirects to QUALIFY_HOME — server-side,
+ * not just nav-hiding. Pure so the guard is unit-testable without a live session.
+ *
+ * ⚠ /payer-intel must NEVER call this: the seat is admitted there, and as of 2026-08-17 that is
+ * the ONLY surface it may use.
  */
 export function isQualifyOnlyRole(role: Role): boolean {
   return role === 'admissions_seat';

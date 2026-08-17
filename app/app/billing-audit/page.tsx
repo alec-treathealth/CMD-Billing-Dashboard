@@ -15,6 +15,7 @@
  * the seeded page was fetched with — no first-render refetch/mismatch). OP rows fetch on first view.
  */
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { BillingAuditWorkbench } from '@/components/billing-audit/workbench';
 import { ClaimsAuditMaintenanceNotice } from '@/components/billing-audit/maintenance-notice';
@@ -78,6 +79,20 @@ export default async function BillingAuditPage({
           IP and OP claim-audit workbench. Patient identifiers are masked by default and revealed
           only through an explicit, audited action.
         </p>
+        {/* Facility Resolution entry point — MOVED here from the Collections header (Alec,
+            2026-08-17): attributing a 'No Facility' charge is desk work. admin/super_admin ONLY,
+            the same gate the destination page and every one of its server actions enforce, and
+            rendered by DOM omission rather than CSS, so a plain 'user' never receives the link. */}
+        {access.access.role === 'admin' || access.access.role === 'super_admin' ? (
+          <Link
+            href={`/billing-audit/facility-resolution?view=${view}`}
+            className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-sm text-ink900 hover:border-teal700/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          >
+            Facility Resolution
+            <span aria-hidden>→</span>
+            <span className="sr-only">— attribute charges CMD posted with no facility</span>
+          </Link>
+        ) : null}
       </header>
       <BillingAuditWorkbench
         view={view}

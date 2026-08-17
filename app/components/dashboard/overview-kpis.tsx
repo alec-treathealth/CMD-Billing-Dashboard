@@ -400,6 +400,20 @@ export function OverviewKpis({
           })
           .sort((a, b) => a.label.localeCompare(b.label));
 
+  /**
+   * facility_code → a name a human recognises, for every tile that PRINTS a code.
+   *
+   * ⚠ Alec, 2026-08-17: the Future Payments tile listed Indigo facilities as `10020687`,
+   * `10021230`, … BXR's facility_code is a readable short code (PCMH, LSMH) but **Indigo's
+   * facility_code IS its CMD customer id** (see cmdCustomers.ts: `facilityCode: '10026460'`), so
+   * the raw code is an account number to the reader. `collections.facilities` carries a name for
+   * all 32 numeric codes — the same dimension already loaded above for the IP/OP split — so this
+   * is a display join, not a new read. Falls back to the code so a facility the dimension has not
+   * seeded still identifies itself rather than rendering blank.
+   */
+  const facilityLabel = (code: string): string =>
+    dimByCode.get(code)?.facility_name ?? dimByCode.get(code)?.display_acronym ?? code;
+
   // --- card metrics ---------------------------------------------------------------
   const mtdGross = kpis.mtd.gross;
   const ytdGross = kpis.ytd.gross;
@@ -505,6 +519,7 @@ export function OverviewKpis({
         view={view}
         canEdit={canEditForecast}
         facilityOptions={forecastFacilityOptions}
+        facilityLabel={facilityLabel}
         externalVersion={forecastVersion}
         onChanged={onForecastChange}
       />
@@ -835,6 +850,7 @@ function EraUpcomingPanel({
   facilityOptions,
   externalVersion,
   onChanged,
+  facilityLabel = (code) => code,
 }: {
   open: boolean;
   /** See AllFacilitiesTable.onClose — the toggle button owns this state. */
@@ -854,6 +870,9 @@ function EraUpcomingPanel({
   externalVersion: number;
   /** Bubble this panel's own successful writes up, so the chart's forecast series re-reads. */
   onChanged?: () => void;
+  /** facility_code → display name. Indigo codes ARE CMD customer ids (10020687), so without this
+   *  every Indigo row in the tile renders as a bare 8-digit number. */
+  facilityLabel?: (code: string) => string;
 }) {
   /**
    * EDITABLE = THE ROLE **AND** A SINGLE TENANT IN SCOPE.
@@ -1028,6 +1047,7 @@ function EraUpcomingPanel({
             canEdit={canEdit}
             busy={busy}
             facilityOptions={facilityOptions}
+            facilityLabel={facilityLabel}
             onEdit={(intent) => void applyEdit(intent)}
           />
         </div>

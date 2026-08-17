@@ -14,7 +14,7 @@ import {
   BookOpen,
   FileSearch,
   LayoutDashboard,
-  Target,
+  Radar,
   Wallet,
   type LucideIcon,
 } from 'lucide-react';
@@ -58,13 +58,28 @@ const CODE_REFERENCE: NavLink = {
 
 const BASE_LINKS: readonly NavLink[] = [OVERVIEW, COLLECTIONS, CLAIMS_AUDIT, CODE_REFERENCE];
 
-// Qualify (Prompt 3): a CROSS-TENANT admissions surface, NOT ?view=-scoped. It sits between Overview
-// and Collections and is visible only to the two roles that may reach it (super_admin +
-// admissions_seat) — RBAC is still enforced server-side at the route; this only controls the nav.
-const QUALIFY_LINK: NavLink = {
-  href: '/qualify',
-  label: 'Qualify',
-  railIcon: Target,
+// ⚠ QUALIFY TAB TAKEN DOWN 2026-08-17 (Alec): "we should take the qualify tab down, only keeping
+// the necessary functions from it. the user should no longer be able to see the qualify tab."
+// Payer Intel absorbed the surface — it carries the policy tape (as the gainers rail), the rating,
+// the census, the watchers and the saved searches.
+//
+// TAKEN DOWN, NOT DELETED, and the distinction is load-bearing: /qualify and /qualify/m still
+// resolve, and MUST, because Payer Intel imports live code out of that tree — the tape core
+// (lib/qualify/board), the rating bands (lib/qualify/ratingV2), the marquee hook, the watcher
+// definer wrapper and the tape-context loader. Deleting the routes would not remove that code and
+// would break the one URL anyone still has. What changes is VISIBILITY: no role gets a nav entry.
+//
+// Do not re-add a Qualify link without a new ruling. The retirement plan (what to delete, what to
+// move, the mobile PWA's fate) is a separate, scoped piece of work.
+
+// Payer Intel (2026-08-17): the consolidated Collections-search × Qualify-intelligence tab —
+// cross-tenant like Qualify, same role pair (super_admin + admissions_seat; the ruling lives in
+// lib/payer-intel/principal.ts). NOT ?view=-scoped. ⚠ The NAME already means the monthly intel.*
+// research cron elsewhere in this repo — this link is the PAGE, /api/cron/payer-intel is not it.
+const PAYER_INTEL_LINK: NavLink = {
+  href: '/payer-intel',
+  label: 'Payer Intel',
+  railIcon: Radar,
   isBeta: true,
 };
 
@@ -77,13 +92,15 @@ export const VIEW_SCOPED = new Set<string>([
 ]);
 
 /**
- * The visible nav links for a role. admissions_seat is a single-surface persona — it sees ONLY
- * Qualify (every other route redirects it here anyway, so dead links are hidden). super_admin sees
- * Qualify plus the standard set; admin / user / unknown see the standard set with NO Qualify entry.
+ * The visible nav links for a role. **No role sees Qualify** as of 2026-08-17 (see the takedown note
+ * above) — admissions_seat is a Payer-Intel-only persona now, and super_admin gets Payer Intel
+ * where the two beta surfaces used to sit. admin / user / unknown see the standard set; Payer
+ * Intel denies them server-side, so advertising it would be a door that will not open.
  */
 export function linksFor(role: Role | undefined): NavLink[] {
-  if (role === 'admissions_seat') return [QUALIFY_LINK];
-  if (role === 'super_admin') return [OVERVIEW, QUALIFY_LINK, COLLECTIONS, CLAIMS_AUDIT, CODE_REFERENCE];
+  if (role === 'admissions_seat') return [PAYER_INTEL_LINK];
+  if (role === 'super_admin')
+    return [OVERVIEW, PAYER_INTEL_LINK, COLLECTIONS, CLAIMS_AUDIT, CODE_REFERENCE];
   return [...BASE_LINKS];
 }
 
