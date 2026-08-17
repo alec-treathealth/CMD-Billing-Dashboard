@@ -2526,8 +2526,17 @@ function cmdExplorerConfigFor(customerId: string): CmdApiConfig {
     // the replacements (10093959 / 10148478), verified saved under all 15 BXR customers and
     // column-for-column value-matched against the old export before being adopted; see the ALIAS
     // PROVENANCE block in src/collections/cmdExplorer.ts. The old ids are DEAD — do not restore
-    // them as fallbacks. NOTE: cmdBxrCensusConfigFor spreads this config, so this reportId is the
-    // CENSUS's report too; its saved filter must live under 10093959 as well.
+    // them as fallbacks.
+    //
+    // ⚠ THE NOTE THAT USED TO SIT HERE WAS STALE AND IT MATTERED (corrected 2026-08-17, while
+    // scoping the 10093959 → 10094775 repoint). It claimed "cmdBxrCensusConfigFor spreads this
+    // config, so this reportId is the CENSUS's report too". It does spread it — and then
+    // OVERRIDES both fields: `reportId: requiredCensusReportId('CMD_BXR_CENSUS_REPORT_ID')` and
+    // `filterId: requiredCensusFilterId('CMD_BXR_CENSUS_FILTER_ID')`, neither with a fallback. The
+    // census therefore takes NOTHING from this pairing but the credentials and poll tuning.
+    // Changing CMD_EXPLORER_REPORT_ID moves the explorer alone; the stale note made that flip look
+    // like it would drag the census onto an unsaved filter and stall it, which is precisely the
+    // kind of phantom coupling that stops a correct change from being made.
     reportId: process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10093959',
     filterId: process.env.CMD_EXPLORER_FILTER_ID?.trim() || '10148478',
     pollIntervalMs: Number(process.env.CMD_EXPLORER_POLL_INTERVAL_MS) || 3_000,
