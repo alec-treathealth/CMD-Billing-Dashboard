@@ -193,3 +193,52 @@ test('a body without rows_fetched records a null count rather than 0', () => {
   const v = classifyCronResult({ status: 200, body: { ok: true, duration_ms: 98_000 } });
   assert.equal(v.rowsTouched, null);
 });
+
+// ── The whole-roster empty pull (2026-08-17: eleven hours of `ok` while fetching nothing) ────────
+
+test('all customers pulled cleanly and the roster returned NOTHING => error, not ok', () => {
+  // The exact body BXR's explorer returned every hour for eleven hours while the configured
+  // report/filter pairing matched no rows. Nothing threw and no customer failed, so it recorded
+  // `ok` and the outage was invisible in etl_run.
+  const v = classifyCronResult({
+    status: 200,
+    body: { ok: true, customers_total: 15, customers_processed: 15, customers_failed: 0, rows_fetched: 0 },
+  });
+  assert.equal(v.status, 'error');
+  assert.equal(v.errorLabel, 'all_customers_empty');
+  assert.equal(v.rowsTouched, 0);
+});
+
+test('a fresh-skipped census sweep is NOT an empty-roster outage', () => {
+  // The census cursor legitimately skips every customer that completed inside its 24h window:
+  // customers_processed 0, rows_fetched 0. Those runs are correct and must stay `ok`, which is why
+  // the guard requires processed > 0 rather than keying off rows_fetched alone.
+  const v = classifyCronResult({
+    status: 200,
+    body: { ok: true, customers_total: 15, customers_processed: 0, customers_failed: 0,
+            customers_skipped_fresh: 15, rows_fetched: 0 },
+  });
+  assert.equal(v.status, 'ok');
+  assert.equal(v.errorLabel, null);
+});
+
+test('an empty roster WITH failed customers keeps the more specific partial diagnosis', () => {
+  // A run where customers threw is already described by partial_customers_failed; that names the
+  // cause, whereas all_customers_empty would only name the symptom.
+  const v = classifyCronResult({
+    status: 200,
+    body: { ok: true, customers_processed: 2, customers_failed: 13, rows_fetched: 0 },
+  });
+  assert.equal(v.status, 'ok');
+  assert.equal(v.errorLabel, 'partial_customers_failed=13');
+});
+
+test('a healthy run with rows is untouched by the guard', () => {
+  const v = classifyCronResult({
+    status: 200,
+    body: { ok: true, customers_processed: 15, customers_failed: 0, rows_fetched: 5231 },
+  });
+  assert.equal(v.status, 'ok');
+  assert.equal(v.errorLabel, null);
+  assert.equal(v.rowsTouched, 5231);
+});
