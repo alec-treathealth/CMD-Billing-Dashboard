@@ -535,7 +535,22 @@ async function main(): Promise<void> {
   }
 
   if (!url) throw new Error('CMD_ROLLUP_WRITER_DATABASE_URL not set (required for --commit; never hardcode or log it)');
-  const pool = makeClient(url);
+  // Charge identity matching requires the claims-reader role; resolve to fingerprints before
+    // handing the chosen key to the narrow writer role.
+    let commitPairs = plan.pairs;
+    if (key === 'charge') {
+      const readUrl = process.env.CLAIMS_READER_DATABASE_URL?.trim();
+      if (!readUrl) throw new Error('CLAIMS_READER_DATABASE_URL not set (required for --key=charge --commit)');
+      const readPool = makeClient(readUrl);
+      try {
+        commitPairs = await withTenant(readPool, entityId, (client) =>
+          resolveChargeKeyTargets(client, plan.chargeKeys, entityId),
+        );
+      } finally {
+        await readPool.end();
+      }
+    }
+    const pool = makeClient(url);
   try {
     // ⚠ withTenant IS MANDATORY, NOT TIDINESS. collections.cmd_explorer_rows has RLS ENABLED and
     // cmd_rollup_writer is NOT rolbypassrls, so every policy on it keys off the transaction-local
@@ -551,7 +566,7 @@ async function main(): Promise<void> {
     // backend before any query runs, which matters on the 6543 transaction pooler where a different
     // backend can serve each transaction.
     const updated = await withTenant(pool, entityId, (client) =>
-      applyEmployerBackfill(client, plan.pairs, entityId),
+      applyEmployerBackfill(client, commitPairs, entityId),
     );
     const rate = plan.pairs.size === 0 ? 0 : Math.round((updated / plan.pairs.size) * 1000) / 10;
     console.log(`\n  rows updated     : ${updated} of ${plan.pairs.size} pairs (${rate}%)`);
