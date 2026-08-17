@@ -1,13 +1,26 @@
 /**
- * CMD CSV → collections.cmd_explorer_rows.employer_name BACKFILL (one-shot, local, migration 0101).
+ * CMD → collections.cmd_explorer_rows.employer_name BACKFILL (one-shot, local, migration 0101).
  *
- *   # dry run first — ALWAYS. Prints the match rate and writes nothing.
+ * TWO SOURCES, one matching implementation:
+ *
+ *   # --source=api (default report = CMD_EXPLORER_REPORT_ID) — pulls the saved filter's window
+ *   # once per customer across the tenant roster. DRY RUN:
+ *   node --max-old-space-size=4096 --env-file=.env --import tsx \
+ *     src/collections/cmdEmployerBackfill.ts --tenant=bxr --source=api --filter=10148846
+ *
+ *   # --source=csv — one already-exported file:
  *   node --max-old-space-size=4096 --env-file=.env --import tsx \
  *     src/collections/cmdEmployerBackfill.ts --tenant=bxr --file="Derek Automation.csv"
  *
- *   # then, only if the match rate is what you expect:
- *   node --max-old-space-size=4096 --env-file=.env --import tsx \
- *     src/collections/cmdEmployerBackfill.ts --tenant=bxr --file="Derek Automation.csv" --commit
+ *   # then, only if the match rate is what you expect, add --commit to either form.
+ *
+ * ⚠ THE API SOURCE HOLDS CMD'S PARTNER SLOT. CMD runs ONE report at a time per partner, so this
+ * pull contends with the production crons. Do not run it inside the :41–:59 CMD quiet window or
+ * near the hourly explorer/census slots (:00 :15 :30 :35), and never run two copies at once.
+ *
+ * ⚠ CMD SAVED FILTERS ARE REPORT-SCOPED. A filter saved under a different report returns INVALID
+ * CRITERIA for every customer — the 2026-08-01 census incident, and again the 2026-08-17 catch-up
+ * one. --report and --filter must be a pairing that exists in the CMD UI together.
  *
  * WHY THIS EXISTS: the hourly explorer cron is `INSERT ... ON CONFLICT (row_fingerprint) DO NOTHING`,
  * so it can only ever put an employer on rows it INSERTS. Every row already in the table — 650,696
@@ -49,38 +62,63 @@
  *   name, member id, or group number — those pass through mapRow and are dropped here.
  */
 import { readFileSync } from 'node:fs';
-import { parseReportCsv } from './cmdPayer.js';
+import { cmdReportRows, parseReportCsv, type CmdApiConfig, type CmdReportRow } from './cmdPayer.js';
 import { aliasIndigoFacilityColumn, mapReportRows } from './cmdExplorer.js';
 import { mapRow } from './cmdExplorerSeed.js';
 import { makeClient } from './db.js';
 import { withTenant } from '../veris/withTenant.js';
 import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
+import { BXR_CUSTOMERS, INDIGO_CUSTOMERS } from './cmdCustomers.js';
 
 /** How many (fingerprint, employer) pairs go in one UPDATE round trip. */
 const BATCH = 500;
 
-interface Args {
+export interface Args {
   commit: boolean;
+  /** 'csv' reads one exported file; 'api' pulls the report per customer across the roster. */
+  source: 'csv' | 'api';
+  /** csv mode only. */
   file: string;
+  /** api mode only — the saved filter whose window to backfill. REQUIRED, no default: a filter is
+   *  the only thing that bounds the pull, and defaulting it would silently backfill some other
+   *  window than the operator intended. */
+  filterId: string;
+  /** api mode only — defaults to CMD_EXPLORER_REPORT_ID. CMD saved filters are report-SCOPED, so a
+   *  filter from a different report returns INVALID CRITERIA (the 2026-08-01 census incident). */
+  reportId: string;
   tenant: 'bxr' | 'indigo';
 }
 
-function parseArgs(argv: string[]): Args {
+export function parseArgs(argv: string[]): Args {
   let commit = false;
+  let source: 'csv' | 'api' = 'csv';
   let file = '';
+  let filterId = '';
+  let reportId = '';
   let tenant: 'bxr' | 'indigo' | '' = '';
   for (const arg of argv.slice(2)) {
     if (arg === '--commit') commit = true;
     else if (arg.startsWith('--file=')) file = arg.slice('--file='.length);
-    else if (arg.startsWith('--tenant=')) {
+    else if (arg.startsWith('--filter=')) filterId = arg.slice('--filter='.length).trim();
+    else if (arg.startsWith('--report=')) reportId = arg.slice('--report='.length).trim();
+    else if (arg.startsWith('--source=')) {
+      const s = arg.slice('--source='.length).toLowerCase();
+      if (s !== 'csv' && s !== 'api') throw new Error(`--source must be csv or api (got ${s})`);
+      source = s;
+    } else if (arg.startsWith('--tenant=')) {
       const t = arg.slice('--tenant='.length).toLowerCase();
       if (t !== 'bxr' && t !== 'indigo') throw new Error(`--tenant must be bxr or indigo (got ${t})`);
       tenant = t;
     }
   }
-  if (file === '') throw new Error('--file=<path to the CMD CSV export> is required');
   if (tenant === '') throw new Error('--tenant=bxr|indigo is required');
-  return { commit, file, tenant };
+  if (source === 'csv' && file === '') throw new Error('--file=<path to the CMD CSV export> is required for --source=csv');
+  if (source === 'api') {
+    if (filterId === '') throw new Error('--filter=<saved filter id> is required for --source=api (no default — it is what bounds the window)');
+    reportId = reportId || (process.env.CMD_EXPLORER_REPORT_ID?.trim() ?? '');
+    if (reportId === '') throw new Error('--report=<report id> is required for --source=api when CMD_EXPLORER_REPORT_ID is unset');
+  }
+  return { commit, source, file, filterId, reportId, tenant };
 }
 
 export interface BackfillPlan {
@@ -106,9 +144,24 @@ export interface BackfillPlan {
  * normalization bug rather than a missing alias.
  */
 export function planEmployerBackfill(csvText: string, tenant: 'bxr' | 'indigo', sourceLabel: string): BackfillPlan {
-  const raw = parseReportCsv(csvText);
-  const rows = tenant === 'indigo' ? aliasIndigoFacilityColumn(raw) : raw;
-  const full = mapReportRows(rows);
+  return planEmployerBackfillFromRows(parseReportCsv(csvText), tenant, sourceLabel);
+}
+
+/**
+ * The same planner, from ALREADY-PARSED report rows — the API path's entry point.
+ *
+ * Split out so the CSV and API sources share ONE matching implementation. The fingerprint is only
+ * useful if it is byte-identical to the one ingest wrote, so having two copies of this loop is the
+ * single most dangerous kind of drift here: it would fail SILENTLY as a low match rate, which the
+ * dry-run text explicitly tells the operator to read as a normalization bug.
+ */
+export function planEmployerBackfillFromRows(
+  raw: readonly CmdReportRow[],
+  tenant: 'bxr' | 'indigo',
+  sourceLabel: string,
+): BackfillPlan {
+  const rows = tenant === 'indigo' ? aliasIndigoFacilityColumn(raw as CmdReportRow[]) : raw;
+  const full = mapReportRows(rows as CmdReportRow[]);
 
   const skips: Record<string, number> = {};
   const pairs = new Map<string, string>();
@@ -172,16 +225,69 @@ export async function applyEmployerBackfill(
   return updated;
 }
 
+/** CMD credentials + pairing for one customer. Secrets come from env only and are never logged. */
+function cmdConfigFor(customerId: string, reportId: string, filterId: string): CmdApiConfig {
+  const token = process.env.CMD_API_TOKEN?.trim();
+  const username = process.env.CMD_API_USERNAME?.trim();
+  const password = process.env.CMD_API_PASSWORD?.trim();
+  let auth: CmdApiConfig['auth'];
+  if (token) auth = { kind: 'token', token };
+  else if (username && password) auth = { kind: 'basic', username, password };
+  else throw new Error('CMD credentials not set (CMD_API_TOKEN, or CMD_API_USERNAME + CMD_API_PASSWORD)');
+  return {
+    baseUrl: process.env.CMD_API_BASE_URL?.trim() || 'https://webapi.collaboratemd.com',
+    customerId,
+    reportId,
+    filterId,
+    auth,
+    pollIntervalMs: Number(process.env.CMD_POLL_INTERVAL_MS) || 5_000,
+    maxPollAttempts: Number(process.env.CMD_POLL_ATTEMPTS) || 100,
+  };
+}
+
+/** Fold one customer's plan into the running total. Pairs merge across customers because a
+ *  fingerprint is unique table-wide, not per-facility. */
+function mergePlan(into: BackfillPlan, add: BackfillPlan): void {
+  into.parsed += add.parsed;
+  into.mapped += add.mapped;
+  into.withEmployer += add.withEmployer;
+  for (const [label, n] of Object.entries(add.skips)) into.skips[label] = (into.skips[label] ?? 0) + n;
+  for (const [fp, emp] of add.pairs) into.pairs.set(fp, emp);
+}
+
+/**
+ * API source: pull the saved report ONCE PER CUSTOMER and fold the plans together.
+ *
+ * SEQUENTIAL, not parallel — CMD allows ONE report at a time per partner, so concurrent runs
+ * contend for the same slot and can starve the production crons. This is also why the operator
+ * should not run it inside the :41–:59 CMD quiet window or near the hourly explorer slots.
+ */
+async function planFromApi(tenant: 'bxr' | 'indigo', reportId: string, filterId: string): Promise<BackfillPlan> {
+  const customers = tenant === 'bxr' ? BXR_CUSTOMERS : INDIGO_CUSTOMERS;
+  const merged: BackfillPlan = { parsed: 0, mapped: 0, skips: {}, withEmployer: 0, pairs: new Map() };
+  console.log(`pulling report ${reportId} / filter ${filterId} across ${customers.length} ${tenant} customers (sequential)`);
+  for (const [i, c] of customers.entries()) {
+    const rows = await cmdReportRows(cmdConfigFor(c.customerId, reportId, filterId));
+    const p = planEmployerBackfillFromRows(rows, tenant, 'employer-backfill-api');
+    mergePlan(merged, p);
+    // Counts and the facility CODE only — never a cell value.
+    console.log(`  [${i + 1}/${customers.length}] ${c.facilityCode}: rows=${p.parsed} mapped=${p.mapped} employer=${p.withEmployer}`);
+  }
+  return merged;
+}
+
 async function main(): Promise<void> {
-  const { commit, file, tenant } = parseArgs(process.argv);
+  const { commit, source, file, filterId, reportId, tenant } = parseArgs(process.argv);
   const entityId = tenant === 'bxr' ? BXR_ENTITY_ID : INDIGO_ENTITY_ID;
 
-  const csv = readFileSync(file, 'utf8');
   // sourceLabel only reaches mapRow's source_file field, which this script never writes — the
   // fingerprint does not include it, so any stable string is fine.
-  const plan = planEmployerBackfill(csv, tenant, 'employer-backfill');
+  const plan =
+    source === 'api'
+      ? await planFromApi(tenant, reportId, filterId)
+      : planEmployerBackfill(readFileSync(file, 'utf8'), tenant, 'employer-backfill');
 
-  console.log(`tenant=${tenant} file=${file}`);
+  console.log(source === 'api' ? `tenant=${tenant} report=${reportId} filter=${filterId}` : `tenant=${tenant} file=${file}`);
   console.log(`  parsed rows      : ${plan.parsed}`);
   console.log(`  mapped ok        : ${plan.mapped}`);
   console.log(`  with employer    : ${plan.withEmployer}`);
