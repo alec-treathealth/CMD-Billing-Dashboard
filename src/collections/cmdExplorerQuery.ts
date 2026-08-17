@@ -245,7 +245,7 @@ export function cmdExplorerBaseConds(
   // Patient-name search result. Direct id equality — no join, no subquery: the ids were already
   // resolved server-side against this same tenant scope, so re-deriving them here would be
   // redundant work over a 670k-row table.
-  if (Array.isArray(filter.row_ids) && filter.row_ids.length > 0) {
+  if (Array.isArray(filter.row_ids)) {
     conds.push(`id = any(${add(filter.row_ids)}::bigint[])`);
   }
   // Employer SEGMENT toggle. Same id semi-join shape as the name filter above and exact for the
