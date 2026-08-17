@@ -182,6 +182,39 @@ export function classifyCronResult(result: { status: number; body: unknown }): O
   }
 
   const failed = typeof body['customers_failed'] === 'number' ? (body['customers_failed'] as number) : 0;
+  const processed = typeof body['customers_processed'] === 'number' ? (body['customers_processed'] as number) : 0;
+
+  /**
+   * ⚠ A WHOLE-ROSTER EMPTY PULL IS AN OUTAGE, NOT A SUCCESS — the 2026-08-17 lesson.
+   *
+   * BXR's explorer ran hourly for ELEVEN HOURS reporting `status: ok`, `customers 15/15 (failed 0)`,
+   * `fetched 0`. Nothing threw, nothing 5xx'd, no customer failed: the configured report/filter
+   * pairing simply matched no rows, so every pull came back empty and every run looked healthy.
+   * The outage was found by a human noticing the dashboard, not by anything in this table.
+   *
+   * Every customer pulled CLEANLY and the entire roster returned NOTHING is not a state the live
+   * pairing produces. It is the signature of a filter whose criteria stopped matching — a spent
+   * date window, a LASTMONTH variable on an hourly window, an id repointed to a filter that was
+   * never exercised.
+   *
+   * `processed > 0` is what keeps this honest, and it is doing real work: the census cron
+   * legitimately reports `customers_processed: 0` with `rows_fetched: 0` on every run where its
+   * 24-hour freshness cursor skipped the whole roster. Those runs are correct and must stay `ok`.
+   * `failed === 0` is the second half: a run where customers threw is already described by
+   * `partial_customers_failed`, and that diagnosis is more specific than this one.
+   *
+   * KNOWN BENIGN CASE, and it is deliberately NOT special-cased: both explorer rosters use a
+   * ROLLING CURRENT-MONTH window, so the first hours of each month genuinely return zero rows for
+   * every customer and will flag here. That is a handful of self-clearing rows in a run log once a
+   * month — the correct trade against eleven hours of silence, and "the whole roster returned
+   * nothing" is a true statement in that case too. Do not add a date exemption without also adding
+   * a way to tell it apart from a dead filter, because on the 1st the two are indistinguishable
+   * from inside this function.
+   */
+  if (rowsFetched === 0 && processed > 0 && failed === 0) {
+    return { status: 'error', rowsTouched: 0, errorLabel: 'all_customers_empty' };
+  }
+
   return {
     status: 'ok',
     rowsTouched: rowsFetched,
