@@ -101,7 +101,24 @@ export const HEADERS = {
   // Feed-1 dimension columns (Qualify v2, artifact ②a) — non-PHI. Present on the 21-col report
   // for BOTH tenants (Step-0 header proof, 2026-07-21). claim_status_category is NOT here — it is
   // DERIVED from claim_status_raw in mapRow (cmdExplorerSeed.ts), not picked from a CSV column.
-  charge_id: ['Charge ID', 'Payment Charge ID'],
+  // ⚠ 'Claim ID' IS LAST, AND THE CENSUS IS THE REASON. Report 10094775 projects NO charge-grain
+  // id at all — only 'Claim ID' — so without this the explorer stores charge_id NULL on every row
+  // it ingests (measured 2026-08-17: unresolved against the live 25-column set). RULED BY ALEC
+  // 2026-08-17: map it; a claim identifier is more useful here than nothing, and it is what the AR
+  // notes feed joins on.
+  //
+  // THE GRAIN CAVEAT IS REAL AND STAYS TRUE: a claim contains many charges, so on 10094775 this
+  // column holds a CLAIM id and several charge lines share one value. Do not treat
+  // cmd_explorer_rows.charge_id as a per-charge key on that report. It is safe here because
+  // charge_id is NOT one of the locked 14 fingerprint inputs (cmdExplorerSeed.ts) and nothing on
+  // the explorer READ path consumes it — it is provenance.
+  //
+  // The ordering is what keeps it safe for the CENSUS, whose UNIQUE grain is
+  // (business_entity_id, charge_id): a claim-grain id there would COLLAPSE every charge of a claim
+  // into one row and silently shrink the openCount denominator. The census report (10093963)
+  // projects 'Payment Charge ID', which is found FIRST, so it never reaches this candidate.
+  // cmdCensus.test.ts pins exactly that.
+  charge_id: ['Charge ID', 'Payment Charge ID', 'Claim ID'],
   // 'Payment Entered' is 10094775's label for the CLAIM-ENTRY date — RULED BY ALEC 2026-08-16,
   // and it occupies the exact slot 'Charge Entered Date' held before that edit. Appended LAST per
   // the ordering invariant above. Safe regardless: charge_entered_date is NOT one of the locked 14

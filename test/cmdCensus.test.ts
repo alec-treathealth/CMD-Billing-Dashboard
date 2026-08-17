@@ -325,3 +325,26 @@ test('census relabel: the new aliases are LAST — a canonical label always wins
   assert.equal(row?.primary_payer, 'AETNA', 'canonical payer label must win — fingerprint stability');
   assert.equal(row?.claim_status_raw, 'PAID', 'canonical status label must win');
 });
+
+// --- 'Claim ID' as the last charge_id candidate (2026-08-17 ruling) ----------
+//
+// Report 10094775 projects NO charge-grain id, only 'Claim ID', so the explorer stored charge_id
+// NULL on every row it ingested from it. Alec ruled to map it. The census must NOT follow: its
+// UNIQUE grain is (business_entity_id, charge_id), so a CLAIM id there would collapse every charge
+// of a claim into one row and silently shrink the openCount denominator. Ordering is the guard.
+
+test('charge_id: a census row carrying BOTH labels keeps the CHARGE-grain id, not the claim id', () => {
+  const both = reportRow({ 'Charge ID': 'CHG-1', 'Claim ID': 'CLM-999' });
+  assert.equal(mapCensusRows([both]).rows[0]?.charge_id, 'CHG-1');
+
+  // The census report's own label is 'Payment Charge ID' — it must also outrank 'Claim ID'.
+  const paymentScoped = reportRow({ 'Claim ID': 'CLM-999', 'Payment Charge ID': 'CHG-2' });
+  delete (paymentScoped as Record<string, unknown>)['Charge ID'];
+  assert.equal(mapCensusRows([paymentScoped]).rows[0]?.charge_id, 'CHG-2');
+});
+
+test('charge_id: with NO charge-grain label present, Claim ID is the fallback (report 10094775)', () => {
+  const claimOnly = reportRow({ 'Claim ID': 'CLM-777' });
+  delete (claimOnly as Record<string, unknown>)['Charge ID'];
+  assert.equal(mapCensusRows([claimOnly]).rows[0]?.charge_id, 'CLM-777');
+});
