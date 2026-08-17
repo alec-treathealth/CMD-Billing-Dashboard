@@ -67,6 +67,8 @@ import {
   buildCmdEmployerOptionsQuery,
   buildCmdCollectionsEmployerOptionsQuery,
   buildCmdEmployerCoverageQuery,
+  buildCmdExplorerNameCandidateCountQuery,
+  buildCmdExplorerNameCandidatesQuery,
   buildCohortCurveQueries,
   buildCohortTotalsQuery,
   buildCohortDrilldownQueries,
@@ -3346,11 +3348,25 @@ export const cmdExplorerCollectionsEmployers = unstable_cache(
  * lands), so re-asking per request would be pure waste — and the negative answer is the expensive
  * one to compute, which is also the one served most often before cutover.
  */
+export type CmdEmployerCoverage = {
+  /** ANY selected tenant has employer values — gates whether the segment/type-ahead is shown. */
+  hasEmployerData: boolean;
+  /** EVERY selected tenant has them — gates the "Individual" LABEL. False in Consolidated while
+   *  Indigo carries none, so an Indigo blank renders '—' instead of asserting "no employer". */
+  allHaveEmployerData: boolean;
+};
+
 export const cmdExplorerEmployerCoverage = unstable_cache(
-  async (entityIds: string[]): Promise<boolean> => {
+  async (entityIds: string[]): Promise<CmdEmployerCoverage> => {
     const { sql, params } = buildCmdEmployerCoverageQuery(entityIds);
-    const { rows } = await readerExecutor().query<{ has_employer_data: boolean }>(sql, params);
-    return rows[0]?.has_employer_data === true;
+    const { rows } = await readerExecutor().query<{
+      has_employer_data: boolean;
+      all_have_employer_data: boolean;
+    }>(sql, params);
+    return {
+      hasEmployerData: rows[0]?.has_employer_data === true,
+      allHaveEmployerData: rows[0]?.all_have_employer_data === true,
+    };
   },
   ['cmd-explorer-employer-coverage'],
   { revalidate: 3600, tags: ['cmd-collections-employers'] },
@@ -3460,6 +3476,102 @@ export async function revealCmdExplorerRows(
     detail: { count: out.length, ids: out.map((o) => o.id) },
   });
   return out;
+}
+
+/** Hard ceiling on how many rows a patient-name search may decrypt. RATIFIED BY ALEC 2026-08-17.
+ *  Not a tuning knob: decryption is per-row work and each decrypted name is PHI held in memory, so
+ *  this bounds BOTH the cost and the exposure. Raising it widens both. */
+export const CMD_NAME_SEARCH_ROW_CAP = 2000;
+
+export type CmdNameSearchResult =
+  | { ok: true; rowIds: string[]; matched: number; scanned: number }
+  /** The filters still select more rows than may be decrypted. `count` is what the user must narrow
+   *  BELOW — returned so the UI can say the actual number instead of just refusing. */
+  | { ok: false; reason: 'too_broad'; count: number; cap: number }
+  /** No other filter is active at all. Distinct from `too_broad` because the remedy differs:
+   *  "pick a facility/payer/date first", not "narrow what you already picked". */
+  | { ok: false; reason: 'not_narrowed'; cap: number };
+
+/**
+ * PATIENT-NAME SEARCH over the Collections explorer.
+ *
+ * RULED BY ALEC 2026-08-17. Two decisions are his and should not be re-litigated:
+ *   1. NO blind index. patient_name_bidx is not used — nothing reads it on this table, it is NULL
+ *      on ~95% of rows, and an HMAC can only answer equality on a whole normalized name. This
+ *      decrypts instead, which is complete and substring-capable.
+ *   2. The search is GATED behind narrowing, and the UI must SAY SO. Names are unique, but a search
+ *      over the whole book would still be both slow and a large PHI decrypt; requiring a facility /
+ *      payer / date / member / employer filter first keeps the candidate set small and the
+ *      near-duplicate names disambiguated by context.
+ *
+ * PHI DISCIPLINE — the reason this is safe to expose at all:
+ *   · The search TERM arrives via a Server Action body and is never logged, never put in SQL, never
+ *     written to the URL, and never audited into `detail`.
+ *   · Decryption happens in-process as claims_reader; plaintext is compared and DISCARDED.
+ *   · Only non-PHI bigserial ids are returned. The caller re-queries the grid by id, so no name
+ *     ever crosses the wire.
+ *   · Audited fail-closed BEFORE returning, recording counts and ids only.
+ *
+ * Matching is case-insensitive substring on the decrypted name, which is what makes it useful for
+ * partial entry ("smi") and is impossible with a blind index.
+ */
+export async function searchCmdExplorerPatientName(
+  term: string,
+  filter: CmdExplorerFilter,
+  actor: { email: string; userId: string },
+  entityIds: string[],
+): Promise<CmdNameSearchResult> {
+  const needle = term.trim().toLowerCase();
+  if (needle === '') return { ok: false, reason: 'not_narrowed', cap: CMD_NAME_SEARCH_ROW_CAP };
+
+  // "Narrowed" means at least one NON-name filter is doing work. Checked here on the server rather
+  // than trusted from the client, because it is the guard that bounds the decrypt.
+  const narrowed =
+    (filter.facility ?? '') !== '' ||
+    (Array.isArray(filter.primary_payers) && filter.primary_payers.length > 0) ||
+    (Array.isArray(filter.employer_names) && filter.employer_names.length > 0) ||
+    (filter.employerMode ?? 'all') !== 'all' ||
+    (filter.from ?? null) !== null ||
+    (filter.to ?? null) !== null ||
+    (filter.q ?? '') !== '' ||
+    (filter.phiIndex?.memberIdBidx ?? null) !== null ||
+    (filter.phiIndex?.memberIdPrefixBidx ?? null) !== null ||
+    (filter.phiIndex?.groupNumberBidx ?? null) !== null;
+  if (!narrowed) return { ok: false, reason: 'not_narrowed', cap: CMD_NAME_SEARCH_ROW_CAP };
+
+  const exec = readerExecutor();
+  const countQ = buildCmdExplorerNameCandidateCountQuery(filter, entityIds);
+  const { rows: cRows } = await exec.query<{ n: number }>(countQ.sql, countQ.params);
+  const count = Number(cRows[0]?.n ?? 0);
+  if (count > CMD_NAME_SEARCH_ROW_CAP) {
+    return { ok: false, reason: 'too_broad', count, cap: CMD_NAME_SEARCH_ROW_CAP };
+  }
+
+  const candQ = buildCmdExplorerNameCandidatesQuery(filter, entityIds, CMD_NAME_SEARCH_ROW_CAP);
+  const { rows } = await exec.query<{ id: string; patient_name: Buffer }>(candQ.sql, candQ.params);
+
+  const rowIds: string[] = [];
+  for (const r of rows) {
+    // A single undecryptable row must not fail the whole search — it would make one bad ciphertext
+    // deny the feature entirely. Skipped silently; the error carries ciphertext context and is
+    // deliberately NOT logged.
+    let name: string;
+    try {
+      name = await decryptPhi(r.patient_name);
+    } catch {
+      continue;
+    }
+    if (name.toLowerCase().includes(needle)) rowIds.push(String(r.id));
+  }
+
+  // Fail-closed audit BEFORE returning. Counts + non-PHI ids only — NEVER the term or any name.
+  await recordAccess({
+    actorEmail: actor.email,
+    actorUserId: actor.userId,
+    action: 'search_cmd_explorer_patient_name',
+    detail: { scanned: rows.length, matched: rowIds.length },
+  });
+  return { ok: true, rowIds, matched: rowIds.length, scanned: rows.length };
 }
 
 // ---------------------------------------------------------------------------

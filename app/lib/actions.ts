@@ -53,6 +53,8 @@ import {
   recordAccess,
   revealCmdExplorerRow,
   revealCmdExplorerRows,
+  searchCmdExplorerPatientName,
+  type CmdNameSearchResult,
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
   CMD_EXPLORER_SEARCH_COLUMNS,
@@ -62,6 +64,7 @@ import {
   setDefaultGridViewRow,
   deleteGridViewRow,
   type CmdExplorerSort,
+  type CmdExplorerFilter,
   type CmdExplorerCursor,
   type CmdExplorerSearchColumn,
   type CmdSearchSummary,
@@ -1266,6 +1269,96 @@ export interface CmdReportFilter {
     alphaPrefix?: string;
     groupNumber?: string;
   };
+  /**
+   * Employer segment + picked employers (migration 0101).
+   *
+   * ⚠ THESE WERE MISSING UNTIL 2026-08-17 AND THE FEATURE WAS INERT. The client has sent them since
+   * #233, but this filter type did not declare them and the reader filter is built from an explicit
+   * ALLOWLIST — so both were silently dropped at this boundary and the grid never filtered by
+   * employer. The column still RENDERED, because the projection is unconditional, which is exactly
+   * why it looked like it worked. If you add a filter to the client, add it here too.
+   */
+  employer_names?: string[];
+  employerMode?: 'all' | 'employer' | 'individual';
+  /** Row ids resolved by the PATIENT-NAME search. Non-PHI (bigserial keys); the name itself never
+   *  travels in a filter. `[]` means "searched, matched nothing" and MUST be preserved. */
+  row_ids?: string[];
+}
+
+/** Max employers one filter may name, and max row ids one name-search may pin. Bounded input:
+ *  both arrive from the client and both become `= any($n)` arrays. */
+const CMD_EMPLOYER_FILTER_MAX = 200;
+const CMD_ROW_IDS_MAX = 2000; // mirrors CMD_NAME_SEARCH_ROW_CAP — a search cannot match more
+
+/**
+ * Copy the employer segment + picked employers into the reader filter, validated.
+ *
+ * The mode is checked against the closed set rather than cast: it reaches a SQL branch, and an
+ * unknown value must degrade to 'all' (no condition) instead of throwing or, worse, being
+ * interpolated. Employer names are values only — they are bound as `$n` — but they are still
+ * length- and count-bounded because they come from the client.
+ */
+function applyEmployerFilter(
+  filter: CmdReportFilter,
+  readerFilter: { employer_names?: string[]; employerMode?: 'all' | 'employer' | 'individual' },
+): boolean {
+  const mode = filter.employerMode;
+  if (mode === 'employer' || mode === 'individual') readerFilter.employerMode = mode;
+  // 'all', undefined, or anything unrecognised → no condition at all.
+  const names = filter.employer_names;
+  if (Array.isArray(names) && names.length > 0) {
+    if (names.length > CMD_EMPLOYER_FILTER_MAX) return false;
+    const clean = names
+      .filter((n): n is string => typeof n === 'string')
+      .map((n) => n.trim())
+      .filter((n) => n !== '' && n.length <= 200);
+    // Picked employers only narrow WITHIN the Employer segment; outside it a stale selection must
+    // not keep filtering (same guard the client applies, enforced again here).
+    if (clean.length > 0 && readerFilter.employerMode === 'employer') readerFilter.employer_names = clean;
+  }
+  return true;
+}
+
+/**
+ * Is this a string Postgres will accept as `bigint`?
+ *
+ * ⚠ A DIGIT-COUNT CHECK IS NOT ENOUGH, which is what this replaced. `^[0-9]{1,19}$` accepts
+ * 9999999999999999999 — nineteen digits, but larger than bigint's max of 9223372036854775807. That
+ * passes validation here and then raises 22003 `bigint out of range` when the array is cast at
+ * query time: a 500 from a value the boundary claimed it had already validated. The max is 19
+ * digits, so length and range are NOT interchangeable at the top of the domain.
+ *
+ * BigInt() is exact at this magnitude; Number() is not (it loses precision above 2^53, so
+ * 9223372036854775808 would compare equal to the max and slip through).
+ *
+ * Rejects the empty string, signs, whitespace, decimals and exponent forms by construction — the
+ * regex runs first, so BigInt() only ever sees plain digits and cannot throw.
+ */
+const PG_BIGINT_MAX = 9223372036854775807n;
+function isPgBigintString(v: unknown): v is string {
+  if (typeof v !== 'string' || !/^[0-9]{1,19}$/.test(v)) return false;
+  return BigInt(v) <= PG_BIGINT_MAX;
+}
+
+/**
+ * Copy the patient-name search's resolved row ids into the reader filter.
+ *
+ * ⚠ AN EMPTY ARRAY IS MEANINGFUL and is deliberately NOT treated as "absent": it means the search
+ * ran and matched nothing. Dropping it would widen the grid back to every row — the opposite of
+ * what the user asked for. `undefined` (no search) is the only thing that omits the condition.
+ * Ids are digit-strings (bigserial), validated so nothing but digits reaches a bigint[] cast.
+ */
+function applyRowIds(
+  filter: CmdReportFilter,
+  readerFilter: { row_ids?: string[] },
+): boolean {
+  const ids = filter.row_ids;
+  if (ids === undefined) return true;
+  if (!Array.isArray(ids)) return false;
+  if (ids.length > CMD_ROW_IDS_MAX) return false;
+  if (!ids.every(isPgBigintString)) return false;
+  readerFilter.row_ids = ids;
+  return true;
 }
 
 /** Max length for the free-text search term (bounded input — DoS/abuse guard). */
@@ -1487,6 +1580,9 @@ export async function loadCmdReport(
     primary_payer?: string;
     primary_payers?: string[];
     phiIndex?: PhiIndexTokens;
+    employer_names?: string[];
+    employerMode?: 'all' | 'employer' | 'individual';
+    row_ids?: string[];
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
@@ -1494,6 +1590,10 @@ export async function loadCmdReport(
     return { ok: false, error: 'Invalid search.' };
   }
   if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
+  // Employer segment + picked employers (missing until 2026-08-17 — see CmdReportFilter).
+  if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
+  // Patient-name search result ids. `[]` is preserved on purpose (searched, matched nothing).
+  if (!applyRowIds(filter, readerFilter)) return { ok: false, error: 'Invalid name-search result.' };
   // PHI search (gated + audited here — this is the actual row-returning PHI access).
   const phi = await resolvePhiSearch(filter.phiSearch, view, true);
   if (!phi.ok) return { ok: false, error: phi.error };
@@ -1731,11 +1831,18 @@ export async function loadCmdSearchSummary(
     primary_payer?: string;
     primary_payers?: string[];
     phiIndex?: PhiIndexTokens;
+    employer_names?: string[];
+    employerMode?: 'all' | 'employer' | 'individual';
+    row_ids?: string[];
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
   if (!applySearchFilter(filter, readerFilter)) return { ok: false, error: 'Invalid search.' };
   if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
+  // Employer segment + picked employers (missing until 2026-08-17 — see CmdReportFilter).
+  if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
+  // Patient-name search result ids. `[]` is preserved on purpose (searched, matched nothing).
+  if (!applyRowIds(filter, readerFilter)) return { ok: false, error: 'Invalid name-search result.' };
   // PHI search: gate (canRevealPhi) + resolve tokens; audit happens in loadCmdReport (the
   // row-returning access) so a single search isn't double-logged by the summary + the grid.
   const phi = await resolvePhiSearch(filter.phiSearch, view, false);
@@ -1932,7 +2039,9 @@ export async function searchCollectionsEmployers(
   }
 }
 
-export type CmdEmployerCoverageResult = { ok: true; hasEmployerData: boolean } | { ok: false };
+export type CmdEmployerCoverageResult =
+  | { ok: true; hasEmployerData: boolean; allHaveEmployerData: boolean }
+  | { ok: false };
 
 /**
  * Whether the caller's tenant has any employer data yet — gates the All/Employer/Individual toggle.
@@ -1951,7 +2060,8 @@ export async function loadCollectionsEmployerCoverage(
   const entityIds = await viewEntityScope(view);
   if (entityIds === null) return { ok: false };
   try {
-    return { ok: true, hasEmployerData: await cmdExplorerEmployerCoverage(entityIds) };
+    const cov = await cmdExplorerEmployerCoverage(entityIds);
+    return { ok: true, hasEmployerData: cov.hasEmployerData, allHaveEmployerData: cov.allHaveEmployerData };
   } catch {
     return { ok: false };
   }
@@ -2066,6 +2176,79 @@ export type RevealCmdRowsResult =
  * Returns a clear error on failure (e.g. a LIBSODIUM_KEY mismatch) so the UI can surface
  * it rather than silently appearing to do nothing.
  */
+/**
+ * PATIENT-NAME SEARCH over the Collections explorer — GATED (canRevealPhi) + AUDITED server-side.
+ *
+ * ⚠ THE SEARCH TERM IS PHI. It arrives in this Server Action's BODY and must never be put in the
+ * URL, browser storage, a log line, or the audit `detail`. It is passed straight to the server
+ * helper, compared against decrypted names in-process, and discarded. What comes BACK is only
+ * bigserial row ids, which are non-PHI — that is what lets the caller re-query the grid without a
+ * name ever crossing the wire a second time.
+ *
+ * Narrowing and the row cap are enforced in searchCmdExplorerPatientName (server-side), NOT here —
+ * a client that skipped the check must not be able to trigger an unbounded decrypt.
+ */
+export async function searchCollectionsPatientName(
+  term: string,
+  filter: CmdReportFilter = {},
+  view?: DashboardView,
+): Promise<
+  | { ok: true; result: CmdNameSearchResult }
+  | { ok: false; error: string }
+> {
+  if (typeof term !== 'string' || term.trim() === '') {
+    return { ok: false, error: 'Enter a name to search.' };
+  }
+  // Bounded input (OWASP): a name term has no legitimate reason to be long, and the value is PHI
+  // we do not want to carry around at size.
+  if (term.length > 120) {
+    return { ok: false, error: 'That search term is too long.' };
+  }
+  const gate = await requirePhiPrincipal();
+  if (!gate.ok) return { ok: false, error: gate.error };
+  // Intersect the caller's FULL PHI entitlement with the view they are looking at, so the search
+  // can never reach outside either bound.
+  const viewIds = await viewEntityScope(view);
+  if (viewIds === null) return { ok: false, error: 'Sign in to search patient names.' };
+  const entityIds = gate.entityIds.filter((id) => viewIds.includes(id));
+  if (entityIds.length === 0) return { ok: false, error: 'Your role does not permit this view.' };
+
+  // Re-validate + translate the client filter exactly as loadCmdReport does, so the candidate set
+  // this counts is the SAME set the grid is showing. Diverging here would mean telling the user
+  // "1,900 rows" while the grid holds a different number.
+  const readerFilter: {
+    facility?: string[];
+    from?: string;
+    to?: string;
+    q?: string;
+    searchColumns?: CmdExplorerSearchColumn[];
+    cpt_code?: string;
+    revenue_code?: string;
+    primary_payer?: string;
+    primary_payers?: string[];
+    phiIndex?: PhiIndexTokens;
+    employer_names?: string[];
+    employerMode?: 'all' | 'employer' | 'individual';
+  } = {};
+  if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
+  if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
+  if (!applySearchFilter(filter, readerFilter)) return { ok: false, error: 'Invalid search.' };
+  if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
+  if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
+  // `false` here = the caller passed PHI terms it is not entitled to resolve; already audited.
+  const phi = await resolvePhiSearch(filter.phiSearch, view, true);
+  if (!phi.ok) return { ok: false, error: phi.error };
+  if (phi.phiIndex) readerFilter.phiIndex = phi.phiIndex;
+
+  try {
+    const result = await searchCmdExplorerPatientName(term, readerFilter, gate.actor, entityIds);
+    return { ok: true, result };
+  } catch {
+    // Generic to the client; the real error may carry ciphertext context.
+    return { ok: false, error: 'The name search could not be completed right now.' };
+  }
+}
+
 export async function revealCmdReportRows(ids: number[]): Promise<RevealCmdRowsResult> {
   if (!Array.isArray(ids) || ids.length === 0) {
     return { ok: false, error: 'There is nothing to reveal.' };

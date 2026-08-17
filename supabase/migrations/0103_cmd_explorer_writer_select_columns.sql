@@ -1,0 +1,90 @@
+-- 0103_cmd_explorer_writer_select_columns.sql
+--
+-- WHY: the employer backfill's UPDATE still cannot run. This is the THIRD gap in the same chain,
+-- and each one failed differently:
+--
+--   0101 granted `update (employer_name)` — INERT, because RLS was enabled and no UPDATE policy
+--        existed, so the write matched ZERO ROWS and raised nothing.
+--   0102 added the UPDATE policy — the write can now match rows.
+--   0103 (this)  grants the SELECT the UPDATE's own WHERE clause requires.
+--
+-- MEASURED LIVE 2026-08-17, as cmd_rollup_writer against collections.cmd_explorer_rows:
+--
+--   has_table_privilege (SELECT)                     false
+--   has_column_privilege row_fingerprint    (SELECT) TRUE
+--   has_column_privilege business_entity_id (SELECT) false
+--   has_column_privilege employer_name      (SELECT) false
+--   has_column_privilege employer_name      (UPDATE) TRUE
+--
+-- Postgres requires SELECT privilege on every column whose value is READ in an UPDATE's
+-- expressions or WHERE clause. applyEmployerBackfill (src/collections/cmdEmployerBackfill.ts)
+-- reads all three:
+--
+--   update collections.cmd_explorer_rows t set employer_name = v.employer
+--     from (select unnest($1::text[]) as fp, unnest($2::text[]) as employer) v
+--    where t.row_fingerprint    = v.fp        -- SELECT ok
+--      and t.business_entity_id = $3::uuid    -- SELECT MISSING
+--      and t.employer_name is null            -- SELECT MISSING
+--
+-- so `--commit` raises 42501 `permission denied for table cmd_explorer_rows`. This was not a
+-- theory: the 2026-08-17 dry run hit exactly that error when it tried to MEASURE the match rate as
+-- the writer. (The dry run now measures as claims_reader, which is the correct role for a read
+-- regardless — but the writer still needs these two for the write itself.)
+--
+-- WHY NOT DROP THE TWO PREDICATES INSTEAD: both are load-bearing.
+--   · `employer_name is null` is what makes the backfill IDEMPOTENT and NON-DESTRUCTIVE — it never
+--     overwrites a value the hourly cron already wrote from the live report, which is fresher than
+--     any backfill pull. Without it an interrupted run is no longer safe to resume.
+--   · `business_entity_id = $n` is defence in depth. 0102's RLS policy already enforces tenant
+--     scope, but row_fingerprint deliberately EXCLUDES business_entity_id (the 0028 ruling), so the
+--     explicit predicate is the second, independent guarantee that a BXR pull cannot write an
+--     Indigo row. Removing a tenant check to dodge a grant is the wrong trade.
+--
+-- PHI DISCIPLINE: neither column is PHI. `employer_name` is the plan SPONSOR, ruled non-PHI for
+-- display and search 2026-08-14 (it is still fenced out of summary_stats and every model prompt by
+-- the PhiKey union); `business_entity_id` is a tenant uuid. This grants SELECT on EXACTLY these two
+-- columns and NOT on the table — the writer still cannot read patient_name, member_id_raw,
+-- group_number, or any money column. Verified in section 2.
+--
+-- OWNERSHIP: the collections plane is owned by `postgres`. Do NOT add `set role claims_admin` —
+-- it downgrades the applying role to non-owner and fails 42501 (0084/0085 both hit this).
+--
+-- IDEMPOTENT: GRANT is idempotent by nature — re-running re-grants the same privilege with no
+-- error and no additional effect.
+--
+-- DEPENDENCY: 0101 (the employer_name column + its column-scoped UPDATE grant) and 0102 (the
+-- UPDATE RLS policy). Applying this alone, without 0102, still writes zero rows.
+-- Rollback: 0103_cmd_explorer_writer_select_columns_rollback.sql
+
+-- ---------------------------------------------------------------------------
+-- 1. The column-scoped SELECT grant
+-- ---------------------------------------------------------------------------
+-- COLUMN-SCOPED, never `grant select on collections.cmd_explorer_rows`. A table-level SELECT would
+-- hand the ingest writer read access to every encrypted PHI column on a 670k-row PHI table, to fix
+-- a two-column read. Least privilege is the whole reason 0101 was written column-scoped in the
+-- first place; widening it here would quietly undo that.
+grant select (business_entity_id, employer_name) on collections.cmd_explorer_rows to cmd_rollup_writer;
+
+-- ---------------------------------------------------------------------------
+-- 2. Verification (run manually after apply)
+-- ---------------------------------------------------------------------------
+-- select has_table_privilege('cmd_rollup_writer','collections.cmd_explorer_rows','SELECT') as must_be_FALSE;
+--   -> false. The table-level grant must NOT appear; only the two columns are readable.
+--
+-- select has_column_privilege('cmd_rollup_writer','collections.cmd_explorer_rows','business_entity_id','SELECT') as must_be_true,
+--        has_column_privilege('cmd_rollup_writer','collections.cmd_explorer_rows','employer_name','SELECT')      as must_be_true2,
+--        has_column_privilege('cmd_rollup_writer','collections.cmd_explorer_rows','row_fingerprint','SELECT')    as must_be_true3,
+--        -- the PHI columns and the money columns must all stay FALSE:
+--        has_column_privilege('cmd_rollup_writer','collections.cmd_explorer_rows','patient_name','SELECT')       as must_be_false,
+--        has_column_privilege('cmd_rollup_writer','collections.cmd_explorer_rows','member_id_raw','SELECT')      as must_be_false2,
+--        has_column_privilege('cmd_rollup_writer','collections.cmd_explorer_rows','group_number','SELECT')       as must_be_false3,
+--        has_column_privilege('cmd_rollup_writer','collections.cmd_explorer_rows','charge_amount','SELECT')      as must_be_false4;
+--
+-- -- the UPDATE bound from 0101 must be UNCHANGED by this migration:
+-- select has_column_privilege('cmd_rollup_writer','collections.cmd_explorer_rows','employer_name','UPDATE')   as must_be_true,
+--        has_column_privilege('cmd_rollup_writer','collections.cmd_explorer_rows','charge_amount','UPDATE')   as must_be_false,
+--        has_column_privilege('cmd_rollup_writer','collections.cmd_explorer_rows','row_fingerprint','UPDATE') as must_be_false;
+--
+-- ⚠ The ROW-visibility half still cannot be checked as `postgres` (rolbypassrls = true). The real
+-- proof is the backfill's own dry-run match count followed by a --commit whose updated count is
+-- close to the "fillable" number it predicted.

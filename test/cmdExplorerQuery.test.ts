@@ -29,6 +29,9 @@ import {
   deriveYield,
   type CmdExplorerFilter,
   type CmdExplorerSort,
+  buildCmdEmployerCoverageQuery,
+  buildCmdExplorerNameCandidateCountQuery,
+  buildCmdExplorerNameCandidatesQuery,
 } from '../src/collections/cmdExplorerQuery.js';
 
 const ENTITY = ['af504ab6-3dcd-4aa4-a93c-27bc58de4088'];
@@ -1025,4 +1028,111 @@ test('grid: a bogus sort DIRECTION cannot reach the SQL either', () => {
   // `dir` is a ternary over two literals, so anything not exactly 'asc' becomes 'desc'
   assert.doesNotMatch(sql, /drop table/i);
   assert.match(sql, /order by p\.payment_received desc nulls last, p\.id desc/);
+});
+
+// --- patient-name search + row_ids filter (2026-08-17) --------------------------------------
+
+test('row_ids: a NON-EMPTY list narrows by id; absent omits the condition entirely', () => {
+  const withIds = buildCmdExplorerQuery(null, { row_ids: ['12', '34'] }, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+  assert.match(withIds.sql, /id = any\(\$\d+::bigint\[\]\)/);
+  assert.ok(withIds.params.some((p) => Array.isArray(p) && (p as string[]).includes('12')));
+
+  // Absent must emit NO condition — never a tautology, which would defeat index selection.
+  const without = buildCmdExplorerQuery(null, {}, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+  assert.doesNotMatch(without.sql, /bigint\[\]/);
+});
+
+test('row_ids: an EMPTY list must not silently widen the grid to every row', () => {
+  // [] means "the name search ran and matched nothing". The pure builder treats empty as absent
+  // (same discipline as facility/payer), so the ACTION layer is what must preserve the distinction
+  // — this test pins the builder's half of that contract so the two cannot drift silently.
+  const empty = buildCmdExplorerQuery(null, { row_ids: [] }, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+  assert.doesNotMatch(empty.sql, /bigint\[\]/, 'empty array emits no id condition');
+});
+
+test('name candidate COUNT query is tenant-scoped and counts the ROLLUP, not the base table', () => {
+  const q = buildCmdExplorerNameCandidateCountQuery({ facility: ['CAMH'] }, ENTITY);
+  assert.match(q.sql, /^select count\(\*\)::int as n from /);
+  assert.match(q.sql, /cmd_explorer_charge_rollup/);
+  // The number shown to the user must be the number of rows the GRID would show, and the grid
+  // reads the rollup — counting the base table would over-state it by the snapshot fan-out (~2.15x).
+  assert.doesNotMatch(q.sql, /from collections\.cmd_explorer_rows/);
+  assert.ok(q.params.some((p) => Array.isArray(p) && (p as string[]).includes(ENTITY[0]!)));
+});
+
+test('name CANDIDATES query projects ONLY id + ciphertext, and caps in SQL', () => {
+  const q = buildCmdExplorerNameCandidatesQuery({ facility: ['CAMH'] }, ENTITY, 2000);
+  // No money, no other identifier — a name search must not become a bulk PHI export.
+  assert.match(q.sql, /select p\.id, e\.patient_name from/);
+  for (const leaked of ['member_id', 'group_number', 'charge_amount', 'insurance_payments', 'employer_name']) {
+    assert.doesNotMatch(q.sql, new RegExp(`e\\.${leaked}`), `must not project ${leaked}`);
+  }
+  // The cap is enforced in SQL as a bound param, not left to the caller.
+  assert.match(q.sql, /limit \$\d+/);
+  assert.ok(q.params.includes(2000), 'cap is a BOUND parameter');
+  assert.match(q.sql, /e\.patient_name is not null/);
+});
+
+test('employer coverage returns TWO booleans — "any tenant" gates the filter, "every tenant" gates the label', () => {
+  const q = buildCmdEmployerCoverageQuery(['a1b2c3d4-0000-0000-0000-000000000001']);
+  // `has` gates VISIBILITY of the segment/type-ahead.
+  assert.match(q.sql, /as has_employer_data/);
+  // `all` gates the "Individual" LABEL. Conflating them is the 2026-08-17 bug: in Consolidated,
+  // BXR's employers made every blank INDIGO cell read "Individual" — false, because Indigo does not
+  // enter an employer in CMD at all. Split, Consolidated shows '—' while the filter stays usable.
+  assert.match(q.sql, /as all_have_employer_data/);
+  assert.match(q.sql, /count\(distinct business_entity_id\)/);
+  assert.match(q.sql, /cardinality\(\$1::uuid\[\]\)/, 'compares against the NUMBER of tenants in scope');
+  // Both halves must stay tenant-scoped to the SAME bound param — a second literal would let the
+  // two answers describe different tenant sets.
+  assert.equal(q.params.length, 1, 'exactly one bound param, reused by both halves');
+});
+
+// --- row_ids must be RANGE-safe for ::bigint, not merely digit-shaped ------------------------
+
+test('row_ids: accepts bigint MAX and rejects one past it (a 19-digit check is not a range check)', () => {
+  const MAX = '9223372036854775807';        // 19 digits, the largest bigint
+  const OVER = '9223372036854775808';       // 19 digits, ONE past — the bug this pins
+  const WAY_OVER = '9999999999999999999';   // 19 digits, the original regex accepted this
+
+  const ok = buildCmdExplorerQuery(null, { row_ids: [MAX] }, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+  assert.match(ok.sql, /id = any\(\$\d+::bigint\[\]\)/, 'the max itself is legal and must survive');
+  assert.ok(ok.params.some((p) => Array.isArray(p) && (p as string[]).includes(MAX)));
+
+  // Out-of-range ids are dropped rather than bound: casting them raises 22003 at EXECUTION —
+  // a 500, not an empty result. Dropping is semantically free (no row can carry such an id).
+  for (const bad of [OVER, WAY_OVER]) {
+    const q = buildCmdExplorerQuery(null, { row_ids: [bad] }, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+    assert.ok(
+      !q.params.some((p) => Array.isArray(p) && (p as string[]).includes(bad)),
+      `${bad} must never reach a ::bigint cast`,
+    );
+  }
+});
+
+test('row_ids: an ALL-INVALID list matches NOTHING — it must not widen back to every row', () => {
+  // The dangerous shape. Filtering every id away leaves an empty set, and "empty" elsewhere in this
+  // builder means "no condition" — which would turn a name search into a full-table browse.
+  const q = buildCmdExplorerQuery(
+    null,
+    { row_ids: ['9999999999999999999', 'abc', ''] },
+    CMD_EXPLORER_DEFAULT_SORT,
+    50,
+    ENTITY,
+  );
+  assert.match(q.sql, /\bfalse\b/, 'must emit an impossible predicate, not omit the condition');
+  assert.doesNotMatch(q.sql, /::bigint\[\]/, 'nothing may be cast to bigint');
+});
+
+test('row_ids: a MIXED list keeps the valid ids and still constrains', () => {
+  const q = buildCmdExplorerQuery(
+    null,
+    { row_ids: ['12', '9999999999999999999', '34'] },
+    CMD_EXPLORER_DEFAULT_SORT,
+    50,
+    ENTITY,
+  );
+  const bound = q.params.find((p) => Array.isArray(p) && (p as string[]).includes('12')) as string[];
+  assert.deepEqual(bound, ['12', '34'], 'valid ids survive, the out-of-range one is dropped');
+  assert.doesNotMatch(q.sql, /\bfalse\b/, 'still a real id predicate, not match-nothing');
 });
