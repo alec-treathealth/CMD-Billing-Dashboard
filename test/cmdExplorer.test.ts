@@ -129,7 +129,19 @@ test('10094775: every HEADERS field the mapper reads is satisfied — INCLUDING 
   // No employer exception here, unlike the legacy set: this report DOES carry the column, so the
   // guard must enforce it. If CMD ever drops 'Primary Ins Emp Name' again this fails immediately
   // instead of silently nulling the whole Collections employer feature.
-  const fields = Object.entries(HEADERS).filter(([k]) => k !== 'charge_to_date');
+  // Two fields have NO source column on this report and that is intended, not a gap:
+  //   charge_to_date — retired long before the cutover.
+  //   charge_id      — 10094775 carries 'Claim ID' (CLAIM grain), NOT 'Charge ID'. Aliasing the
+  //                    two would silently write a claim identifier into a charge column, so it is
+  //                    deliberately left unmapped. RULED BY ALEC 2026-08-16: "the mapping should
+  //                    remain the same".
+  // Both are safe to null because NEITHER is one of the LOCKED 14 fingerprint inputs (see
+  // cmdExplorerSeed.mapRow) — leaving them unmapped changes no existing row's dedup key, so the
+  // hourly cron keeps de-duplicating against the 650k-row book exactly as before.
+  //
+  // charge_entered_date IS mapped, via 'Payment Entered' (this report's label for claim entry).
+  const unmapped = new Set(['charge_to_date', 'charge_id']);
+  const fields = Object.entries(HEADERS).filter(([k]) => !unmapped.has(k));
   for (const [field, candidates] of fields) {
     assert.ok(
       (candidates as readonly string[]).some((c) => pinned.has(c)),
@@ -141,6 +153,16 @@ test('10094775: every HEADERS field the mapper reads is satisfied — INCLUDING 
   }
   assert.equal(pinned.size, BXR_REPORT_COLUMNS_10094775.length, 'no duplicate column names');
   assert.equal(pinned.has('Charge To Date'), false, 'retired column must NOT be pinned');
+
+  // MEASURED 2026-08-17 07:18 UTC against report 10094775 / filter 10148844, customer 10027973:
+  // 25 columns, 970 rows. The guard is SET EQUALITY, so each of these is load-bearing — a pin that
+  // disagrees with the live report by even one label fails EVERY customer before any write, which
+  // is how the 2026-08-16 stall happened (the pin still carried the pre-edit labels).
+  assert.equal(BXR_REPORT_COLUMNS_10094775.length, 25, 're-measure the report before changing this');
+  assert.ok(pinned.has('Payment Entered'), "this report's claim-entry label");
+  assert.equal(pinned.has('Charge Entered Date'), false, "replaced by 'Payment Entered' 2026-08-16");
+  assert.ok(pinned.has('Claim ID'), 'CLAIM grain — pinned but deliberately NOT mapped to charge_id');
+  assert.equal(pinned.has('Charge ID'), false, 'CHARGE grain — absent from this report');
 });
 
 test('10094775: the employer label is the EMPLOYER field, not a person', () => {
@@ -167,14 +189,20 @@ test('relabelled aliases resolve to the NEW label on 10094775 and the CANONICAL 
   assert.equal(firstPresent(HEADERS.insurance_payments, next), 'Insurance Paid Amount');
   assert.equal(firstPresent(HEADERS.adjustments, legacy), 'Charge Total Adjustments w/ Transfers');
   assert.equal(firstPresent(HEADERS.adjustments, next), 'Insurance Adjustment Amount');
+  // member_id_raw and group_number BOTH resolve to the canonical label on BOTH reports now: CMD
+  // relabelled them to 'Current Payer …' at cutover and then RESTORED the canonical labels on
+  // 2026-08-16. The 'Current Payer …' aliases are therefore unreachable on either pinned report.
+  // They are KEPT ON PURPOSE — the labels have already flipped twice, and an unreachable trailing
+  // alias costs nothing because pick() only ever falls through to it when the canonical label is
+  // absent. Do not "clean them up".
   assert.equal(firstPresent(HEADERS.member_id_raw, legacy), 'Claim Primary Member ID');
-  assert.equal(firstPresent(HEADERS.member_id_raw, next), 'Current Payer Member ID');
+  assert.equal(firstPresent(HEADERS.member_id_raw, next), 'Claim Primary Member ID');
   assert.equal(firstPresent(HEADERS.charge_amount, legacy), 'Charge/Debit Amount');
   assert.equal(firstPresent(HEADERS.charge_amount, next), 'Charge Amount');
   assert.equal(firstPresent(HEADERS.revenue_code, legacy), 'Revenue Code');
   assert.equal(firstPresent(HEADERS.revenue_code, next), 'Charge Rev Code');
   assert.equal(firstPresent(HEADERS.group_number, legacy), 'Primary Group #');
-  assert.equal(firstPresent(HEADERS.group_number, next), 'Current Payer Group #');
+  assert.equal(firstPresent(HEADERS.group_number, next), 'Primary Group #');
 
   // 'Patient Total Balance' stays REJECTED (0/85) — it must never be a candidate for anything.
   for (const cands of Object.values(HEADERS)) {

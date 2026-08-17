@@ -90,7 +90,12 @@ export const HEADERS = {
   // for BOTH tenants (Step-0 header proof, 2026-07-21). claim_status_category is NOT here — it is
   // DERIVED from claim_status_raw in mapRow (cmdExplorerSeed.ts), not picked from a CSV column.
   charge_id: ['Charge ID', 'Payment Charge ID'],
-  charge_entered_date: ['Charge Entered Date'],
+  // 'Payment Entered' is 10094775's label for the CLAIM-ENTRY date — RULED BY ALEC 2026-08-16,
+  // and it occupies the exact slot 'Charge Entered Date' held before that edit. Appended LAST per
+  // the ordering invariant above. Safe regardless: charge_entered_date is NOT one of the locked 14
+  // row_fingerprint inputs (cmdExplorerSeed.mapRow), so this alias cannot move any existing row's
+  // dedup key — unlike the money and date columns above, where a repoint would re-insert the book.
+  charge_entered_date: ['Charge Entered Date', 'Payment Entered'],
   // 'Charge To Date' is ABSENT from report 10093959 by design: it duplicated 'Charge From Date'
   // on every row this plane ever stored (2,579 of 2,579 with both populated, 0 exceptions), and
   // nothing on the collections plane reads charge_to_date — the readers are all billing_audit_row,
@@ -216,13 +221,13 @@ export const BXR_REPORT_COLUMNS = [
  * already accepted both.
  */
 export const BXR_REPORT_COLUMNS_10094775 = [
-  'Charge Entered Date',
+  'Payment Entered',
   'Charge From Date',
   'Payment Received',
   'Charge CPT Code',
   'Charge Rev Code',
-  'Current Payer Member ID',
-  'Current Payer Group #',
+  'Claim Primary Member ID',
+  'Primary Group #',
   'Patient Full Name',
   'Facility Name',
   'Payer Name',
@@ -239,7 +244,7 @@ export const BXR_REPORT_COLUMNS_10094775 = [
   'Check Payment',
   'Primary Ins Emp Name',
   'Charge/Debit Entered User',
-  'Charge ID',
+  'Claim ID',
   'Claim Status',
 ] as const;
 
