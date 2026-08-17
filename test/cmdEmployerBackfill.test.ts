@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { planEmployerBackfill, applyEmployerBackfill } from '../src/collections/cmdEmployerBackfill.js';
+import { planEmployerBackfill, planEmployerBackfillFromRows, applyEmployerBackfill, parseArgs } from '../src/collections/cmdEmployerBackfill.js';
 import { mapReportRows } from '../src/collections/cmdExplorer.js';
 import { mapRow } from '../src/collections/cmdExplorerSeed.js';
 import { parseReportCsv } from '../src/collections/cmdPayer.js';
@@ -162,4 +162,48 @@ test('apply: a null rowCount counts as zero, never as NaN', async () => {
   const updated = await applyEmployerBackfill(db, new Map([['fp1', 'BOEING']]), BXR_ENTITY);
   assert.equal(updated, 0);
   assert.ok(Number.isInteger(updated));
+});
+
+// --- argument surface for the API source (2026-08-17) --------------------------------------
+
+test('parseArgs: api mode REQUIRES --filter — the window must never be implicit', () => {
+  const argv = (...a: string[]) => ['node', 'cmdEmployerBackfill.ts', ...a];
+  // A saved filter is the ONLY thing bounding an API pull. Defaulting it would quietly backfill
+  // some other window than the operator asked for, and the write is not reversible per-row.
+  assert.throws(
+    () => parseArgs(argv('--tenant=bxr', '--source=api')),
+    /--filter=.*required/,
+  );
+  const ok = parseArgs(argv('--tenant=bxr', '--source=api', '--filter=10148846', '--report=10094775'));
+  assert.equal(ok.source, 'api');
+  assert.equal(ok.filterId, '10148846');
+  assert.equal(ok.reportId, '10094775');
+  assert.equal(ok.commit, false, 'dry-run is the default and must stay so');
+});
+
+test('parseArgs: csv stays the default source and still requires --file', () => {
+  const argv = (...a: string[]) => ['node', 'cmdEmployerBackfill.ts', ...a];
+  assert.equal(parseArgs(argv('--tenant=bxr', '--file=x.csv')).source, 'csv', 'back-compat');
+  assert.throws(() => parseArgs(argv('--tenant=bxr')), /--file=.*required/);
+  // csv mode must NOT demand a filter — it has no API pull to bound.
+  assert.doesNotThrow(() => parseArgs(argv('--tenant=indigo', '--file=x.csv')));
+});
+
+test('parseArgs: rejects an unknown --source rather than silently picking one', () => {
+  const argv = (...a: string[]) => ['node', 'cmdEmployerBackfill.ts', ...a];
+  assert.throws(() => parseArgs(argv('--tenant=bxr', '--source=sftp', '--file=x.csv')), /--source must be csv or api/);
+  assert.throws(() => parseArgs(argv('--tenant=acme', '--file=x.csv')), /--tenant must be bxr or indigo/);
+});
+
+test('planEmployerBackfillFromRows is the SAME planner the CSV path uses', () => {
+  // The fingerprint is only useful if it is byte-identical to the one ingest wrote, so the two
+  // sources must not drift. Feeding the identical rows through both entry points must agree
+  // EXACTLY — a divergence here would surface only as an unexplained low match rate.
+  const text = csv([ROW_A, ROW_B]);
+  const viaCsv = planEmployerBackfill(text, 'bxr', 'employer-backfill');
+  const viaRows = planEmployerBackfillFromRows(parseReportCsv(text), 'bxr', 'employer-backfill');
+  assert.deepEqual([...viaRows.pairs.entries()], [...viaCsv.pairs.entries()]);
+  assert.equal(viaRows.mapped, viaCsv.mapped);
+  assert.equal(viaRows.withEmployer, viaCsv.withEmployer);
+  assert.equal(viaRows.parsed, viaCsv.parsed);
 });

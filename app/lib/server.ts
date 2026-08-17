@@ -1111,11 +1111,12 @@ export function handleIndigoExplorerCron(
 /**
  * BXR LAST-MONTH catch-up explorer run (/api/cron/cmd-explorer-catchup). SCHEDULED daily at
  * `52 7 * * *` (2026-08-01) — the route header records why that hour is paired against era-835's
- * `50 8 * * *` and why the filter MUST be the relative 10148481, never the spent fixed-range
- * 10148479. Same roster, report, writer, and idempotent
- * daily replace as the hourly BXR explorer cron; the ONLY difference is the saved filter
- * (CMD_EXPLORER_LASTMONTH_FILTER_ID, env-required, no fallback), which windows payment-received on
- * LAST month — so the first runs of a new month re-supply payments that landed after the rolling
+ * `50 8 * * *` and why the filter MUST be a RELATIVE "last month" one, never a fixed date range.
+ * Same roster, writer, and idempotent daily replace as the hourly BXR explorer cron. It now carries
+ * its OWN report id (CMD_EXPLORER_CATCHUP_REPORT_ID) as well as its own filter
+ * (CMD_EXPLORER_LASTMONTH_FILTER_ID) — both env-required with no fallback, so a swap of the
+ * explorer's report can no longer silently re-pair this cron (see requiredCatchupReportId). The
+ * filter windows payment-received on LAST month — so the first runs of a new month re-supply payments that landed after the rolling
  * current-month window rolled over (the class of gap the 2026-07-30 FRCA $540 backfill closed by
  * hand). replaceCmdDailyForFacility's DELETE is span-scoped to the pulled rows, so a last-month
  * pull rewrites exactly last month's facility-days and cannot touch the current month.
@@ -1129,13 +1130,20 @@ export function handleCmdExplorerCatchupCron(req: {
     customers: CMD_EXPLORER_CUSTOMERS,
     configFor: cmdExplorerCatchupConfigFor,
     businessEntityId: BXR_TENANT_ID,
-    // Same report as the hourly explorer — column sets belong to the REPORT, the saved filter only
-    // windows rows — so the same header contract applies unchanged. cmdExplorerCatchupConfigFor
-    // SPREADS cmdExplorerConfigFor and overrides only the filter, so it follows the same
-    // CMD_EXPLORER_REPORT_ID and MUST resolve its contract the same way. Hardcoding the legacy set
-    // here would freeze the daily catch-up at cutover while the hourly explorer kept running — a
-    // silent half-migration whose only symptom is prior-month adjustments quietly not being re-pulled.
-    expectedColumns: bxrExpectedColumnsFor(process.env.CMD_EXPLORER_REPORT_ID?.trim() || '10093959'),
+    // Column sets belong to the REPORT (the saved filter only windows rows), so the contract must
+    // be resolved from THIS cron's OWN report id — the same one cmdExplorerCatchupConfigFor pulls
+    // with. It deliberately does NOT read CMD_EXPLORER_REPORT_ID any more: since 2026-08-17 the
+    // catch-up has its own required CMD_EXPLORER_CATCHUP_REPORT_ID, and resolving the header
+    // contract from the explorer's var while PULLING with the catch-up's would reintroduce the very
+    // coupling that hardening removed — one env var away from a guard that polices the wrong report.
+    //
+    // ⚠ Read WITHOUT the required-throw on purpose. This option object is built EAGERLY, before
+    // handleExplorerCronForTenant checks the CRON_SECRET, so throwing here would answer an
+    // UNAUTHENTICATED request with a 500 instead of a 401 and leak config state. The loud failure
+    // is not lost — cmdExplorerCatchupConfigFor calls requiredCatchupReportId() per customer during
+    // the pull, which is after auth. An unset var therefore still fails the run, and meanwhile
+    // bxrExpectedColumnsFor falls back to the legacy set rather than to "no guard".
+    expectedColumns: bxrExpectedColumnsFor(process.env.CMD_EXPLORER_CATCHUP_REPORT_ID?.trim() ?? ''),
   });
 }
 
@@ -2590,11 +2598,39 @@ function requiredLastMonthFilterId(): string {
   return v;
 }
 
-/** Catch-up config: the BXR explorer's report/poll/creds with the LAST-MONTH filter (env, no
- *  fallback). Same report 10093959, so the same daily replace + fingerprint idempotency apply —
- *  only the payment-received window differs. */
+/** The catch-up REPORT id — REQUIRED from env, no default and NO fallback to the explorer's.
+ *
+ *  ⚠ THIS EXISTS BECAUSE THE FALLBACK ALREADY BROKE THIS CRON ONCE. Until 2026-08-17 the catch-up
+ *  spread cmdExplorerConfigFor and overrode only the filter, so it inherited CMD_EXPLORER_REPORT_ID
+ *  automatically. When the explorer was repointed 10093959 → 10094775, the catch-up silently paired
+ *  the NEW report with CMD_EXPLORER_LASTMONTH_FILTER_ID=10148481, a filter saved under the OLD one.
+ *  CMD saved filters are report-SCOPED, so every pairing returns INVALID CRITERIA.
+ *
+ *  That is the SAME failure the census hit on 2026-08-01 (report 10091971 → 10093959, BXR census
+ *  0/15 for ~13h), and the census's fix was exactly this: require the report id so a report swap
+ *  cannot silently re-pair it. The coupling is the bug — a config that "helpfully" follows another
+ *  cron's report is a config that changes meaning when someone else edits an env var.
+ *
+ *  Failing loudly is the point: a missing var throws per customer, the run ledger records
+ *  status='error', and nothing is written. That is strictly better than a green run against a
+ *  window nobody intended. */
+function requiredCatchupReportId(): string {
+  const v = process.env.CMD_EXPLORER_CATCHUP_REPORT_ID?.trim();
+  if (!v) throw new Error('Missing CMD_EXPLORER_CATCHUP_REPORT_ID (the CMD report the last-month filter is saved under; set in env, no default — it must NOT fall back to the explorer report, see the 2026-08-17 incident)');
+  return v;
+}
+
+/** Catch-up config: the BXR explorer's poll settings + creds, with the catch-up's OWN report id and
+ *  the LAST-MONTH filter — both required from env, neither inherited. The report and filter must be
+ *  a pairing that exists together in the CMD UI; they are read from two vars ON PURPOSE so that
+ *  changing one without the other fails loudly instead of returning INVALID CRITERIA. Same daily
+ *  replace + fingerprint idempotency as the explorer — only the payment-received window differs. */
 function cmdExplorerCatchupConfigFor(customerId: string): CmdApiConfig {
-  return { ...cmdExplorerConfigFor(customerId), filterId: requiredLastMonthFilterId() };
+  return {
+    ...cmdExplorerConfigFor(customerId),
+    reportId: requiredCatchupReportId(),
+    filterId: requiredLastMonthFilterId(),
+  };
 }
 
 // ---------------------------------------------------------------------------

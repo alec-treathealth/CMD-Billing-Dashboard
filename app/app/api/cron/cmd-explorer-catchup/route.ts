@@ -19,23 +19,34 @@
  *    same hour. The two hours are chosen against each other; do not move either
  *    one independently.
  *
- * 2. THE FILTER WINDOW — RESOLVED: CMD_EXPLORER_LASTMONTH_FILTER_ID = 10148481,
- *    created under report 10093959 and confirmed in the CMD UI filter editor as
- *    RELATIVE "Last Month" — it ADVANCES each month, which is the only semantics
- *    that makes a recurring catch-up correct.
+ * 2. THE FILTER WINDOW — the filter MUST be RELATIVE "Last Month" (it ADVANCES
+ *    each month), which is the only semantics that makes a recurring catch-up
+ *    correct. Under report 10093959 that was 10148481; after the 2026-08-16
+ *    swap to report 10094775 it is 10148844. Confirm in the CMD UI filter editor.
  *
- *    ⚠ DO NOT point this cron at 10148479. That filter is a FIXED 07/01-08/01
- *    range — a one-time instrument, built to recover the single stranded FRCA
- *    $540 payment the 2026-07-30 report-deletion incident left behind, and
- *    already spent. Scheduling a fixed-range filter is the stale-data failure
- *    that LOOKS like a working cron: green runs, plausible counts, silently
- *    re-supplying July forever. The two filters return identical rows today and
- *    DIVERGE on Sept 1 — which is exactly why the distinction has to be read off
- *    this comment rather than rediscovered from a wrong month of data.
+ *    ⚠ NEVER point this cron at a FIXED date range (10148479 was one: a spent
+ *    07/01-08/01 instrument built to recover the stranded FRCA $540 payment the
+ *    2026-07-30 report-deletion incident left behind). Scheduling a fixed-range
+ *    filter is the stale-data failure that LOOKS like a working cron: green runs,
+ *    plausible counts, silently re-supplying one month forever. A relative and a
+ *    fixed filter return identical rows in the month they were made and DIVERGE
+ *    at the next rollover — which is why this has to be read off the filter
+ *    editor rather than rediscovered from a wrong month of data.
  *
- *    The env var is REQUIRED (no fallback, see requiredLastMonthFilterId in
- *    app/lib/server.ts) so an unconfigured deploy fails loudly rather than
- *    re-pulling the current month under a catch-up name.
+ * 3. THE REPORT ID — CMD_EXPLORER_CATCHUP_REPORT_ID, added 2026-08-17 and
+ *    REQUIRED with no fallback.
+ *
+ *    ⚠ THIS CRON USED TO INHERIT THE EXPLORER'S REPORT, AND THAT BROKE IT. It
+ *    spread cmdExplorerConfigFor and overrode only the filter, so when
+ *    CMD_EXPLORER_REPORT_ID flipped 10093959 → 10094775 it paired the NEW report
+ *    with a filter saved under the OLD one. CMD saved filters are report-SCOPED,
+ *    so every pairing returns INVALID CRITERIA — the identical failure the BXR
+ *    census hit on 2026-08-01 (0/15 for ~13h). Both ids are now read from their
+ *    own env var so that changing one without the other fails loudly.
+ *
+ *    Both vars are REQUIRED (no fallback — see requiredCatchupReportId and
+ *    requiredLastMonthFilterId in app/lib/server.ts) so an unconfigured deploy
+ *    fails loudly rather than re-pulling the current month under a catch-up name.
  *
  * Node runtime (pg + libsodium via ../src — libsodium-wrappers must stay in
  * serverExternalPackages); never statically cached. maxDuration covers 15
