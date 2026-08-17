@@ -13,6 +13,7 @@ import {
   classifyPayerIntelTerm,
   derivePlacementFlags,
   getPayerIntelBoardCore,
+  getPayerIntelGridCore,
   runPayerIntelSearchCore,
   togglePayerIntelStarCore,
   watchPayerIntelSubjectCore,
@@ -62,34 +63,42 @@ const BILLED_DECLINER = 888888.88;
 const BILLED_PLACEMENT = 777777.77;
 const PAID_PER_PATIENT = 666666.66;
 const CHARGE_COMBO = 555555.55;
-const SENTINELS = [BILLED_TOTAL, BILLED_DECLINER, BILLED_PLACEMENT, PAID_PER_PATIENT, CHARGE_COMBO];
+const CHARGE_GROUP = 444444.44;
+const GRID_CHARGE_STR = '333333.33';
+const SENTINELS = [BILLED_TOTAL, BILLED_DECLINER, BILLED_PLACEMENT, PAID_PER_PATIENT, CHARGE_COMBO, CHARGE_GROUP];
 
 interface Cap {
   events: string[];
   recorded: { payer: string | null; echo: string | null; entityType: string | null; resolved: boolean | null }[];
   auditDetails: Record<string, unknown>[];
+  /** Every filter the aggregate loader saw — the window assertions read from/to off these. */
+  filters: { from?: string | null; to?: string | null }[];
+  railWindows: number[];
 }
 
 function makeDeps(principal: () => ReturnType<typeof SEAT>, over?: Partial<PayerIntelDeps>): { deps: PayerIntelDeps; cap: Cap } {
-  const cap: Cap = { events: [], recorded: [], auditDetails: [] };
+  const cap: Cap = { events: [], recorded: [], auditDetails: [], filters: [], railWindows: [] };
   const deps: PayerIntelDeps = {
     requirePrincipal: async () => principal(),
-    loadGainers: async () => [
-      {
-        member_id_prefix_bidx: 'a'.repeat(64),
-        token_tail: 'abcdef',
-        echo: 'W29',
-        primary_payer: 'AETNA',
-        rating_now: 45,
-        band_now: '30',
-        rating_then: 41,
-        delta_pts: 4,
-        distinct_members: 12,
-        line_count: 88,
-        window_days: 90,
-        as_of: '2026-08-16',
-      },
-    ],
+    loadGainers: async (deltaDays) => {
+      cap.railWindows.push(deltaDays);
+      return [
+        {
+          member_id_prefix_bidx: 'a'.repeat(64),
+          token_tail: 'abcdef',
+          echo: 'W29',
+          primary_payer: 'AETNA',
+          rating_now: 45,
+          band_now: '30',
+          rating_then: 41,
+          delta_pts: 4,
+          distinct_members: 12,
+          line_count: 88,
+          window_days: 90,
+          as_of: '2026-08-16',
+        },
+      ];
+    },
     loadDecliners: async () => [
       {
         facility: 'MHC SAN DIEGO',
@@ -137,8 +146,9 @@ function makeDeps(principal: () => ReturnType<typeof SEAT>, over?: Partial<Payer
         searched_at: '2026-08-14T18:23:00Z',
       },
     ],
-    loadAggregates: async () => {
+    loadAggregates: async (filter) => {
       cap.events.push('aggregates');
+      cap.filters.push({ from: filter.from, to: filter.to });
       return {
         totals: { total_count: 558, total_charge: BILLED_TOTAL, total_allowed: 700000, total_paid: 550000 },
         distinctMembers: 96,
@@ -146,7 +156,7 @@ function makeDeps(principal: () => ReturnType<typeof SEAT>, over?: Partial<Payer
           {
             facility: 'Lonestar Mental Health',
             facility_code: 'LSMH',
-            care_setting: 'IP',
+            care_setting: 'IP' as const,
             line_count: 61,
             distinct_members: 9,
             pct_collected: 41.6,
@@ -165,8 +175,33 @@ function makeDeps(principal: () => ReturnType<typeof SEAT>, over?: Partial<Payer
             pct_zero_paid: 4.8,
           },
         ],
+        byPayer: [{ label: 'AETNA', count: 500, charge: CHARGE_GROUP }],
+        byFacility: [{ label: 'LONESTAR MENTAL HEALTH LLC', count: 61, charge: CHARGE_GROUP }],
       };
     },
+    loadGridRows: async () => ({
+      rows: [
+        {
+          id: 15,
+          charge_date: '2026-07-21',
+          payment_received: '2026-08-18',
+          cpt_code: 'H0035',
+          revenue_code: '0913',
+          facility: 'LONESTAR MENTAL HEALTH LLC',
+          charge_amount: GRID_CHARGE_STR,
+          allowed_amount: '1041.00',
+          insurance_payments: '900.00',
+          adjustments: null,
+          patient_balance_due: '0.00',
+          primary_payer: 'AETNA',
+          pct_allowed: '20.06',
+          pct_paid: '86.45',
+          ingested_at: '2026-08-18T01:00:00Z',
+          employer_name: 'VANDERBILT UMC',
+        },
+      ],
+      nextCursor: { id: 15, value: '2026-08-18' },
+    }),
     loadPayerGroups: async () => [{ label: 'AETNA', count: 500 }],
     loadRating: async () => ({ rating: 45, as_of: '2026-08-16', rating_then: 41 }),
     loadPayerVocabulary: async () => ['AETNA', 'AETNA BETTER HEALTH', 'CIGNA'],
@@ -359,6 +394,8 @@ test('ai payload: zero matched lines → insufficient', async () => {
       distinctMembers: 0,
       placement: [],
       combos: [],
+      byPayer: [],
+      byFacility: [],
     }),
   });
   const out = await buildPayerIntelAiPayloadCore(deps, { payer: 'AETNA' });
@@ -423,6 +460,65 @@ test('placement flags: best-yield-full and open-beds-worst-yield light up exactl
   assert.equal(flagged.find((p) => p.facility === 'Best')?.flag, 'best_yield_full');
   assert.equal(flagged.find((p) => p.facility === 'Worst')?.flag, 'open_beds_worst_yield');
   assert.equal(flagged.find((p) => p.facility === 'Mid')?.flag, null);
+});
+
+// ── v1.1: window facet, drill groups, charge-line grid (the 2026-08-17 review items) ─────────────
+
+test('window: the recency facet scopes the FILTER — 30d → from today-29, to today+1 (exclusive)', async () => {
+  const { deps, cap } = makeDeps(SUPER);
+  const result = await runPayerIntelSearchCore(deps, { payer: 'AETNA', windowDays: 30 });
+  assert.deepEqual(cap.filters[0], { from: '2026-07-19', to: '2026-08-18' });
+  assert.deepEqual(result.window, { from: '2026-07-19', to: '2026-08-18', days: 30 });
+});
+
+test('window: an off-menu value clamps to the 90d default', async () => {
+  const { deps } = makeDeps(SUPER);
+  const result = await runPayerIntelSearchCore(deps, { payer: 'AETNA', windowDays: 45 });
+  assert.equal(result.window.days, 90);
+});
+
+test('window: the board rails take the toggle too — gainers delta horizon follows it', async () => {
+  const { deps, cap } = makeDeps(SUPER);
+  await getPayerIntelBoardCore(deps, { windowDays: 14 });
+  assert.deepEqual(cap.railWindows, [14]);
+});
+
+test('drill groups: an admissions_seat gets counts but NO group dollars; a capable viewer gets both', async () => {
+  const seat = await runPayerIntelSearchCore(makeDeps(SEAT).deps, { payer: 'AETNA' });
+  assert.equal(seat.byPayer[0]?.count, 500);
+  assert.equal(seat.byPayer[0]?.charge, null);
+  assert.equal(seat.byFacility[0]?.charge, null);
+  assert.ok(!JSON.stringify(seat).includes(String(CHARGE_GROUP)));
+  const sup = await runPayerIntelSearchCore(makeDeps(SUPER).deps, { payer: 'AETNA' });
+  assert.equal(sup.byPayer[0]?.charge, CHARGE_GROUP);
+});
+
+test('grid: an admissions_seat gets rows with NULL dollar strings while ratios and labels survive', async () => {
+  const { deps } = makeDeps(SEAT);
+  const page = await getPayerIntelGridCore(deps, { payer: 'AETNA' }, null);
+  const row = page.rows[0];
+  assert.ok(row);
+  assert.equal(row.chargeAmount, null);
+  assert.equal(row.allowedAmount, null);
+  assert.equal(row.insurancePayments, null);
+  assert.equal(row.patientBalanceDue, null);
+  assert.equal(row.pctAllowed, '20.06'); // ratios survive the strip
+  assert.equal(row.payer, 'AETNA');
+  assert.equal(row.employerName, 'VANDERBILT UMC');
+  assert.ok(!JSON.stringify(page).includes(GRID_CHARGE_STR));
+});
+
+test('grid: a capable viewer gets the dollar strings and the keyset cursor rides through', async () => {
+  const { deps } = makeDeps(SUPER);
+  const page = await getPayerIntelGridCore(deps, { payer: 'AETNA' }, null);
+  assert.equal(page.rows[0]?.chargeAmount, GRID_CHARGE_STR);
+  assert.deepEqual(page.nextCursor, { id: 15, value: '2026-08-18' });
+});
+
+test('grid: an unresolvable term returns an EMPTY page, never the whole book', async () => {
+  const { deps } = makeDeps(SUPER);
+  const page = await getPayerIntelGridCore(deps, { term: 'zzzzzz unresolvable' }, null);
+  assert.deepEqual(page, { rows: [], nextCursor: null });
 });
 
 test('placement flags: fewer than two rated rows means no flags at all', () => {

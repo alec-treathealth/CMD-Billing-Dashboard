@@ -8,9 +8,17 @@
  *   · Search TERMS (group numbers, member identifiers) travel ONLY in Server Action POST bodies —
  *     never in these result types beyond a masked echo, never in a URL. The URL codec below
  *     carries the non-PHI facet allowlist ONLY.
- *   · Dollar-bearing fields are `number | null` — null when the viewer is amounts-blind
- *     (admissions_seat; R-AMOUNTS, stripped server-side at the core's choke point). Ratios and
- *     counts deliberately SURVIVE the strip, the Qualify precedent.
+ *   · Dollar-bearing fields are `number | null` (or pg-numeric `string | null` on grid rows) —
+ *     null when the viewer is amounts-blind (admissions_seat; R-AMOUNTS, stripped server-side at
+ *     the core's choke point). Ratios and counts deliberately SURVIVE the strip, the Qualify
+ *     precedent.
+ *
+ * ⚠ FACILITY FACET SEMANTICS (fixed 2026-08-17 after live review): the facet value is the
+ * ROLLUP'S FACILITY TEXT (e.g. 'LONESTAR MENTAL HEALTH LLC'), exactly what
+ * `cmdExplorerBaseConds` matches and what Collections' own picker supplies — NEVER a
+ * facility_code. The first build passed codes and every facility-scoped search silently matched
+ * nothing. The text IS the display label; census rows still key on facility_code (their own
+ * table).
  */
 import type { QualifyPolicyTapeResult } from '../qualify/board';
 import type { QualifyIqBand } from '../qualify/ratingV2';
@@ -27,6 +35,17 @@ export type PayerIntelEntityType =
   | 'facility'
   | 'individual';
 
+/** The payment-received window facet — the Collections recency vocabulary (server-clamped). */
+export const PAYER_INTEL_WINDOW_DAYS_OPTIONS = [7, 14, 30, 90] as const;
+export const PAYER_INTEL_DEFAULT_WINDOW_DAYS = 90;
+
+export function clampPayerIntelWindowDays(v: unknown): number {
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+  return (PAYER_INTEL_WINDOW_DAYS_OPTIONS as readonly number[]).includes(n)
+    ? n
+    : PAYER_INTEL_DEFAULT_WINDOW_DAYS;
+}
+
 /** What the client SENDS to run a search (Server Action POST body — the only transport). Terms are
  *  raw here because the body never touches a URL/log; the server classifies, HMACs, and audits. */
 export interface PayerIntelSearchInput {
@@ -35,12 +54,18 @@ export interface PayerIntelSearchInput {
   term?: string | null;
   payer?: string | null;
   prefix?: string | null;
-  facilityCodes?: string[] | null;
+  /** Rollup facility TEXT values (see the header warning) — the same vocabulary Collections' picker uses. */
+  facilities?: string[] | null;
   employerNames?: string[] | null;
   funding?: string[] | null;
   /** PHI-adjacent identifier: POST body only, HMAC'd server-side, NEVER echoed back raw — the
    *  result carries `groupNumberMasked`. */
   groupNumber?: string | null;
+  /** CPT × revenue drill (single values — the Collections drill-chip shape). */
+  cpt?: string | null;
+  revenue?: string | null;
+  /** Payment-received recency window; clamped server-side to 7/14/30/90 (default 90). */
+  windowDays?: number | null;
 }
 
 /** The resolved, display-safe facet set the RESULT screen shows as ON FILE chips. */
@@ -48,17 +73,19 @@ export interface PayerIntelFacets {
   payer: string | null;
   /** ≤3-char alpha-prefix echo — the same non-PHI facet the Qualify UI renders openly. */
   prefix: string | null;
-  facilityCodes: string[];
-  /** Display labels parallel to facilityCodes (roster names; code echoed when unmapped). */
-  facilityLabels: string[];
+  /** Rollup facility TEXT values — value IS the display label. */
+  facilities: string[];
   employerNames: string[];
   funding: string[];
   /** '•••• 4217' — last-4 echo of a group-number facet; the raw number stays client-held. */
   groupNumberMasked: string | null;
+  cpt: string | null;
+  revenue: string | null;
+  windowDays: number;
 }
 
 /** Chip-dismiss vocabulary: which facet the × removed. */
-export type PayerIntelFacetKey = 'payer' | 'prefix' | 'facility' | 'employer' | 'funding' | 'group';
+export type PayerIntelFacetKey = 'payer' | 'prefix' | 'facility' | 'employer' | 'funding' | 'group' | 'cpt_rev';
 
 // ── IDLE board ───────────────────────────────────────────────────────────────────────────────────
 
@@ -133,6 +160,13 @@ export interface PayerIntelBoard {
 
 // ── RESULT ───────────────────────────────────────────────────────────────────────────────────────
 
+/** One drill-down group row (Top payers / Top facilities). `charge` is null when stripped. */
+export interface PayerIntelGroupItem {
+  label: string | null;
+  count: number;
+  charge: number | null;
+}
+
 export interface PayerIntelPlacementItem {
   facility: string;
   facilityCode: string | null;
@@ -186,12 +220,48 @@ export interface PayerIntelResult {
     /** 'pair' (prefix × payer) · 'payer' (line-weighted book mean) · 'none'. */
     subject: 'pair' | 'payer' | 'none';
   };
+  /** Drill-down groups — the Collections summary's Top Payers / Top Facilities, clickable. */
+  byPayer: PayerIntelGroupItem[];
+  byFacility: PayerIntelGroupItem[];
   placement: PayerIntelPlacementItem[];
   combos: PayerIntelComboItem[];
-  /** Window stamps for the column headers: trailing columns carry the window end date; live
-   *  columns carry the census synced_at (PST rendering is the client's job). */
-  window: { from: string; to: string };
+  /** Window stamps for the column headers and the "how far back" disclosure: payment-received
+   *  window [from, to) — `to` is EXCLUSIVE (today + 1, so today's payments ride). */
+  window: { from: string; to: string; days: number };
   viewerHasAmountsCapability: boolean;
+}
+
+// ── Charge-line grid (the Collections grid, behind this tab's gate) ─────────────────────────────
+
+/** One charge-grain grid row — the CmdExplorerRow shape re-stated client-safe. Money fields are
+ *  pg-numeric STRINGS ('5190.00') or null — null EITHER because the row has no value OR because
+ *  the viewer is amounts-blind (stripped). PHI columns are never in this shape; identifiers
+ *  surface only via a future audited reveal. */
+export interface PayerIntelGridRow {
+  id: number;
+  chargeDate: string;
+  paymentReceived: string | null;
+  cpt: string | null;
+  revenue: string | null;
+  payer: string | null;
+  facility: string;
+  employerName: string | null;
+  chargeAmount: string | null;
+  allowedAmount: string | null;
+  insurancePayments: string | null;
+  patientBalanceDue: string | null;
+  pctAllowed: string | null;
+  pctPaid: string | null;
+}
+
+export interface PayerIntelGridCursor {
+  id: number;
+  value: string | number | null;
+}
+
+export interface PayerIntelGridPage {
+  rows: PayerIntelGridRow[];
+  nextCursor: PayerIntelGridCursor | null;
 }
 
 // ── AI cohort read ───────────────────────────────────────────────────────────────────────────────
@@ -236,37 +306,50 @@ export type PayerIntelAiResult =
 // ── URL codec (facet keys only — the shareable-search contract) ─────────────────────────────────
 
 /**
- * The URL carries ONLY this non-PHI facet allowlist: payer label, prefix echo, facility codes,
- * funding tags. Employer names and group numbers are EXCLUDED by ruling precedent (audit I7/R6
- * kept employer out of the Qualify URL codec; a group number is an identifier) — a shared link
- * restores those searches minus the excluded facet, and the UI says so rather than pretending.
+ * The URL carries ONLY this non-PHI facet allowlist: payer label, prefix echo, facility text
+ * labels, funding tags, the CPT×revenue drill, and the window. Employer names and group numbers
+ * are EXCLUDED by ruling precedent (audit I7/R6 kept employer out of the Qualify URL codec; a
+ * group number is an identifier) — a shared link restores those searches minus the excluded
+ * facet, and the UI says so rather than pretending.
  */
 export interface PayerIntelUrlState {
   payer: string | null;
   prefix: string | null;
-  facilityCodes: string[];
+  facilities: string[];
   funding: string[];
+  cpt: string | null;
+  revenue: string | null;
+  windowDays: number;
 }
 
 const PREFIX_RE = /^[A-Z0-9]{1,3}$/;
+const CODE_RE = /^[A-Za-z0-9]{1,10}$/;
 
 export function encodePayerIntelUrl(state: PayerIntelUrlState): string {
   const p = new URLSearchParams();
   if (state.payer) p.set('payer', state.payer);
   if (state.prefix && PREFIX_RE.test(state.prefix)) p.set('prefix', state.prefix);
-  for (const f of state.facilityCodes) p.append('fac', f);
+  for (const f of state.facilities) p.append('fac', f);
   for (const f of state.funding) p.append('funding', f);
+  if (state.cpt && CODE_RE.test(state.cpt)) p.set('cpt', state.cpt);
+  if (state.revenue && CODE_RE.test(state.revenue)) p.set('rev', state.revenue);
+  if (state.windowDays !== PAYER_INTEL_DEFAULT_WINDOW_DAYS) p.set('w', String(state.windowDays));
   const s = p.toString();
   return s.length > 0 ? `?${s}` : '';
 }
 
 export function decodePayerIntelUrl(params: URLSearchParams): PayerIntelUrlState {
   const prefixRaw = (params.get('prefix') ?? '').toUpperCase();
+  const cptRaw = params.get('cpt') ?? '';
+  const revRaw = params.get('rev') ?? '';
   return {
     payer: params.get('payer'),
     prefix: PREFIX_RE.test(prefixRaw) ? prefixRaw : null,
-    facilityCodes: params.getAll('fac').filter((f) => f.length > 0 && f.length <= 40).slice(0, 20),
+    facilities: params.getAll('fac').filter((f) => f.length > 0 && f.length <= 200).slice(0, 20),
     funding: params.getAll('funding').filter((f) => f === 'Self-Funded' || f === 'Fully Insured'),
+    cpt: CODE_RE.test(cptRaw) ? cptRaw.toUpperCase() : null,
+    revenue: CODE_RE.test(revRaw) ? revRaw : null,
+    windowDays: clampPayerIntelWindowDays(params.get('w')),
   };
 }
 
@@ -275,10 +358,11 @@ export function hasAnyPayerIntelFacet(input: PayerIntelSearchInput): boolean {
   return Boolean(
     (input.payer && input.payer.trim().length > 0) ||
       (input.prefix && input.prefix.trim().length > 0) ||
-      (input.facilityCodes && input.facilityCodes.length > 0) ||
+      (input.facilities && input.facilities.length > 0) ||
       (input.employerNames && input.employerNames.length > 0) ||
       (input.funding && input.funding.length > 0) ||
       (input.groupNumber && input.groupNumber.trim().length > 0) ||
+      (input.cpt && input.cpt.trim().length > 0) ||
       (input.term && input.term.trim().length > 0),
   );
 }

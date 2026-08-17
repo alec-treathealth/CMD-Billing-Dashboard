@@ -13,6 +13,8 @@ import { useMemo, useState } from 'react';
 import type {
   PayerIntelComboItem,
   PayerIntelFacetKey,
+  PayerIntelGridPage,
+  PayerIntelGroupItem,
   PayerIntelPlacementItem,
   PayerIntelResult,
 } from '../../lib/payer-intel/contract';
@@ -36,14 +38,12 @@ function HeroStat({ value, label, money }: { value: number | null; label: string
 
 export function PayerIntelHero({
   result,
-  facilityNameOf,
   watchState,
   onWatch,
   onDismissFacet,
   onClearAll,
 }: {
   result: PayerIntelResult;
-  facilityNameOf: (code: string) => string;
   watchState: 'idle' | 'saving' | 'saved' | 'failed';
   onWatch: () => void;
   onDismissFacet: (key: PayerIntelFacetKey, value: string | null) => void;
@@ -59,7 +59,18 @@ export function PayerIntelHero({
     ...(facets.groupNumberMasked !== null
       ? [{ key: 'group' as const, k: 'Group #', label: facets.groupNumberMasked, value: null }]
       : []),
-    ...facets.facilityCodes.map((c) => ({ key: 'facility' as const, k: 'Facility', label: facilityNameOf(c), value: c })),
+    // Facility facet VALUES are the rollup's display text — value IS the label.
+    ...facets.facilities.map((f) => ({ key: 'facility' as const, k: 'Facility', label: f, value: f })),
+    ...(facets.cpt !== null || facets.revenue !== null
+      ? [
+          {
+            key: 'cpt_rev' as const,
+            k: 'CPT × Rev',
+            label: `${facets.cpt ?? '·'} × ${facets.revenue ?? '·'}`,
+            value: null,
+          },
+        ]
+      : []),
   ];
   return (
     <section aria-label="Search result summary" data-pi-section="hero" className="rounded-2xl bg-teal900 p-6 shadow-ths-lg">
@@ -100,8 +111,13 @@ export function PayerIntelHero({
           ) : null}
         </div>
       </div>
+      {/* The "how far back" disclosure — a required piece of chrome, not decoration: every number
+          on this screen is scoped to this payment-received window. */}
+      <p className="mt-3 font-mono text-[11px] text-white/55">
+        payments received {result.window.from} → {result.window.to} · past {result.window.days} days
+      </p>
       {chips.length > 0 ? (
-        <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-white/10 pt-4">
+        <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-white/10 pt-4">
           <span className="mr-0.5 text-[10px] font-bold uppercase tracking-widest text-white/40">On file</span>
           {chips.map((c) => (
             <span
@@ -182,6 +198,84 @@ export function PayerIntelPctBand({ result }: { result: PayerIntelResult }) {
         <b className="font-semibold text-ink900">most of the gap is expected contractual write-off, not lost revenue.</b>{' '}
         Compare across payers and facilities rather than against a target.
       </p>
+    </section>
+  );
+}
+
+// ── Drill-down group cards (Top payers / Top facilities — the Collections summary lists) ─────────
+
+function GroupCard({
+  title,
+  items,
+  drillLabel,
+  onDrill,
+}: {
+  title: string;
+  items: readonly PayerIntelGroupItem[];
+  drillLabel: (label: string) => string;
+  onDrill: (label: string) => void;
+}) {
+  return (
+    <div className="rounded-md border border-line bg-surface p-4 shadow-ths-sm">
+      <h3 className="text-[11px] font-bold uppercase tracking-wide text-ink600">{title}</h3>
+      {items.length === 0 ? (
+        <p className="mt-2 text-sm text-ink400">{EM_DASH}</p>
+      ) : (
+        <ul className="mt-2 space-y-0.5">
+          {items.map((g) =>
+            g.label !== null ? (
+              <li key={g.label}>
+                <button
+                  type="button"
+                  aria-label={drillLabel(g.label)}
+                  onClick={() => onDrill(g.label!)}
+                  className="flex w-full items-baseline gap-3 rounded px-2 py-1.5 text-left transition-colors hover:bg-teal50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500"
+                >
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink900">{g.label}</span>
+                  <span className="whitespace-nowrap font-mono text-xs text-ink600 tabular-nums">
+                    {fmtInt(g.count)}
+                    {g.charge !== null ? ` · ${fmtMoney(g.charge)}` : ''}
+                  </span>
+                </button>
+              </li>
+            ) : null,
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** Top Payers + Top Facilities, side by side — each row DRILLS DOWN (adds the facet and re-runs),
+ *  the Collections summary interaction Alec's review asked for. */
+export function PayerIntelTopGroups({
+  byPayer,
+  byFacility,
+  onDrillPayer,
+  onDrillFacility,
+}: {
+  byPayer: readonly PayerIntelGroupItem[];
+  byFacility: readonly PayerIntelGroupItem[];
+  onDrillPayer: (label: string) => void;
+  onDrillFacility: (label: string) => void;
+}) {
+  if (byPayer.length === 0 && byFacility.length === 0) return null;
+  return (
+    <section aria-label="Top payers and facilities" data-pi-section="groups">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <GroupCard
+          title="Top payers"
+          items={byPayer}
+          drillLabel={(l) => `Narrow this search to payer ${l}`}
+          onDrill={onDrillPayer}
+        />
+        <GroupCard
+          title="Top facilities"
+          items={byFacility}
+          drillLabel={(l) => `Narrow this search to facility ${l}`}
+          onDrill={onDrillFacility}
+        />
+      </div>
     </section>
   );
 }
@@ -312,18 +406,23 @@ function combosToCsv(combos: readonly PayerIntelComboItem[]): string {
 export function PayerIntelChargeLines({
   combos,
   totalLines,
+  onDrillCombo,
 }: {
   combos: readonly PayerIntelComboItem[];
   totalLines: number;
+  /** Drill into one CPT×revenue pairing — adds the facet and re-runs (a row IS a filter). */
+  onDrillCombo?: (cpt: string | null, revenue: string | null) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const csv = useMemo(() => combosToCsv(combos), [combos]);
   return (
-    <section aria-label="Charge lines" data-pi-section="chargelines">
+    <section aria-label="CPT by revenue-code combinations" data-pi-section="chargelines">
       <div className="mb-2 flex items-baseline gap-2.5 px-0.5">
-        <h2 className="font-head text-[17px] font-medium tracking-tight text-ink900">Charge lines</h2>
+        <h2 className="font-head text-[17px] font-medium tracking-tight text-ink900">
+          Top CPT × revenue-code combinations
+        </h2>
         <span className="font-mono text-[10px] font-medium uppercase tracking-wider text-ink400">
-          {fmtInt(totalLines)} lines · CPT × revenue code
+          {fmtInt(totalLines)} lines matched
         </span>
         <span className="flex-1" />
         {combos.length > 0 ? (
@@ -366,7 +465,20 @@ export function PayerIntelChargeLines({
             <tbody>
               {combos.map((c) => (
                 <tr key={`${c.cpt ?? '·'}-${c.revenue ?? '·'}`} className="border-t border-line hover:bg-teal50">
-                  <td className="px-4 py-2 font-mono">{c.cpt ?? EM_DASH}</td>
+                  <td className="px-4 py-2 font-mono">
+                    {onDrillCombo ? (
+                      <button
+                        type="button"
+                        aria-label={`Narrow this search to ${c.cpt ?? 'no CPT'} with revenue code ${c.revenue ?? 'none'}`}
+                        onClick={() => onDrillCombo(c.cpt, c.revenue)}
+                        className="rounded font-mono underline decoration-teal200 underline-offset-2 hover:text-teal700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500"
+                      >
+                        {c.cpt ?? EM_DASH}
+                      </button>
+                    ) : (
+                      (c.cpt ?? EM_DASH)
+                    )}
+                  </td>
                   <td className="px-4 py-2 font-mono">{c.revenue ?? EM_DASH}</td>
                   <td className="px-4 py-2 text-right font-mono tabular-nums">{fmtInt(c.count)}</td>
                   <td className="px-4 py-2 text-right font-mono tabular-nums">{fmtMoney(c.charge)}</td>
@@ -378,6 +490,106 @@ export function PayerIntelChargeLines({
             </tbody>
           </table>
         </div>
+      )}
+    </section>
+  );
+}
+
+// ── Charge-line grid (row-level detail — the Collections grid behind this tab's gate) ────────────
+
+function fmtMoneyStr(v: string | null): string {
+  if (v === null) return EM_DASH;
+  const n = Number(v);
+  return Number.isFinite(n) ? `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : EM_DASH;
+}
+
+function fmtPctStr(v: string | null): string {
+  if (v === null) return EM_DASH;
+  const n = Number(v);
+  return Number.isFinite(n) ? `${n.toFixed(1)}%` : EM_DASH;
+}
+
+/** Row-level charge lines, keyset-paged, newest payment first — the Collections grid experience.
+ *  No identifier columns (PHI reveal is a follow-up); dollar cells arrive already stripped for
+ *  amounts-blind viewers and render em dashes. */
+export function PayerIntelGridTable({
+  page,
+  loading,
+  onLoadMore,
+}: {
+  page: PayerIntelGridPage | null;
+  loading: boolean;
+  onLoadMore: () => void;
+}) {
+  return (
+    <section aria-label="Charge lines" data-pi-section="grid">
+      <div className="mb-2 flex items-baseline gap-2.5 px-0.5">
+        <h2 className="font-head text-[17px] font-medium tracking-tight text-ink900">Charge lines</h2>
+        <span className="font-mono text-[10px] font-medium uppercase tracking-wider text-ink400">
+          row-level detail · newest payment first
+        </span>
+      </div>
+      {page === null ? (
+        <p className="rounded-md border border-line bg-surface px-4 py-3 text-sm text-ink400" role="status">
+          {loading ? 'Loading charge lines…' : 'Charge lines will load with the search.'}
+        </p>
+      ) : page.rows.length === 0 ? (
+        <p className="rounded-md border border-line bg-surface px-4 py-3 text-sm text-ink400">
+          No charge lines match this search.
+        </p>
+      ) : (
+        <>
+          <div className="overflow-x-auto rounded-md border border-line bg-surface shadow-ths-sm">
+            <table className="w-full border-collapse text-[13px]">
+              <thead>
+                <tr className="bg-teal50 text-left text-[10px] font-semibold uppercase tracking-wide text-ink600">
+                  <th className="px-3 py-2">Charge From</th>
+                  <th className="px-3 py-2">Payment Received</th>
+                  <th className="px-3 py-2">CPT</th>
+                  <th className="px-3 py-2">Revenue</th>
+                  <th className="px-3 py-2">Primary Payer</th>
+                  <th className="px-3 py-2">Facility</th>
+                  <th className="px-3 py-2">Employer</th>
+                  <th className="px-3 py-2 text-right">Charged</th>
+                  <th className="px-3 py-2 text-right">Allowed</th>
+                  <th className="px-3 py-2 text-right">% Allowed</th>
+                  <th className="px-3 py-2 text-right">Ins. Paid</th>
+                  <th className="px-3 py-2 text-right">% Paid</th>
+                </tr>
+              </thead>
+              <tbody>
+                {page.rows.map((r) => (
+                  <tr key={r.id} className="border-t border-line hover:bg-teal50">
+                    <td className="whitespace-nowrap px-3 py-1.5 font-mono tabular-nums">{r.chargeDate}</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 font-mono tabular-nums">{r.paymentReceived ?? EM_DASH}</td>
+                    <td className="px-3 py-1.5 font-mono">{r.cpt ?? EM_DASH}</td>
+                    <td className="px-3 py-1.5 font-mono">{r.revenue ?? EM_DASH}</td>
+                    <td className="max-w-[180px] truncate px-3 py-1.5">{r.payer ?? EM_DASH}</td>
+                    <td className="max-w-[180px] truncate px-3 py-1.5">{r.facility}</td>
+                    <td className="max-w-[160px] truncate px-3 py-1.5">{r.employerName ?? EM_DASH}</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right font-mono tabular-nums">{fmtMoneyStr(r.chargeAmount)}</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right font-mono tabular-nums">{fmtMoneyStr(r.allowedAmount)}</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right font-mono tabular-nums">{fmtPctStr(r.pctAllowed)}</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right font-mono tabular-nums">{fmtMoneyStr(r.insurancePayments)}</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right font-mono tabular-nums">{fmtPctStr(r.pctPaid)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {page.nextCursor !== null ? (
+            <div className="mt-2.5 flex justify-center">
+              <button
+                type="button"
+                onClick={onLoadMore}
+                disabled={loading}
+                className="rounded-md border border-line bg-surface px-4 py-2 text-sm font-semibold text-ink900 transition-colors hover:bg-teal50 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500"
+              >
+                {loading ? 'Loading…' : 'Load more charge lines'}
+              </button>
+            </div>
+          ) : null}
+        </>
       )}
     </section>
   );

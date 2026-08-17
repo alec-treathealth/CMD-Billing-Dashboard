@@ -10,11 +10,13 @@
  */
 import { useId, useRef, useState } from 'react';
 import { CMD_FUNDING_MARKETS } from '../../../src/collections/cmdExplorerQuery';
+import { PAYER_INTEL_WINDOW_DAYS_OPTIONS } from '../../lib/payer-intel/contract';
 
 export interface PayerIntelSearchBarSubmit {
   term: string | null;
   payer: string | null;
-  facilityCodes: string[];
+  /** Rollup facility TEXT values — the vocabulary the filter matches (never facility codes). */
+  facilities: string[];
   employerNames: string[];
   funding: string[];
   groupNumber: string | null;
@@ -27,14 +29,20 @@ export function PayerIntelSearchBar({
   facilities,
   compressed,
   busy,
+  windowDays,
+  onWindowDaysChange,
   onSubmit,
   onEmployerSearch,
 }: {
   payers: readonly string[];
-  facilities: readonly { code: string; name: string; careSetting: 'IP' | 'OP' | 'BOTH' | null }[];
+  facilities: readonly { value: string; name: string; careSetting: 'IP' | 'OP' | 'BOTH' | null }[];
   /** RESULT mode: slim bar, facet chips hidden (they live on the hero as ON FILE chips). */
   compressed: boolean;
   busy: boolean;
+  /** The active payment-received window. The pills render in BOTH modes: on IDLE the toggle
+   *  re-scopes the rails; on RESULT it re-runs the search (Alec's 2026-08-17 ruling). */
+  windowDays: number;
+  onWindowDaysChange: (days: number) => void;
   onSubmit: (input: PayerIntelSearchBarSubmit) => void;
   onEmployerSearch: (term: string) => Promise<string[]>;
 }) {
@@ -48,21 +56,43 @@ export function PayerIntelSearchBar({
   const [employers, setEmployers] = useState<string[]>([]);
   const [funding, setFunding] = useState<string[]>([]);
   const [group, setGroup] = useState('');
-  const [facilityCodes, setFacilityCodes] = useState<string[]>([]);
+  const [selectedFacilities, setSelectedFacilities] = useState<string[]>([]);
   const employerSeq = useRef(0);
 
   const submit = () => {
     onSubmit({
       term: term.trim().length > 0 ? term.trim() : null,
       payer,
-      facilityCodes,
+      facilities: selectedFacilities,
       employerNames: employers,
       funding,
       groupNumber: group.trim().length > 0 ? group.trim() : null,
     });
   };
 
-  const facetCount = (payer ? 1 : 0) + employers.length + funding.length + (group.trim() ? 1 : 0) + facilityCodes.length;
+  const facetCount =
+    (payer ? 1 : 0) + employers.length + funding.length + (group.trim() ? 1 : 0) + selectedFacilities.length;
+
+  const windowPills = (
+    <div role="group" aria-label="Payment-received window" className="flex items-center gap-1">
+      {PAYER_INTEL_WINDOW_DAYS_OPTIONS.map((d) => (
+        <button
+          key={d}
+          type="button"
+          aria-pressed={windowDays === d}
+          onClick={() => onWindowDaysChange(d)}
+          className={[
+            'rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500',
+            windowDays === d
+              ? 'border-teal900 bg-teal900 text-white'
+              : 'border-line bg-surface text-ink600 hover:bg-teal50',
+          ].join(' ')}
+        >
+          {d}d
+        </button>
+      ))}
+    </div>
+  );
 
   const chip = (key: Exclude<FacetPanel, null>, label: string, active: boolean) => (
     <button
@@ -132,6 +162,8 @@ export function PayerIntelSearchBar({
         </button>
       </form>
 
+      {compressed ? <div className="mt-2.5 flex items-center gap-2">{windowPills}</div> : null}
+
       {!compressed ? (
         <>
           <div className="mt-3 flex flex-wrap items-center gap-1.5">
@@ -142,7 +174,9 @@ export function PayerIntelSearchBar({
             {chip('employer', employers.length > 0 ? `Employer (${employers.length})` : 'Employer', employers.length > 0)}
             {chip('funding', funding.length > 0 ? funding.join(' + ') : 'Funding', funding.length > 0)}
             {chip('group', group.trim() ? 'Group # set' : 'Group #', group.trim().length > 0)}
-            {chip('facility', facilityCodes.length > 0 ? `Facility (${facilityCodes.length})` : 'Facility', facilityCodes.length > 0)}
+            {chip('facility', selectedFacilities.length > 0 ? `Facility (${selectedFacilities.length})` : 'Facility', selectedFacilities.length > 0)}
+            <span className="flex-1" />
+            {windowPills}
           </div>
 
           {panel === 'payer' ? (
@@ -269,14 +303,16 @@ export function PayerIntelSearchBar({
             <div className="mt-3 rounded-md border border-line bg-ground p-3">
               <div className="flex max-h-44 flex-wrap gap-1.5 overflow-y-auto">
                 {facilities.map((f) => {
-                  const on = facilityCodes.includes(f.code);
+                  const on = selectedFacilities.includes(f.value);
                   return (
                     <button
-                      key={f.code}
+                      key={f.value}
                       type="button"
                       aria-pressed={on}
                       onClick={() =>
-                        setFacilityCodes(on ? facilityCodes.filter((c) => c !== f.code) : [...facilityCodes, f.code])
+                        setSelectedFacilities(
+                          on ? selectedFacilities.filter((v) => v !== f.value) : [...selectedFacilities, f.value],
+                        )
                       }
                       className={[
                         'rounded-full border px-2.5 py-1 text-xs',

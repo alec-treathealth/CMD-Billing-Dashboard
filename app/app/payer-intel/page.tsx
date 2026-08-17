@@ -4,9 +4,13 @@ import { dashboardAccess } from '@/lib/access';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { getPayerIntelBoardCore } from '@/lib/payer-intel/core';
 import { buildPayerIntelRealDeps } from '@/lib/payer-intel/deps';
-import { loadPayerIntelFacilityNames, loadPayerIntelPayerVocabulary } from '@/lib/payer-intel/loaders';
+import { loadPayerIntelFacilityOptions, loadPayerIntelPayerVocabulary } from '@/lib/payer-intel/loaders';
 import { requirePayerIntelPrincipalFromAccess } from '@/lib/payer-intel/principal';
-import type { PayerIntelBoard, PayerIntelUrlState } from '@/lib/payer-intel/contract';
+import {
+  clampPayerIntelWindowDays,
+  type PayerIntelBoard,
+  type PayerIntelUrlState,
+} from '@/lib/payer-intel/contract';
 import { PayerIntelView } from '@/components/payer-intel/payer-intel-view';
 
 export const metadata: Metadata = { title: 'Payer Intel | CMD Billing' };
@@ -26,9 +30,10 @@ export const dynamic = 'force-dynamic';
  * ADMITTED here (unlike every other non-Qualify page — no isQualifyOnlyRole redirect): names
  * yes, dollars never; every dollar field is stripped server-side off the principal's hasAmounts.
  *
- * searchParams carry ONLY the non-PHI facet allowlist (payer · prefix echo · facility codes ·
- * funding) — decoded here, server-side, so the client island needs no useSearchParams/Suspense.
- * Identifiers (group numbers) travel exclusively in Server Action POST bodies.
+ * searchParams carry ONLY the non-PHI facet allowlist (payer · prefix echo · facility text ·
+ * funding · cpt/rev drill · window) — decoded here, server-side, so the client island needs no
+ * useSearchParams/Suspense. Identifiers (group numbers) travel exclusively in Server Action POST
+ * bodies.
  */
 export default async function PayerIntelPage({
   searchParams,
@@ -50,29 +55,35 @@ export default async function PayerIntelPage({
   const one = (v: string | string[] | undefined): string | null =>
     typeof v === 'string' && v.length > 0 ? v : null;
   const prefixRaw = (one(params.prefix) ?? '').toUpperCase();
+  const codeOf = (v: string | null): string | null => (v !== null && /^[A-Za-z0-9]{1,10}$/.test(v) ? v : null);
+  const windowDays = clampPayerIntelWindowDays(one(params.w));
   const initialUrlState: PayerIntelUrlState = {
     payer: one(params.payer),
     prefix: /^[A-Z0-9]{1,3}$/.test(prefixRaw) ? prefixRaw : null,
-    facilityCodes: asArray(params.fac).filter((f) => f.length > 0 && f.length <= 40).slice(0, 20),
+    facilities: asArray(params.fac).filter((f) => f.length > 0 && f.length <= 200).slice(0, 20),
     funding: asArray(params.funding).filter((f) => f === 'Self-Funded' || f === 'Fully Insured'),
+    cpt: codeOf(one(params.cpt)),
+    revenue: codeOf(one(params.rev)),
+    windowDays,
   };
 
-  // Parallel server fetch (the collections page pattern): the ambient board + the facet
-  // vocabularies the pickers need. Board failures fall back to an empty-but-honest shell rather
-  // than 500ing the whole tab.
+  // Parallel server fetch (the collections page pattern): the ambient board (scoped to the active
+  // window) + the facet vocabularies the pickers need — all ambient reads ride the 300s
+  // unstable_cache, so a warm click-in costs no rollup scans. Board failures fall back to an
+  // empty-but-honest shell rather than 500ing the whole tab.
   const emptyBoard: PayerIntelBoard = {
-    gainers: { available: false, asOf: null, deltaDays: 90, items: [] },
-    decliners: { items: [], windowDays: 90, thresholdPts: 5 },
+    gainers: { available: false, asOf: null, deltaDays: windowDays, items: [] },
+    decliners: { items: [], windowDays, thresholdPts: 5 },
     census: { rows: [], syncedAt: null },
     searches: { starred: [], recent: [] },
     viewerHasAmountsCapability: principal.hasAmounts,
   };
-  const [board, facilities, payers] = await Promise.all([
-    getPayerIntelBoardCore(buildPayerIntelRealDeps()).catch((err) => {
+  const [board, facilityOptions, payers] = await Promise.all([
+    getPayerIntelBoardCore(buildPayerIntelRealDeps(), { windowDays }).catch((err) => {
       console.error('payer intel board failed at page load', err instanceof Error ? err.message : '');
       return emptyBoard;
     }),
-    loadPayerIntelFacilityNames().catch(() => []),
+    loadPayerIntelFacilityOptions(principal.entityIds).catch(() => []),
     loadPayerIntelPayerVocabulary(principal.entityIds).catch(() => []),
   ]);
 
@@ -89,8 +100,10 @@ export default async function PayerIntelPage({
         initialBoard={board}
         initialUrlState={initialUrlState}
         facetOptions={{
-          facilities: facilities
-            .map((f) => ({ code: f.facility_code, name: f.facility_name, careSetting: f.care_setting }))
+          // ⚠ Facility option VALUES are the rollup's facility TEXT — the vocabulary the filter
+          // matches (facility_code silently matches nothing; the v1 bug).
+          facilities: facilityOptions
+            .map((o) => ({ value: o.facility, name: o.facility_name ?? o.facility, careSetting: o.care_setting }))
             .sort((a, b) => a.name.localeCompare(b.name)),
           payers,
         }}

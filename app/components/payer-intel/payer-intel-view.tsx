@@ -2,21 +2,23 @@
 
 /**
  * The /payer-intel client island — one route, two view states:
- *   IDLE   — ambient: gainers rail · decliners rail · search · census · starred/recent
- *   RESULT — hero · ON FILE chips · percentage band · placement · charge lines · AI cohort read
+ *   IDLE   — ambient: gainers rail · decliners rail · search · starred/recent · census (compact)
+ *   RESULT — hero · ON FILE chips · top-payer/facility drills · percentage band · placement ·
+ *            CPT×rev rollup · charge-line grid · census (compact) · AI cohort read
+ *
+ * 2026-08-17 review rulings folded in: the rails MOVE (useMarquee inside idle-rails) and ADAPT to
+ * the recency toggle (the toggle refetches the board with the new window); saved searches sit
+ * DIRECTLY below the search bar; the census strip is compact and renders on BOTH states; every
+ * summary row is a DRILL (click = add the facet, re-run); the charge-line grid gives Collections'
+ * row-level view.
  *
  * STATE TRANSITIONS ARE CLIENT-SIDE; the URL carries ONLY the non-PHI facet allowlist
- * (contract.ts codec) via history.replaceState so results are shareable without a navigation.
- * Terms (group numbers) never touch the URL; a shared link restores the allowlisted facets and
- * the UI is honest about the rest.
+ * (contract.ts codec) via history.replaceState. Terms (group numbers) never touch the URL.
  *
- * MOTION (spec §5, house GSAP pattern — no @gsap/react exists; useLayoutEffect + gsap.context +
- * ctx.revert, matchMedia bail FIRST): IDLE sections stagger in once (300ms, 40ms apart, 8px
- * rise); IDLE→RESULT fades the ambient sections out 200ms then staggers the result in
- * left→right, the three percentage cards in math order (allowed → paid → collected, 80ms);
- * numbers count up via useCountUp; chips scale out 150ms on dismiss. Every leg bails under
- * prefers-reduced-motion — the CSS global reset cannot reach a GSAP tween, so each effect checks
- * matchMedia itself.
+ * A11Y: a polite live region narrates search progress; focus moves to the result heading when a
+ * search completes (SC 2.4.3 — the content changed under the user); every GSAP leg bails under
+ * prefers-reduced-motion (matchMedia — the CSS reset cannot reach a GSAP tween); controls animate
+ * `opacity`, never autoAlpha.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import gsap from 'gsap';
@@ -25,15 +27,17 @@ import type {
   PayerIntelBoard,
   PayerIntelDeclinerItem,
   PayerIntelFacetKey,
+  PayerIntelGridPage,
   PayerIntelResult,
   PayerIntelSavedSearch,
   PayerIntelSearchInput,
   PayerIntelUrlState,
 } from '../../lib/payer-intel/contract';
-import { encodePayerIntelUrl } from '../../lib/payer-intel/contract';
+import { PAYER_INTEL_DEFAULT_WINDOW_DAYS, encodePayerIntelUrl } from '../../lib/payer-intel/contract';
 import {
   clearPayerIntelHistory,
   getPayerIntelBoard,
+  loadPayerIntelChargeRows,
   runPayerIntelSearch,
   searchPayerIntelEmployers,
   togglePayerIntelStar,
@@ -44,7 +48,14 @@ import { PayerIntelGainersRail, PayerIntelDeclinersRail } from './idle-rails';
 import { PayerIntelCensusStrip } from './census-strip';
 import { PayerIntelSavedSearches } from './saved-searches';
 import { PayerIntelSearchBar, type PayerIntelSearchBarSubmit } from './search-bar';
-import { PayerIntelHero, PayerIntelPctBand, PayerIntelPlacementTable, PayerIntelChargeLines } from './result-sections';
+import {
+  PayerIntelChargeLines,
+  PayerIntelGridTable,
+  PayerIntelHero,
+  PayerIntelPctBand,
+  PayerIntelPlacementTable,
+  PayerIntelTopGroups,
+} from './result-sections';
 import { PayerIntelAiPanel } from './ai-panel';
 
 function reducedMotion(): boolean {
@@ -60,7 +71,7 @@ export function PayerIntelView({
   /** Decoded server-side from searchParams (non-PHI allowlist only) — a shared link auto-runs. */
   initialUrlState: PayerIntelUrlState;
   facetOptions: {
-    facilities: { code: string; name: string; careSetting: 'IP' | 'OP' | 'BOTH' | null }[];
+    facilities: { value: string; name: string; careSetting: 'IP' | 'OP' | 'BOTH' | null }[];
     payers: string[];
   };
 }) {
@@ -70,33 +81,55 @@ export function PayerIntelView({
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const [watchState, setWatchState] = useState<'idle' | 'saving' | 'saved' | 'failed'>('idle');
+  const [windowDays, setWindowDays] = useState(initialUrlState.windowDays ?? PAYER_INTEL_DEFAULT_WINDOW_DAYS);
+  const [grid, setGrid] = useState<PayerIntelGridPage | null>(null);
+  const [gridLoading, setGridLoading] = useState(false);
+  const [announce, setAnnounce] = useState('');
   const lastInput = useRef<PayerIntelSearchInput>({});
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const resultHeadingRef = useRef<HTMLDivElement | null>(null);
   const idleAnimated = useRef(false);
   const searchSeq = useRef(0);
+  const gridSeq = useRef(0);
+  const boardSeq = useRef(0);
 
-  const facilityNameOf = useCallback(
-    (code: string) => facetOptions.facilities.find((f) => f.code === code)?.name ?? code,
-    [facetOptions.facilities],
-  );
-
-  const syncUrl = useCallback((res: PayerIntelResult | null) => {
+  const syncUrl = useCallback((res: PayerIntelResult | null, days: number) => {
     if (typeof window === 'undefined') return;
     const state: PayerIntelUrlState =
       res === null
-        ? { payer: null, prefix: null, facilityCodes: [], funding: [] }
+        ? { payer: null, prefix: null, facilities: [], funding: [], cpt: null, revenue: null, windowDays: days }
         : {
             payer: res.facets.payer,
             prefix: res.facets.prefix,
-            facilityCodes: res.facets.facilityCodes,
+            facilities: res.facets.facilities,
             funding: res.facets.funding,
+            cpt: res.facets.cpt,
+            revenue: res.facets.revenue,
+            windowDays: res.facets.windowDays,
           };
     window.history.replaceState(null, '', `${window.location.pathname}${encodePayerIntelUrl(state)}`);
   }, []);
 
-  const refreshBoard = useCallback(() => {
-    void getPayerIntelBoard().then((r) => {
-      if (r.ok) setBoard(r.board);
+  /** Refetch the ambient board — after a search (history changed) or a window toggle (rails adapt). */
+  const refreshBoard = useCallback((days: number) => {
+    const seq = ++boardSeq.current;
+    void getPayerIntelBoard(days).then((r) => {
+      if (r.ok && boardSeq.current === seq) setBoard(r.board);
+    });
+  }, []);
+
+  const loadGrid = useCallback((input: PayerIntelSearchInput, cursor: PayerIntelGridPage['nextCursor']) => {
+    const seq = ++gridSeq.current;
+    setGridLoading(true);
+    void loadPayerIntelChargeRows(input, cursor).then((r) => {
+      if (gridSeq.current !== seq) return;
+      setGridLoading(false);
+      if (!r.ok) return; // the section keeps its previous rows; the search itself already reported
+      setGrid((prev) =>
+        cursor !== null && prev !== null
+          ? { rows: [...prev.rows, ...r.page.rows], nextCursor: r.page.nextCursor }
+          : r.page,
+      );
     });
   }, []);
 
@@ -105,33 +138,75 @@ export function PayerIntelView({
       const seq = ++searchSeq.current;
       setBusy(true);
       setFailed(false);
-      lastInput.current = input;
-      void runPayerIntelSearch(input).then((r) => {
+      setAnnounce('Searching…');
+      const withWindow = { ...input, windowDays: input.windowDays ?? windowDays };
+      lastInput.current = withWindow;
+      setGrid(null);
+      void runPayerIntelSearch(withWindow).then((r) => {
         if (searchSeq.current !== seq) return; // superseded
         setBusy(false);
         if (!r.ok) {
           setFailed(true);
+          setAnnounce('The search failed.');
           return;
         }
         setWatchState('idle');
         setResult(r.result);
         setMode('result');
-        syncUrl(r.result);
-        refreshBoard(); // the search we just ran lands in Recent
+        setWindowDays(r.result.facets.windowDays);
+        setAnnounce(
+          `${r.result.totals.lineCount.toLocaleString('en-US')} charge lines over the past ${r.result.facets.windowDays} days.`,
+        );
+        syncUrl(r.result, r.result.facets.windowDays);
+        loadGrid(withWindow, null); // the row-level grid rides along with every search
+        refreshBoard(r.result.facets.windowDays); // the search we just ran lands in Recent
+        // Focus the result heading so keyboard/AT users land on the new content (SC 2.4.3).
+        window.requestAnimationFrame(() => resultHeadingRef.current?.focus());
       });
     },
-    [refreshBoard, syncUrl],
+    [loadGrid, refreshBoard, syncUrl, windowDays],
+  );
+
+  const clearAll = useCallback(() => {
+    searchSeq.current += 1; // cancel any in-flight search
+    gridSeq.current += 1;
+    lastInput.current = {};
+    setResult(null);
+    setGrid(null);
+    setMode('idle');
+    setBusy(false);
+    setAnnounce('Cleared — back to the overview.');
+    idleAnimated.current = false; // the ambient board re-enters with its stagger
+    syncUrl(null, windowDays);
+  }, [syncUrl, windowDays]);
+
+  /** The recency toggle: on IDLE it re-scopes the RAILS; on RESULT it re-runs the search. */
+  const changeWindowDays = useCallback(
+    (days: number) => {
+      if (days === windowDays) return;
+      setWindowDays(days);
+      if (mode === 'result') {
+        runSearch({ ...lastInput.current, windowDays: days });
+      } else {
+        refreshBoard(days);
+        syncUrl(null, days);
+      }
+    },
+    [mode, refreshBoard, runSearch, syncUrl, windowDays],
   );
 
   // A shared/bookmarked link with facets auto-runs once on mount.
   useEffect(() => {
     const u = initialUrlState;
-    if (u.payer !== null || u.prefix !== null || u.facilityCodes.length > 0 || u.funding.length > 0) {
+    if (u.payer !== null || u.prefix !== null || u.facilities.length > 0 || u.funding.length > 0 || u.cpt !== null) {
       runSearch({
         payer: u.payer,
         prefix: u.prefix,
-        facilityCodes: u.facilityCodes,
+        facilities: u.facilities,
         funding: u.funding,
+        cpt: u.cpt,
+        revenue: u.revenue,
+        windowDays: u.windowDays,
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberate mount-once auto-run
@@ -183,16 +258,17 @@ export function PayerIntelView({
   }, [mode, resultKey, result]);
 
   /** IDLE→RESULT exit: fade the ambient sections 200ms, then flip. Instant under reduced motion. */
-  const transitionToResult = useCallback((input: PayerIntelSearchInput) => {
-    const root = rootRef.current;
-    if (root === null || reducedMotion()) {
+  const transitionToResult = useCallback(
+    (input: PayerIntelSearchInput) => {
+      const root = rootRef.current;
+      if (root !== null && !reducedMotion()) {
+        const sections = gsap.utils.toArray<HTMLElement>('[data-pi-section]', root);
+        gsap.to(sections, { opacity: 0, y: -6, duration: 0.2, ease: 'power2.out' });
+      }
       runSearch(input);
-      return;
-    }
-    const sections = gsap.utils.toArray<HTMLElement>('[data-pi-section]', root);
-    gsap.to(sections, { opacity: 0, y: -6, duration: 0.2, ease: 'power2.out' });
-    runSearch(input);
-  }, [runSearch]);
+    },
+    [runSearch],
+  );
 
   // ── Facet dismissal (chip ×) — re-run with the facet removed; numbers count to new values ──────
   const dismissFacet = useCallback(
@@ -203,39 +279,49 @@ export function PayerIntelView({
       const next: PayerIntelSearchInput = {
         payer: key === 'payer' ? null : cur.facets.payer,
         prefix: key === 'prefix' ? null : cur.facets.prefix,
-        facilityCodes:
-          key === 'facility' ? cur.facets.facilityCodes.filter((c) => c !== value) : cur.facets.facilityCodes,
+        facilities: key === 'facility' ? cur.facets.facilities.filter((f) => f !== value) : cur.facets.facilities,
         employerNames:
           key === 'employer' ? cur.facets.employerNames.filter((e) => e !== value) : cur.facets.employerNames,
         funding: key === 'funding' ? cur.facets.funding.filter((f) => f !== value) : cur.facets.funding,
         groupNumber: key === 'group' ? null : (prev.groupNumber ?? null),
+        cpt: key === 'cpt_rev' ? null : cur.facets.cpt,
+        revenue: key === 'cpt_rev' ? null : cur.facets.revenue,
+        windowDays: cur.facets.windowDays,
       };
       const anyLeft =
         next.payer !== null ||
         next.prefix !== null ||
-        (next.facilityCodes?.length ?? 0) > 0 ||
+        (next.facilities?.length ?? 0) > 0 ||
         (next.employerNames?.length ?? 0) > 0 ||
         (next.funding?.length ?? 0) > 0 ||
-        next.groupNumber !== null;
+        next.groupNumber !== null ||
+        next.cpt !== null;
       if (!anyLeft) {
         clearAll();
         return;
       }
       runSearch(next);
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- clearAll defined below (stable)
-    [result, runSearch],
+    [clearAll, result, runSearch],
   );
 
-  const clearAll = useCallback(() => {
-    searchSeq.current += 1; // cancel any in-flight search
-    lastInput.current = {};
-    setResult(null);
-    setMode('idle');
-    setBusy(false);
-    idleAnimated.current = false; // the ambient board re-enters with its stagger
-    syncUrl(null);
-  }, [syncUrl]);
+  // ── Drill-downs (a summary row IS a filter) ─────────────────────────────────────────────────────
+  const drillPayer = useCallback(
+    (label: string) => runSearch({ ...lastInput.current, payer: label }),
+    [runSearch],
+  );
+  const drillFacility = useCallback(
+    (label: string) => {
+      const cur = lastInput.current.facilities ?? [];
+      runSearch({ ...lastInput.current, facilities: cur.includes(label) ? cur : [...cur, label] });
+    },
+    [runSearch],
+  );
+  const drillCombo = useCallback(
+    (cpt: string | null, revenue: string | null) =>
+      runSearch({ ...lastInput.current, cpt, revenue }),
+    [runSearch],
+  );
 
   // ── Saved-search handlers ───────────────────────────────────────────────────────────────────────
   const toggleStar = useCallback(
@@ -251,10 +337,10 @@ export function PayerIntelView({
         };
       });
       void togglePayerIntelStar(s.id, !s.starred).then((r) => {
-        if (!r.ok) refreshBoard(); // roll back the optimistic flip (limit hit / not found / failed)
+        if (!r.ok) refreshBoard(windowDays); // roll back the optimistic flip (limit / not found / failed)
       });
     },
-    [refreshBoard],
+    [refreshBoard, windowDays],
   );
 
   const rerunSaved = useCallback(
@@ -266,8 +352,8 @@ export function PayerIntelView({
 
   const clearHistory = useCallback(() => {
     setBoard((b) => ({ ...b, searches: { ...b.searches, recent: [] } }));
-    void clearPayerIntelHistory().then(() => refreshBoard());
-  }, [refreshBoard]);
+    void clearPayerIntelHistory().then(() => refreshBoard(windowDays));
+  }, [refreshBoard, windowDays]);
 
   // ── Rail seeds ──────────────────────────────────────────────────────────────────────────────────
   const seedFromGainer = useCallback(
@@ -278,7 +364,8 @@ export function PayerIntelView({
   );
   const seedFromDecliner = useCallback(
     (item: PayerIntelDeclinerItem) => {
-      if (item.facilityCode !== null) transitionToResult({ facilityCodes: [item.facilityCode] });
+      // The rail's facility label IS the rollup text — exactly what the filter matches.
+      transitionToResult({ facilities: [item.facility] });
     },
     [transitionToResult],
   );
@@ -288,7 +375,7 @@ export function PayerIntelView({
       transitionToResult({
         term: s.term,
         payer: s.payer,
-        facilityCodes: s.facilityCodes,
+        facilities: s.facilities,
         employerNames: s.employerNames,
         funding: s.funding,
         groupNumber: s.groupNumber,
@@ -311,8 +398,26 @@ export function PayerIntelView({
     return r.ok ? r.employers : [];
   }, []);
 
+  const searchBar = (compressed: boolean) => (
+    <PayerIntelSearchBar
+      payers={facetOptions.payers}
+      facilities={facetOptions.facilities}
+      compressed={compressed}
+      busy={busy}
+      windowDays={windowDays}
+      onWindowDaysChange={changeWindowDays}
+      onSubmit={onSubmit}
+      onEmployerSearch={employerSearch}
+    />
+  );
+
   return (
     <div ref={rootRef} className="space-y-7">
+      {/* Polite narration for AT: search progress + result count, never a focus steal. */}
+      <p role="status" aria-live="polite" className="sr-only">
+        {announce}
+      </p>
+
       {failed ? (
         <div className="rounded-md border border-status-danger/30 bg-status-danger/10 px-3 py-2 text-sm" style={{ color: '#B64138' }}>
           The search failed — nothing was shown rather than something wrong. Try again.
@@ -333,15 +438,8 @@ export function PayerIntelView({
             thresholdPts={board.decliners.thresholdPts}
             onSeed={seedFromDecliner}
           />
-          <PayerIntelSearchBar
-            payers={facetOptions.payers}
-            facilities={facetOptions.facilities}
-            compressed={false}
-            busy={busy}
-            onSubmit={onSubmit}
-            onEmployerSearch={employerSearch}
-          />
-          <PayerIntelCensusStrip rows={board.census.rows} syncedAt={board.census.syncedAt} />
+          {searchBar(false)}
+          {/* Saved searches sit DIRECTLY under the bar (2026-08-17 review) — they ARE searches. */}
           <PayerIntelSavedSearches
             starred={board.searches.starred}
             recent={board.searches.recent}
@@ -350,24 +448,26 @@ export function PayerIntelView({
             onRerun={rerunSaved}
             onClearHistory={clearHistory}
           />
+          <PayerIntelCensusStrip rows={board.census.rows} syncedAt={board.census.syncedAt} />
         </>
       ) : result !== null ? (
         <>
-          <PayerIntelSearchBar
-            payers={facetOptions.payers}
-            facilities={facetOptions.facilities}
-            compressed
-            busy={busy}
-            onSubmit={onSubmit}
-            onEmployerSearch={employerSearch}
-          />
-          <PayerIntelHero
-            result={result}
-            facilityNameOf={facilityNameOf}
-            watchState={watchState}
-            onWatch={onWatch}
-            onDismissFacet={dismissFacet}
-            onClearAll={clearAll}
+          {searchBar(true)}
+          {/* Focus target for the completed search — tabIndex -1 so it is programmatic-only. */}
+          <div ref={resultHeadingRef} tabIndex={-1} className="outline-none">
+            <PayerIntelHero
+              result={result}
+              watchState={watchState}
+              onWatch={onWatch}
+              onDismissFacet={dismissFacet}
+              onClearAll={clearAll}
+            />
+          </div>
+          <PayerIntelTopGroups
+            byPayer={result.byPayer}
+            byFacility={result.byFacility}
+            onDrillPayer={drillPayer}
+            onDrillFacility={drillFacility}
           />
           <PayerIntelPctBand result={result} />
           <PayerIntelPlacementTable
@@ -376,7 +476,18 @@ export function PayerIntelView({
             censusSyncedAt={board.census.syncedAt}
             cohortLabel={result.facets.prefix ?? result.facets.payer ?? 'this search'}
           />
-          <PayerIntelChargeLines combos={result.combos} totalLines={result.totals.lineCount} />
+          <PayerIntelChargeLines
+            combos={result.combos}
+            totalLines={result.totals.lineCount}
+            onDrillCombo={drillCombo}
+          />
+          <PayerIntelGridTable
+            page={grid}
+            loading={gridLoading}
+            onLoadMore={() => loadGrid(lastInput.current, grid?.nextCursor ?? null)}
+          />
+          {/* The census rides on RESULT too (2026-08-17 ruling) — compact, collapsed by default. */}
+          <PayerIntelCensusStrip rows={board.census.rows} syncedAt={board.census.syncedAt} />
           <PayerIntelAiPanel generate={() => generatePayerIntelAiRead(lastInput.current)} />
         </>
       ) : null}

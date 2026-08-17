@@ -4,18 +4,27 @@
  * The two IDLE-state rails — "Policies gaining ground" (dark teal, the tape silhouette) and
  * "Facilities losing ground" (dark WARM ground + coral accents, two-line ticks).
  *
- * ⚠ NO MARQUEE, BY SPEC. Unlike the Qualify tape these are STATIC, hand-scrollable strips
- * (`overflow-x-auto`) with hover treatment only — the Payer Intel motion spec forbids
- * auto-scroll here, so `useMarquee` is deliberately not used and no duplicate set exists.
+ * MOVING, BY RULING (Alec, 2026-08-17 review: "there's just not movement, they are sitting
+ * still") — this supersedes the build spec's static-rail line. Both rails run the SAME machine as
+ * the Qualify tape: `useMarquee` over a real overflow-x container, hand-scrollable, pauses on
+ * hover/focus/gesture, auto-motion drops under prefers-reduced-motion while staying scrollable.
+ *
+ * ⚠ THE useMarquee CONTRACT, learned the hard way on policy-tape.tsx: the ref element's DIRECT
+ * children must be the items (the hook indexes `el.children`); the duplicate set renders only
+ * when `isOverflowing`, marked `data-dup` + `aria-hidden` + tabIndex -1 (the `.q-marquee` CSS
+ * hides duplicates under reduced motion — aria-hidden alone hides them from AT, not from eyes).
+ *
+ * WINDOW-AWARE: both rails render whatever window the board was loaded with — the recency toggle
+ * refetches the board, so `windowDays`/`deltaDays` here always names the ACTIVE window.
  *
  * PHI/DOLLARS: gainers items are the tape's non-dollar shape verbatim. Decliner ticks carry ONE
  * dollar (current-window billed) which arrives ALREADY NULL for amounts-blind sessions (core
- * choke point) — the micro-line drops the figure rather than rendering '—' noise.
- * `declineReason` is null in v1 (no attribution service exists); the tick renders without a
- * why-tag rather than fabricating one.
+ * choke point). `declineReason` is null in v1 (no attribution service exists); the tick renders
+ * without a why-tag rather than fabricating one.
  */
 import type { QualifyPolicyTapeItem } from '../../lib/qualify/board';
 import { TAPE_PALETTE } from '../qualify/tokens';
+import { useMarquee } from '../qualify/useMarquee';
 import type { PayerIntelDeclinerItem } from '../../lib/payer-intel/contract';
 import { fmtMoneyCompact } from './format';
 
@@ -50,6 +59,56 @@ export function PayerIntelGainersRail({
   /** Seed a search from a tick (prefix + payer). */
   onSeed?: (item: QualifyPolicyTapeItem) => void;
 }) {
+  // Hook before any early return (rules of hooks). resetKey folds the window in so a recency
+  // toggle re-reads from the left.
+  const { ref: scrollRef, isOverflowing } = useMarquee<HTMLUListElement>(`${asOf}-${deltaDays}`, items.length);
+
+  const item = (p: QualifyPolicyTapeItem, dup: boolean) => {
+    const band = p.bandNow ?? '0';
+    const key = `${p.token}-${p.payer}`;
+    const clause = gainerClause(p);
+    const label =
+      `${gainerHandle(p)}, ${p.payer}${clause ? `, ${clause}` : ''}. ` +
+      `Rating ${p.ratingNow}, up ${p.deltaPts} points over ${deltaDays} days.` +
+      (onSeed ? ' Search this policy.' : '');
+    const body = (
+      <>
+        <span className="font-mono text-xs font-medium tracking-wide text-white">{gainerHandle(p)}</span>
+        <span className="max-w-[168px] truncate text-xs text-white/60">{p.payer}</span>
+        {clause ? <span className="whitespace-nowrap text-xs text-white/60">{clause}</span> : null}
+        {/* TAPE_PALETTE.band, never IQ_BAND_HEX — inverse-surface set (audit C-4). */}
+        <span className="font-mono text-[15px] font-semibold" style={{ color: TAPE_PALETTE.band[band] }}>
+          {p.ratingNow}
+        </span>
+        <span className="font-mono text-xs font-medium" style={{ color: TAPE_PALETTE.up }}>
+          ▲ +{p.deltaPts} pts
+        </span>
+      </>
+    );
+    return (
+      <li
+        key={dup ? `dup-${key}` : key}
+        aria-hidden={dup || undefined}
+        data-dup={dup ? 'true' : undefined}
+        className="flex flex-none border-r border-white/10"
+      >
+        {onSeed ? (
+          <button
+            type="button"
+            tabIndex={dup ? -1 : undefined}
+            aria-label={dup ? undefined : label}
+            onClick={() => onSeed(p)}
+            className="flex items-baseline gap-2.5 px-5 py-0.5 text-left transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/70"
+          >
+            {body}
+          </button>
+        ) : (
+          <span className="flex items-baseline gap-2.5 px-5">{body}</span>
+        )}
+      </li>
+    );
+  };
+
   return (
     <section aria-label="Policies gaining ground" data-pi-section="gainers">
       <div className="mb-2 flex items-baseline gap-2 px-0.5">
@@ -64,45 +123,11 @@ export function PayerIntelGainersRail({
         </p>
       ) : (
         <div className="overflow-hidden rounded-xl bg-teal900 shadow-ths-sm">
-          <ul className="flex items-center overflow-x-auto py-2.5" style={{ scrollbarWidth: 'thin' }}>
-            {items.map((p) => {
-              const band = p.bandNow ?? '0';
-              const clause = gainerClause(p);
-              const label =
-                `${gainerHandle(p)}, ${p.payer}${clause ? `, ${clause}` : ''}. ` +
-                `Rating ${p.ratingNow}, up ${p.deltaPts} points over ${deltaDays} days.` +
-                (onSeed ? ' Search this policy.' : '');
-              const body = (
-                <>
-                  <span className="font-mono text-xs font-medium tracking-wide text-white">{gainerHandle(p)}</span>
-                  <span className="max-w-[168px] truncate text-xs text-white/60">{p.payer}</span>
-                  {clause ? <span className="whitespace-nowrap text-xs text-white/60">{clause}</span> : null}
-                  {/* TAPE_PALETTE.band, never IQ_BAND_HEX — inverse-surface set (audit C-4). */}
-                  <span className="font-mono text-[15px] font-semibold" style={{ color: TAPE_PALETTE.band[band] }}>
-                    {p.ratingNow}
-                  </span>
-                  <span className="font-mono text-xs font-medium" style={{ color: TAPE_PALETTE.up }}>
-                    ▲ +{p.deltaPts} pts
-                  </span>
-                </>
-              );
-              return (
-                <li key={`${p.token}-${p.payer}`} className="flex flex-none border-r border-white/10 last:border-r-0">
-                  {onSeed ? (
-                    <button
-                      type="button"
-                      aria-label={label}
-                      onClick={() => onSeed(p)}
-                      className="flex items-baseline gap-2.5 px-5 py-0.5 text-left transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/70"
-                    >
-                      {body}
-                    </button>
-                  ) : (
-                    <span className="flex items-baseline gap-2.5 px-5">{body}</span>
-                  )}
-                </li>
-              );
-            })}
+          {/* ⚠ THE SCROLL CONTAINER IS THE <ul> ITSELF — useMarquee indexes el.children directly;
+              a wrapper div silently kills auto-scroll (the shipped policy-tape bug, 2026-08-09). */}
+          <ul ref={scrollRef} className="q-marquee flex items-center py-2.5">
+            {items.map((p) => item(p, false))}
+            {isOverflowing && items.map((p) => item(p, true))}
           </ul>
         </div>
       )}
@@ -121,6 +146,72 @@ export function PayerIntelDeclinersRail({
   thresholdPts: number;
   onSeed?: (item: PayerIntelDeclinerItem) => void;
 }) {
+  const { ref: scrollRef, isOverflowing } = useMarquee<HTMLUListElement>(
+    `${windowDays}-${items[0]?.facility ?? ''}`,
+    items.length,
+  );
+
+  const tick = (d: PayerIntelDeclinerItem, dup: boolean) => {
+    const label =
+      `${d.facility}${d.careSetting ? `, ${d.careSetting === 'BOTH' ? 'IP and OP' : d.careSetting}` : ''}. ` +
+      `Collecting ${d.pctCurrent ?? '—'} percent of billed, down ${Math.abs(d.deltaPts)} points over ${windowDays} days.` +
+      (onSeed ? ' Search this facility.' : '');
+    const microParts = [
+      `${d.lineCount.toLocaleString('en-US')} ln`,
+      ...(d.billedCurrent !== null ? [fmtMoneyCompact(d.billedCurrent)] : []),
+    ];
+    const body = (
+      <>
+        <span className="flex items-center gap-2">
+          <span className="whitespace-nowrap text-[12.5px] font-semibold tracking-wide text-white">{d.facility}</span>
+          {d.careSetting !== null ? (
+            <span
+              className="rounded-full border px-1.5 text-[9px] font-bold uppercase tracking-wider"
+              style={{ color: '#F0917C', borderColor: 'rgba(240,145,124,0.4)' }}
+            >
+              {d.careSetting === 'BOTH' ? 'IP+OP' : d.careSetting}
+            </span>
+          ) : null}
+          <span className="font-display text-[17px] font-medium" style={{ color: '#F0917C' }}>
+            {d.pctCurrent !== null ? `${Math.round(d.pctCurrent)}%` : '—'}
+          </span>
+          <span className="whitespace-nowrap font-mono text-xs font-medium" style={{ color: DOWN_DELTA_HEX }}>
+            ▼ −{Math.abs(d.deltaPts).toFixed(1)}
+          </span>
+        </span>
+        {/* Second micro-line. NO why-tag in v1: decline_reason attribution does not exist
+            server-side, and fabricating one client-side is forbidden by spec.
+            TODO(payer-intel): render `declineReason` here once the attribution service ships. */}
+        <span className="flex items-center gap-2 whitespace-nowrap font-mono text-[10px] text-white/45">
+          {microParts.join(' · ')}
+        </span>
+      </>
+    );
+    return (
+      <li
+        key={dup ? `dup-${d.facility}` : d.facility}
+        aria-hidden={dup || undefined}
+        data-dup={dup ? 'true' : undefined}
+        className="flex flex-none"
+        style={{ borderRight: `1px solid ${DOWN_LINE}` }}
+      >
+        {onSeed ? (
+          <button
+            type="button"
+            tabIndex={dup ? -1 : undefined}
+            aria-label={dup ? undefined : label}
+            onClick={() => onSeed(d)}
+            className="flex flex-col justify-center gap-1 px-5 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/70 hover:bg-[rgba(240,145,124,0.06)]"
+          >
+            {body}
+          </button>
+        ) : (
+          <span className="flex flex-col justify-center gap-1 px-5 py-2.5">{body}</span>
+        )}
+      </li>
+    );
+  };
+
   return (
     <section aria-label="Facilities losing ground" data-pi-section="decliners">
       <div className="mb-2 flex items-baseline gap-2 px-0.5">
@@ -143,61 +234,9 @@ export function PayerIntelDeclinersRail({
             className="overflow-hidden rounded-xl shadow-ths-sm"
             style={{ background: DOWN_RAIL_HEX, borderTop: '2px solid #E2674F' }}
           >
-            <ul className="flex items-stretch overflow-x-auto" style={{ scrollbarWidth: 'thin' }}>
-              {items.map((d) => {
-                const label =
-                  `${d.facility}${d.careSetting ? `, ${d.careSetting === 'BOTH' ? 'IP and OP' : d.careSetting}` : ''}. ` +
-                  `Collecting ${d.pctCurrent ?? '—'} percent of billed, down ${Math.abs(d.deltaPts)} points over ${windowDays} days.` +
-                  (onSeed ? ' Search this facility.' : '');
-                const microParts = [
-                  `${d.lineCount.toLocaleString('en-US')} ln`,
-                  ...(d.billedCurrent !== null ? [fmtMoneyCompact(d.billedCurrent)] : []),
-                ];
-                const body = (
-                  <>
-                    <span className="flex items-center gap-2">
-                      <span className="text-[12.5px] font-semibold tracking-wide text-white">{d.facility}</span>
-                      {d.careSetting !== null ? (
-                        <span
-                          className="rounded-full border px-1.5 text-[9px] font-bold uppercase tracking-wider"
-                          style={{ color: '#F0917C', borderColor: 'rgba(240,145,124,0.4)' }}
-                        >
-                          {d.careSetting === 'BOTH' ? 'IP+OP' : d.careSetting}
-                        </span>
-                      ) : null}
-                      <span className="font-display text-[17px] font-medium" style={{ color: '#F0917C' }}>
-                        {d.pctCurrent !== null ? `${Math.round(d.pctCurrent)}%` : '—'}
-                      </span>
-                      <span className="font-mono text-xs font-medium" style={{ color: DOWN_DELTA_HEX }}>
-                        ▼ −{Math.abs(d.deltaPts).toFixed(1)}
-                      </span>
-                    </span>
-                    {/* Second micro-line. NO why-tag in v1: decline_reason attribution does not
-                        exist server-side, and fabricating one client-side is forbidden by spec.
-                        TODO(payer-intel): render `declineReason` here once the attribution service
-                        ships a real value. */}
-                    <span className="flex items-center gap-2 font-mono text-[10px] text-white/45">
-                      {microParts.join(' · ')}
-                    </span>
-                  </>
-                );
-                return (
-                  <li key={d.facility} className="flex flex-none" style={{ borderRight: `1px solid ${DOWN_LINE}` }}>
-                    {onSeed ? (
-                      <button
-                        type="button"
-                        aria-label={label}
-                        onClick={() => onSeed(d)}
-                        className="flex flex-col justify-center gap-1 px-5 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/70 hover:bg-[rgba(240,145,124,0.06)]"
-                      >
-                        {body}
-                      </button>
-                    ) : (
-                      <span className="flex flex-col justify-center gap-1 px-5 py-2.5">{body}</span>
-                    )}
-                  </li>
-                );
-              })}
+            <ul ref={scrollRef} className="q-marquee flex items-stretch">
+              {items.map((d) => tick(d, false))}
+              {isOverflowing && items.map((d) => tick(d, true))}
             </ul>
           </div>
           <p className="mt-1.5 px-0.5 text-xs text-ink400">

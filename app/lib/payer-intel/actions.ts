@@ -13,21 +13,62 @@ import { requirePayerIntelPrincipal } from './gate';
 import {
   clearPayerIntelHistoryCore,
   getPayerIntelBoardCore,
+  getPayerIntelGridCore,
   runPayerIntelSearchCore,
   togglePayerIntelStarCore,
   watchPayerIntelSubjectCore,
   type PayerIntelToggleStarResult,
   type PayerIntelWatchResult,
 } from './core';
-import type { PayerIntelBoard, PayerIntelEntityType, PayerIntelResult } from './contract';
+import {
+  clampPayerIntelWindowDays,
+  type PayerIntelBoard,
+  type PayerIntelEntityType,
+  type PayerIntelGridCursor,
+  type PayerIntelGridPage,
+  type PayerIntelResult,
+} from './contract';
 import { buildPayerIntelRealDeps, sanitizePayerIntelSearchInput } from './deps';
-import { loadPayerIntelEmployerOptions, loadPayerIntelFacilityNames, loadPayerIntelPayerVocabulary } from './loaders';
+import {
+  loadPayerIntelEmployerOptions,
+  loadPayerIntelFacilityOptions,
+  loadPayerIntelPayerVocabulary,
+} from './loaders';
 
-export async function getPayerIntelBoard(): Promise<{ ok: true; board: PayerIntelBoard } | { ok: false }> {
+/** The ambient board. `windowDays` drives BOTH rails (a 30d toggle shows 30d movers/decliners). */
+export async function getPayerIntelBoard(
+  windowDays?: unknown,
+): Promise<{ ok: true; board: PayerIntelBoard } | { ok: false }> {
   try {
-    return { ok: true, board: await getPayerIntelBoardCore(buildPayerIntelRealDeps()) };
+    return {
+      ok: true,
+      board: await getPayerIntelBoardCore(buildPayerIntelRealDeps(), {
+        windowDays: clampPayerIntelWindowDays(windowDays),
+      }),
+    };
   } catch (err) {
     console.error('getPayerIntelBoard failed', err instanceof Error ? err.message : '');
+    return { ok: false };
+  }
+}
+
+/** One keyset page of the charge-line grid for the ACTIVE search (fixed Payment-Received-DESC).
+ *  Dollar columns arrive already stripped for amounts-blind sessions. */
+export async function loadPayerIntelChargeRows(
+  input: unknown,
+  cursor: unknown,
+): Promise<{ ok: true; page: PayerIntelGridPage } | { ok: false }> {
+  try {
+    const c =
+      typeof cursor === 'object' && cursor !== null && Number.isSafeInteger((cursor as { id?: unknown }).id)
+        ? ({ id: (cursor as { id: number }).id, value: (cursor as { value?: string | number | null }).value ?? null } as PayerIntelGridCursor)
+        : null;
+    return {
+      ok: true,
+      page: await getPayerIntelGridCore(buildPayerIntelRealDeps(), sanitizePayerIntelSearchInput(input), c),
+    };
+  } catch (err) {
+    console.error('loadPayerIntelChargeRows failed', err instanceof Error ? err.message : '');
     return { ok: false };
   }
 }
@@ -81,11 +122,12 @@ export async function searchPayerIntelEmployers(
   }
 }
 
-/** Facility picker options + payer vocabulary for the facet chips (both small; gate-first). */
+/** Facility picker options + payer vocabulary for the facet chips (both small; gate-first).
+ *  ⚠ Facility option VALUES are the rollup's facility TEXT — the vocabulary the filter matches. */
 export async function loadPayerIntelFacetOptions(): Promise<
   | {
       ok: true;
-      facilities: { code: string; name: string; careSetting: 'IP' | 'OP' | 'BOTH' | null }[];
+      facilities: { value: string; name: string; careSetting: 'IP' | 'OP' | 'BOTH' | null }[];
       payers: string[];
     }
   | { ok: false }
@@ -93,14 +135,14 @@ export async function loadPayerIntelFacetOptions(): Promise<
   const gate = await requirePayerIntelPrincipal();
   if (!gate.ok) return { ok: false };
   try {
-    const [names, payers] = await Promise.all([
-      loadPayerIntelFacilityNames(),
+    const [options, payers] = await Promise.all([
+      loadPayerIntelFacilityOptions(gate.entityIds),
       loadPayerIntelPayerVocabulary(gate.entityIds),
     ]);
     return {
       ok: true,
-      facilities: names
-        .map((n) => ({ code: n.facility_code, name: n.facility_name, careSetting: n.care_setting }))
+      facilities: options
+        .map((o) => ({ value: o.facility, name: o.facility_name ?? o.facility, careSetting: o.care_setting }))
         .sort((a, b) => a.name.localeCompare(b.name)),
       payers,
     };

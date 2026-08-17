@@ -22,9 +22,11 @@ import { PayerIntelCensusStrip } from '../components/payer-intel/census-strip';
 import { PayerIntelSavedSearches } from '../components/payer-intel/saved-searches';
 import {
   PayerIntelChargeLines,
+  PayerIntelGridTable,
   PayerIntelHero,
   PayerIntelPctBand,
   PayerIntelPlacementTable,
+  PayerIntelTopGroups,
 } from '../components/payer-intel/result-sections';
 import { PayerIntelPointerBanner } from '../components/payer-intel/pointer-banner';
 import type {
@@ -74,7 +76,16 @@ test('decliners rail: movement carries words + arrow, never hue alone; no fabric
   assert.doesNotMatch(html, /payer-mix|zero-paid ↑|seasonal/);
 });
 
-test('gainers rail: renders the tape vocabulary without any marquee duplicate set', () => {
+test('rails source: BOTH rails run the marquee machine (the 2026-08-17 "make them move" ruling)', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, '..', 'components', 'payer-intel', 'idle-rails.tsx'), 'utf8');
+  assert.match(src, /useMarquee/);
+  assert.match(src, /q-marquee/);
+  assert.match(src, /data-dup/); // the duplicate-set contract (reduced-motion CSS hides it)
+  assert.match(src, /isOverflowing &&/);
+});
+
+test('gainers rail: static render shows ONE set (effects never run, so no duplicate leaks in)', () => {
   const html = renderToStaticMarkup(
     <PayerIntelGainersRail
       items={[
@@ -102,7 +113,9 @@ test('gainers rail: renders the tape vocabulary without any marquee duplicate se
   );
   assert.match(html, /W29/);
   assert.match(html, /▲ \+4 pts/);
-  assert.doesNotMatch(html, /data-dup/); // static strip — no marquee machinery
+  // The duplicate set only mounts after useMarquee MEASURES overflow — hermetic renders see one
+  // copy of each policy, which is also what AT must see (the dup is aria-hidden when it exists).
+  assert.doesNotMatch(html, /data-dup/);
   assert.doesNotMatch(html, /\$/); // non-dollar by construction
 });
 
@@ -171,16 +184,20 @@ const RESULT: PayerIntelResult = {
   facets: {
     payer: 'AETNA',
     prefix: 'W29',
-    facilityCodes: [],
-    facilityLabels: [],
+    facilities: [],
     employerNames: [],
     funding: ['Self-Funded'],
     groupNumberMasked: '•••• 4217',
+    cpt: null,
+    revenue: null,
+    windowDays: 90,
   },
   resolved: true,
   totals: { lineCount: 558, distinctMembers: 96, billed: null },
   yieldPct: { pct_collected: 32.4, pct_allowed: 41.2, pct_paid: 78.6 },
   rating: { value: 45, band: '30', deltaPts: 4, asOf: '2026-08-16', subject: 'pair' },
+  byPayer: [{ label: 'AETNA', count: 500, charge: null }],
+  byFacility: [{ label: 'LONESTAR MENTAL HEALTH LLC', count: 61, charge: null }],
   placement: [
     {
       facility: 'Lonestar Mental Health',
@@ -201,7 +218,7 @@ const RESULT: PayerIntelResult = {
   combos: [
     { cpt: 'H0017', revenue: '0158', count: 84, charge: null, pctAllowed: 48.6, pctPaid: 70.2, pctZeroPaid: 4.8 },
   ],
-  window: { from: '2026-05-20', to: '2026-08-17' },
+  window: { from: '2026-05-20', to: '2026-08-18', days: 90 },
   viewerHasAmountsCapability: false,
 };
 
@@ -209,7 +226,6 @@ test('hero (blind): ON FILE chips render with dismiss + Clear all; the masked gr
   const html = renderToStaticMarkup(
     <PayerIntelHero
       result={RESULT}
-      facilityNameOf={(c) => c}
       watchState="idle"
       onWatch={() => {}}
       onDismissFacet={() => {}}
@@ -222,6 +238,56 @@ test('hero (blind): ON FILE chips render with dismiss + Clear all; the masked gr
   assert.match(html, /Clear all/);
   assert.match(html, /Remove Payer AETNA/); // per-chip accessible dismiss
   assert.doesNotMatch(html, /0084217/); // the raw group number never renders
+  // The "how far back" disclosure is required chrome (2026-08-17 review, item 3).
+  assert.match(html, /payments received 2026-05-20 → 2026-08-18 · past 90 days/);
+});
+
+test('drill groups (blind): rows are BUTTONS with counts and no dollars', () => {
+  const html = renderToStaticMarkup(
+    <PayerIntelTopGroups
+      byPayer={RESULT.byPayer}
+      byFacility={RESULT.byFacility}
+      onDrillPayer={() => {}}
+      onDrillFacility={() => {}}
+    />,
+  );
+  assert.match(html, /Narrow this search to payer AETNA/);
+  assert.match(html, /Narrow this search to facility LONESTAR MENTAL HEALTH LLC/);
+  assert.doesNotMatch(html, /\$\d/);
+});
+
+test('grid table (blind): dollar cells render em dashes; ratios and labels survive; load-more shows', () => {
+  const html = renderToStaticMarkup(
+    <PayerIntelGridTable
+      page={{
+        rows: [
+          {
+            id: 15,
+            chargeDate: '2026-07-21',
+            paymentReceived: '2026-08-18',
+            cpt: 'H0035',
+            revenue: '0913',
+            payer: 'AETNA',
+            facility: 'LONESTAR MENTAL HEALTH LLC',
+            employerName: null,
+            chargeAmount: null,
+            allowedAmount: null,
+            insurancePayments: null,
+            patientBalanceDue: null,
+            pctAllowed: '20.06',
+            pctPaid: '86.45',
+          },
+        ],
+        nextCursor: { id: 15, value: '2026-08-18' },
+      }}
+      loading={false}
+      onLoadMore={() => {}}
+    />,
+  );
+  assert.match(html, /20\.1%/);
+  assert.match(html, /LONESTAR MENTAL HEALTH LLC/);
+  assert.match(html, /Load more charge lines/);
+  assert.doesNotMatch(html, /\$\d/);
 });
 
 test('placement table (blind): dollar column renders em dash while ratios and flags survive', () => {
@@ -235,7 +301,7 @@ test('placement table (blind): dollar column renders em dash while ratios and fl
   );
   assert.match(html, /41\.6%/);
   assert.match(html, /Full/); // the best-yield-full flag pill
-  assert.match(html, /90d thru 2026-08-17/); // trailing-column as-of stamp
+  assert.match(html, /90d thru 2026-08-18/); // trailing-column as-of stamp
   assert.doesNotMatch(html, /\$\d/); // no dollar figure for a blind viewer
 });
 
@@ -275,8 +341,12 @@ test('view source: reduced-motion is checked before every GSAP leg and the URL c
   // Controls animate opacity — an autoAlpha PROPERTY must never appear (the resolution-flow a11y
   // ruling); the word may appear in prose explaining exactly this.
   assert.doesNotMatch(src, /autoAlpha:/);
-  // No marquee on this surface — the spec forbids auto-scroll rails.
-  assert.doesNotMatch(src, /useMarquee/);
+  // The marquee lives in idle-rails.tsx (its own test above) — the orchestrator never CALLS it
+  // (the name may appear in prose describing exactly this split).
+  assert.doesNotMatch(src, /useMarquee[<(]/);
+  // The a11y contract from the 2026-08-17 review: a polite live region + focus to the result.
+  assert.match(src, /aria-live="polite"/);
+  assert.match(src, /resultHeadingRef\.current\?\.focus\(\)/);
   // The URL sync writes ONLY through the contract codec (allowlist: payer/prefix/fac/funding) —
   // no employer or group value may be interpolated into a URL here.
   assert.match(src, /encodePayerIntelUrl/);

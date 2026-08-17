@@ -1,19 +1,23 @@
 /**
  * Payer Intel CORES — pure, dependency-injected orchestration for the /payer-intel tab. The
  * `'use server'` binders in actions.ts supply real deps; the hermetic suite supplies fakes and
- * proves the gate, the amounts strip, the row_ids short-circuit and the audit ordering at the
- * wire level (the qualifyCore.test.ts pattern).
+ * proves the gate, the amounts strip, the matched-nothing short-circuit and the audit ordering at
+ * the wire level (the qualifyCore.test.ts pattern).
  *
- * R-AMOUNTS CHOKE POINT: `stripBoardAmounts` / `stripResultAmounts` are module-PRIVATE and applied
- * LAST before every return (`return gate.hasAmounts ? x : strip(x)`), the Qualify core.ts
- * discipline. Any NEW dollar-bearing field on these wires must be added to the strip explicitly —
- * a second list that skips the choke point hands a blind session the full dollar set
- * (bookFacilities was Qualify's worked example).
+ * R-AMOUNTS CHOKE POINT: `stripBoardAmounts` / `stripResultAmounts` / `stripGridAmounts` are
+ * module-PRIVATE and applied LAST before every return (`return gate.hasAmounts ? x : strip(x)`),
+ * the Qualify core.ts discipline. Any NEW dollar-bearing field on these wires must be added to
+ * the strip explicitly — a second list that skips the choke point hands a blind session the full
+ * dollar set (bookFacilities was Qualify's worked example).
  *
  * PHI DISCIPLINE: raw search terms (group numbers, member identifiers) exist only inside
- * `runPayerIntelSearchCore`'s locals — they are HMAC'd through injected token fns and the raw
+ * `resolvePayerIntelSearch`'s frame — they are HMAC'd through injected token fns and the raw
  * value never reaches SQL, the audit detail, a log line, or the returned payload (the result
  * carries a last-4 mask). PHI-tokened searches audit BEFORE any data read, fail-closed.
+ *
+ * WINDOW (2026-08-17 review): the payment-received recency window (7/14/30/90d, default 90) is a
+ * FIRST-CLASS facet — it scopes the search AND the ambient rails (the board core takes it too, so
+ * a user toggling 30d sees 30d movers, not 90d movers over a 30d search).
  */
 import { iqBandOf } from '../qualify/ratingV2';
 import {
@@ -24,9 +28,9 @@ import {
 import type { QualifyPolicyTapeRow } from '../../../src/collections/qualifyRatingHistory';
 import type { CmdExplorerFilter } from '../../../src/collections/cmdExplorerQuery';
 import { deriveYield } from '../../../src/collections/cmdExplorerQuery';
+import type { CmdExplorerRow } from '../../../src/collections/cmdExplorer';
 import {
   PAYER_INTEL_DECLINE_THRESHOLD_PTS,
-  PAYER_INTEL_DECLINE_WINDOW_DAYS,
   type PayerIntelCensusRowRaw,
   type PayerIntelComboRow,
   type PayerIntelDeclinerRow,
@@ -36,28 +40,32 @@ import {
   type PayerIntelSavedSearchRow,
 } from '../../../src/collections/payerIntelSearch';
 import type { PayerIntelPrincipal } from './principal';
-import type {
-  PayerIntelBoard,
-  PayerIntelCensusRow,
-  PayerIntelDeclinerItem,
-  PayerIntelEntityType,
-  PayerIntelFacets,
-  PayerIntelPlacementItem,
-  PayerIntelResult,
-  PayerIntelSavedSearch,
-  PayerIntelSearchInput,
+import {
+  clampPayerIntelWindowDays,
+  type PayerIntelBoard,
+  type PayerIntelCensusRow,
+  type PayerIntelDeclinerItem,
+  type PayerIntelEntityType,
+  type PayerIntelFacets,
+  type PayerIntelGridCursor,
+  type PayerIntelGridPage,
+  type PayerIntelGroupItem,
+  type PayerIntelPlacementItem,
+  type PayerIntelResult,
+  type PayerIntelSavedSearch,
+  type PayerIntelSearchInput,
 } from './contract';
 
 // ── Deps (the DI seam) ───────────────────────────────────────────────────────────────────────────
 
 export interface PayerIntelDeps {
   requirePrincipal: () => Promise<PayerIntelPrincipal>;
-  // IDLE board
-  loadGainers: () => Promise<QualifyPolicyTapeRow[] | null>;
+  // IDLE board — both rails take the ACTIVE window so the tickers adapt to the toggle.
+  loadGainers: (deltaDays: number) => Promise<QualifyPolicyTapeRow[] | null>;
   /** Both enrichment legs are optional + fail-soft, the tape core's contract. */
   resolvePrefixes?: (tokens: readonly string[]) => Map<string, string>;
   loadTapeContext?: (tokens: readonly string[]) => Promise<QualifyPolicyTapeContext[]>;
-  loadDecliners: (entityIds: string[]) => Promise<PayerIntelDeclinerRow[]>;
+  loadDecliners: (entityIds: string[], windowDays: number) => Promise<PayerIntelDeclinerRow[]>;
   loadCensus: () => Promise<PayerIntelCensusRowRaw[]>;
   loadFacilityNames: () => Promise<PayerIntelFacilityNameRow[]>;
   loadSavedSearches: (userId: string) => Promise<PayerIntelSavedSearchRow[] | null>;
@@ -70,6 +78,8 @@ export interface PayerIntelDeps {
     distinctMembers: number;
     placement: PayerIntelPlacementRow[];
     combos: PayerIntelComboRow[];
+    byPayer: { label: string | null; count: number; charge: number }[];
+    byFacility: { label: string | null; count: number; charge: number }[];
   }>;
   loadPayerGroups: (
     filter: CmdExplorerFilter,
@@ -77,6 +87,12 @@ export interface PayerIntelDeps {
   ) => Promise<{ label: string | null; count: number }[]>;
   loadRating: (token: string | null, payer: string) => Promise<PayerIntelRatingRow | null>;
   loadPayerVocabulary: (entityIds: string[]) => Promise<string[]>;
+  /** One keyset page of the charge-line grid (the Collections grid behind THIS tab's gate). */
+  loadGridRows: (
+    filter: CmdExplorerFilter,
+    cursor: PayerIntelGridCursor | null,
+    entityIds: string[],
+  ) => Promise<{ rows: CmdExplorerRow[]; nextCursor: PayerIntelGridCursor | null }>;
   /** Keyed-HMAC blind-index fns (blindIndex.ts) — injected so the core stays hermetic. */
   alphaPrefixToken: (raw: string) => string | null;
   groupNumberToken: (raw: string) => string | null;
@@ -138,8 +154,24 @@ function stripResultAmounts(result: PayerIntelResult): PayerIntelResult {
   return {
     ...result,
     totals: { ...result.totals, billed: null },
+    byPayer: result.byPayer.map((g) => ({ ...g, charge: null })),
+    byFacility: result.byFacility.map((g) => ({ ...g, charge: null })),
     placement: result.placement.map((p) => ({ ...p, paidPerPatient: null, billed: null })),
     combos: result.combos.map((c) => ({ ...c, charge: null })),
+  };
+}
+
+function stripGridAmounts(page: PayerIntelGridPage): PayerIntelGridPage {
+  return {
+    ...page,
+    rows: page.rows.map((r) => ({
+      ...r,
+      chargeAmount: null,
+      allowedAmount: null,
+      insurancePayments: null,
+      patientBalanceDue: null,
+      // pct_allowed / pct_paid deliberately SURVIVE — ratios, the Qualify precedent.
+    })),
   };
 }
 
@@ -153,10 +185,11 @@ export type PayerIntelTermKind =
 
 /**
  * Classify the free-text bar's term, server-side:
- *   · exactly 3 chars over [A-Z0-9] after normalization → an alpha PREFIX (the Qualify domain);
+ *   · exactly 3 chars over [A-Z0-9] (with at least one letter) after normalization → an alpha
+ *     PREFIX (the Qualify domain);
  *   · ≥5 digits → a GROUP NUMBER (PHI-adjacent — HMAC'd, audited, never echoed raw);
  *   · otherwise a PAYER match against the live vocabulary (exact first, then contains — shortest
- *     hit wins, so "aetna" beats "AETNA BETTER HEALTH" only when typed as the full label);
+ *     hit wins);
  *   · no match → unknown (the UI says so; nothing silently widens).
  */
 export function classifyPayerIntelTerm(term: string, payerVocabulary: readonly string[]): PayerIntelTermKind {
@@ -250,23 +283,28 @@ function toSavedSearch(r: PayerIntelSavedSearchRow): PayerIntelSavedSearch {
   };
 }
 
-export async function getPayerIntelBoardCore(deps: PayerIntelDeps): Promise<PayerIntelBoard> {
+export async function getPayerIntelBoardCore(
+  deps: PayerIntelDeps,
+  opts?: { windowDays?: number },
+): Promise<PayerIntelBoard> {
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error);
+  const windowDays = clampPayerIntelWindowDays(opts?.windowDays ?? deps.windowDays);
 
   // The gainers rail REUSES the Qualify tape core wholesale — same enrichment, same fail-soft
-  // legs — with this tab's gate already satisfied (pass-through principal) and the gainers loader.
+  // legs — with this tab's gate already satisfied (pass-through principal), the gainers loader,
+  // and the ACTIVE window as the delta horizon (a 30d toggle shows 30d movers).
   const gainersPromise: Promise<QualifyPolicyTapeResult> = getQualifyPolicyTapeCore({
     requirePrincipal: async () => ({ ok: true }),
-    loadTape: deps.loadGainers,
+    loadTape: () => deps.loadGainers(windowDays),
     resolvePrefixes: deps.resolvePrefixes,
     loadContext: deps.loadTapeContext,
-    deltaDays: deps.windowDays,
+    deltaDays: windowDays,
   });
 
   const [gainers, declinerRows, censusRaw, nameRows, savedRows] = await Promise.all([
     gainersPromise,
-    deps.loadDecliners(gate.entityIds),
+    deps.loadDecliners(gate.entityIds, windowDays),
     deps.loadCensus(),
     deps.loadFacilityNames(),
     deps.loadSavedSearches(gate.actor.userId),
@@ -291,7 +329,7 @@ export async function getPayerIntelBoardCore(deps: PayerIntelDeps): Promise<Paye
     gainers,
     decliners: {
       items: declinerItems,
-      windowDays: PAYER_INTEL_DECLINE_WINDOW_DAYS,
+      windowDays,
       thresholdPts: PAYER_INTEL_DECLINE_THRESHOLD_PTS,
     },
     census: assembleCensus(censusRaw, names),
@@ -302,6 +340,152 @@ export async function getPayerIntelBoardCore(deps: PayerIntelDeps): Promise<Paye
     viewerHasAmountsCapability: gate.hasAmounts,
   };
   return gate.hasAmounts ? board : stripBoardAmounts(board); // strip LAST
+}
+
+// ── Search resolution (shared by RESULT, the grid, and the AI payload) ───────────────────────────
+
+/** The resolved search: everything the RESULT core, the grid core and the AI payload core need.
+ *  Shared so the three can never disagree about what a search MEANS. */
+interface ResolvedPayerIntelSearch {
+  filter: CmdExplorerFilter;
+  facilities: string[];
+  employerNames: string[];
+  funding: string[];
+  payer: string | null;
+  resolvedPayer: string | null;
+  prefix: string | null;
+  prefixToken: string | null;
+  groupNumber: string | null;
+  groupToken: string | null;
+  cpt: string | null;
+  revenue: string | null;
+  windowDays: number;
+  from: string;
+  to: string;
+  entityType: PayerIntelEntityType | null;
+  termUnresolved: boolean;
+}
+
+const CODE_RE = /^[A-Za-z0-9]{1,10}$/;
+
+/** Sanitize at the trust boundary, classify the free term, audit PHI fields BEFORE any read,
+ *  HMAC the identifiers, compose the shared Collections filter (window included), resolve the
+ *  payer. The raw group number stays inside this frame. */
+async function resolvePayerIntelSearch(
+  deps: PayerIntelDeps,
+  gate: Extract<PayerIntelPrincipal, { ok: true }>,
+  input: PayerIntelSearchInput,
+): Promise<ResolvedPayerIntelSearch> {
+  const facilities = (input.facilities ?? []).filter((f) => f.length > 0 && f.length <= 200).slice(0, 20);
+  const employerNames = (input.employerNames ?? []).filter((e) => e.length > 0 && e.length <= 200).slice(0, 50);
+  const funding = (input.funding ?? []).filter((f) => f === 'Self-Funded' || f === 'Fully Insured');
+  let payer = typeof input.payer === 'string' && input.payer.trim().length > 0 ? input.payer.trim().slice(0, 120) : null;
+  let prefix =
+    typeof input.prefix === 'string' && /^[A-Za-z0-9]{1,3}$/.test(input.prefix.trim())
+      ? input.prefix.trim().toUpperCase()
+      : null;
+  let groupNumber =
+    typeof input.groupNumber === 'string' && input.groupNumber.trim().length > 0
+      ? input.groupNumber.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 40)
+      : null;
+  const cpt =
+    typeof input.cpt === 'string' && CODE_RE.test(input.cpt.trim()) ? input.cpt.trim().toUpperCase() : null;
+  const revenue =
+    typeof input.revenue === 'string' && CODE_RE.test(input.revenue.trim()) ? input.revenue.trim() : null;
+  const windowDays = clampPayerIntelWindowDays(input.windowDays ?? deps.windowDays);
+
+  let termUnresolved = false;
+  const term = typeof input.term === 'string' ? input.term.trim().slice(0, 120) : '';
+  if (term.length > 0) {
+    const vocab = await deps.loadPayerVocabulary(gate.entityIds);
+    const classified = classifyPayerIntelTerm(term, vocab);
+    if (classified.kind === 'prefix') prefix = classified.value;
+    else if (classified.kind === 'group') groupNumber = classified.value;
+    else if (classified.kind === 'payer') payer = classified.value;
+    else termUnresolved = true;
+  }
+
+  // PHI tokens: audit BEFORE any data read, then HMAC — the raw value goes no further.
+  const phiFields: string[] = [];
+  if (prefix !== null) phiFields.push('alpha_prefix');
+  if (groupNumber !== null) phiFields.push('group_number');
+  if (phiFields.length > 0) {
+    // Fail-closed: a throw here denies the search. Detail carries field NAMES only, never values.
+    await deps.recordAccess({
+      actorEmail: gate.actor.email,
+      actorUserId: gate.actor.userId,
+      action: 'search_payer_intel',
+      detail: { fields: phiFields },
+    });
+  }
+  const prefixToken = prefix !== null ? deps.alphaPrefixToken(prefix) : null;
+  const groupToken = groupNumber !== null ? deps.groupNumberToken(groupNumber) : null;
+
+  // The payment-received window: [from, to) — `to` is EXCLUSIVE today+1 so today's payments ride.
+  const today = deps.today();
+  const from = addDaysIsoLocal(today, -(windowDays - 1));
+  const to = addDaysIsoLocal(today, 1);
+
+  const filter: CmdExplorerFilter = {
+    from,
+    to,
+    ...(facilities.length > 0 ? { facility: facilities } : {}),
+    ...(payer !== null ? { primary_payers: [payer] } : {}),
+    ...(employerNames.length > 0 ? { employer_names: employerNames } : {}),
+    ...(funding.length > 0 ? { funding } : {}),
+    ...(cpt !== null ? { cpt_code: cpt } : {}),
+    ...(revenue !== null ? { revenue_code: revenue } : {}),
+    ...(prefixToken !== null || groupToken !== null
+      ? {
+          phiIndex: {
+            ...(prefixToken !== null ? { memberIdPrefixBidx: prefixToken } : {}),
+            ...(groupToken !== null ? { groupNumberBidx: groupToken } : {}),
+          },
+        }
+      : {}),
+  };
+
+  // Resolve a payer for prefix/group searches that lack one (the mock's "resolved" state).
+  let resolvedPayer = payer;
+  if (resolvedPayer === null && !termUnresolved && (prefixToken !== null || groupToken !== null)) {
+    const groups = await deps.loadPayerGroups(filter, gate.entityIds);
+    resolvedPayer = groups[0]?.label ?? null;
+  }
+
+  const entityType: PayerIntelEntityType | null =
+    prefix !== null
+      ? 'prefix'
+      : groupNumber !== null
+        ? 'group'
+        : payer !== null
+          ? 'payer'
+          : employerNames.length > 0
+            ? 'employer'
+            : funding.length > 0
+              ? 'funding'
+              : facilities.length > 0
+                ? 'facility'
+                : null;
+
+  return {
+    filter,
+    facilities,
+    employerNames,
+    funding,
+    payer,
+    resolvedPayer,
+    prefix,
+    prefixToken,
+    groupNumber,
+    groupToken,
+    cpt,
+    revenue,
+    windowDays,
+    from,
+    to,
+    entityType,
+    termUnresolved,
+  };
 }
 
 // ── Search core ──────────────────────────────────────────────────────────────────────────────────
@@ -328,126 +512,6 @@ function maskGroupNumber(norm: string): string {
   return `•••• ${norm.slice(-4)}`;
 }
 
-/** The resolved search: everything both the RESULT core and the AI payload core need. Shared so
- *  the two can never disagree about what a search MEANS (facets, tokens, resolution). */
-interface ResolvedPayerIntelSearch {
-  filter: CmdExplorerFilter;
-  facilityCodes: string[];
-  employerNames: string[];
-  funding: string[];
-  payer: string | null;
-  resolvedPayer: string | null;
-  prefix: string | null;
-  prefixToken: string | null;
-  groupNumber: string | null;
-  groupToken: string | null;
-  entityType: PayerIntelEntityType | null;
-  termUnresolved: boolean;
-}
-
-/** Steps 1–4 of a search: sanitize at the trust boundary, classify the free term, audit PHI
- *  fields BEFORE any read, HMAC the identifiers, compose the shared Collections filter, resolve
- *  the payer. The raw group number stays inside this frame. */
-async function resolvePayerIntelSearch(
-  deps: PayerIntelDeps,
-  gate: Extract<PayerIntelPrincipal, { ok: true }>,
-  input: PayerIntelSearchInput,
-): Promise<ResolvedPayerIntelSearch> {
-  // ── 1. Sanitize + classify at the trust boundary ────────────────────────────────────────────
-  const facilityCodes = (input.facilityCodes ?? []).filter((f) => f.length > 0 && f.length <= 40).slice(0, 20);
-  const employerNames = (input.employerNames ?? []).filter((e) => e.length > 0 && e.length <= 200).slice(0, 50);
-  const funding = (input.funding ?? []).filter((f) => f === 'Self-Funded' || f === 'Fully Insured');
-  let payer = typeof input.payer === 'string' && input.payer.trim().length > 0 ? input.payer.trim().slice(0, 120) : null;
-  let prefix =
-    typeof input.prefix === 'string' && /^[A-Za-z0-9]{1,3}$/.test(input.prefix.trim())
-      ? input.prefix.trim().toUpperCase()
-      : null;
-  let groupNumber =
-    typeof input.groupNumber === 'string' && input.groupNumber.trim().length > 0
-      ? input.groupNumber.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 40)
-      : null;
-
-  let termUnresolved = false;
-  const term = typeof input.term === 'string' ? input.term.trim().slice(0, 120) : '';
-  if (term.length > 0) {
-    const vocab = await deps.loadPayerVocabulary(gate.entityIds);
-    const classified = classifyPayerIntelTerm(term, vocab);
-    if (classified.kind === 'prefix') prefix = classified.value;
-    else if (classified.kind === 'group') groupNumber = classified.value;
-    else if (classified.kind === 'payer') payer = classified.value;
-    else termUnresolved = true;
-  }
-
-  // ── 2. PHI tokens: audit BEFORE any data read, then HMAC — the raw value goes no further ─────
-  const phiFields: string[] = [];
-  if (prefix !== null) phiFields.push('alpha_prefix');
-  if (groupNumber !== null) phiFields.push('group_number');
-  if (phiFields.length > 0) {
-    // Fail-closed: a throw here denies the search. Detail carries field NAMES only, never values.
-    await deps.recordAccess({
-      actorEmail: gate.actor.email,
-      actorUserId: gate.actor.userId,
-      action: 'search_payer_intel',
-      detail: { fields: phiFields },
-    });
-  }
-  const prefixToken = prefix !== null ? deps.alphaPrefixToken(prefix) : null;
-  const groupToken = groupNumber !== null ? deps.groupNumberToken(groupNumber) : null;
-
-  // ── 3. Compose the Collections engine's filter ────────────────────────────────────────────────
-  const filter: CmdExplorerFilter = {
-    ...(facilityCodes.length > 0 ? { facility: facilityCodes } : {}),
-    ...(payer !== null ? { primary_payers: [payer] } : {}),
-    ...(employerNames.length > 0 ? { employer_names: employerNames } : {}),
-    ...(funding.length > 0 ? { funding } : {}),
-    ...(prefixToken !== null || groupToken !== null
-      ? {
-          phiIndex: {
-            ...(prefixToken !== null ? { memberIdPrefixBidx: prefixToken } : {}),
-            ...(groupToken !== null ? { groupNumberBidx: groupToken } : {}),
-          },
-        }
-      : {}),
-  };
-
-  // ── 4. Resolve a payer for prefix/group searches that lack one (the mock's "resolved" state) ──
-  let resolvedPayer = payer;
-  if (resolvedPayer === null && !termUnresolved && (prefixToken !== null || groupToken !== null)) {
-    const groups = await deps.loadPayerGroups(filter, gate.entityIds);
-    resolvedPayer = groups[0]?.label ?? null;
-  }
-
-  const entityType: PayerIntelEntityType | null =
-    prefix !== null
-      ? 'prefix'
-      : groupNumber !== null
-        ? 'group'
-        : payer !== null
-          ? 'payer'
-          : employerNames.length > 0
-            ? 'employer'
-            : funding.length > 0
-              ? 'funding'
-              : facilityCodes.length > 0
-                ? 'facility'
-                : null;
-
-  return {
-    filter,
-    facilityCodes,
-    employerNames,
-    funding,
-    payer,
-    resolvedPayer,
-    prefix,
-    prefixToken,
-    groupNumber,
-    groupToken,
-    entityType,
-    termUnresolved,
-  };
-}
-
 export async function runPayerIntelSearchCore(
   deps: PayerIntelDeps,
   input: PayerIntelSearchInput,
@@ -456,22 +520,38 @@ export async function runPayerIntelSearchCore(
   if (!gate.ok) throw new Error(gate.error);
 
   const resolved = await resolvePayerIntelSearch(deps, gate, input);
-  const { filter, facilityCodes, employerNames, funding, prefix, prefixToken, groupNumber, resolvedPayer, entityType, termUnresolved } =
-    resolved;
+  const {
+    filter,
+    facilities,
+    employerNames,
+    funding,
+    prefix,
+    prefixToken,
+    groupNumber,
+    resolvedPayer,
+    cpt,
+    revenue,
+    windowDays,
+    from,
+    to,
+    entityType,
+    termUnresolved,
+  } = resolved;
 
-  // ── 5. Aggregates. A term that classified as NOTHING short-circuits to a zero result BEFORE any
-  // query — the row_ids-empty lesson from Collections (a matched-nothing state must return zero
-  // rows AND a zero summary, never silently widen to the whole book). v1 has no row_ids facet;
-  // the payer-intel builders additionally harden `row_ids: []` to a `false` predicate themselves.
+  // A term that classified as NOTHING short-circuits to a zero result BEFORE any query — the
+  // row_ids-empty lesson from Collections (a matched-nothing state must return zero rows AND a
+  // zero summary, never silently widen to the whole book).
   const empty = {
     totals: { total_count: 0, total_charge: 0, total_allowed: 0, total_paid: 0 },
     distinctMembers: 0,
     placement: [],
     combos: [],
+    byPayer: [],
+    byFacility: [],
   };
   const agg = termUnresolved ? empty : await deps.loadAggregates(filter, gate.entityIds);
 
-  // ── 6. Rating off the nightly table (pair when a prefix resolved, payer-wide otherwise) ───────
+  // Rating off the nightly table (pair when a prefix resolved, payer-wide otherwise).
   let rating: PayerIntelResult['rating'] = { value: null, band: null, deltaPts: null, asOf: null, subject: 'none' };
   if (resolvedPayer !== null) {
     const row = await deps.loadRating(prefixToken, resolvedPayer);
@@ -486,7 +566,7 @@ export async function runPayerIntelSearchCore(
     }
   }
 
-  // ── 7. Record the search (non-PHI facets only; fail-soft) ─────────────────────────────────────
+  // Record the search (non-PHI facets only; fail-soft — history must never cost the search).
   try {
     await deps.recordSearch({
       userId: gate.actor.userId,
@@ -497,22 +577,20 @@ export async function runPayerIntelSearchCore(
       resolved: resolvedPayer !== null,
     });
   } catch (err) {
-    // History is a convenience surface — its failure must not cost the search. SQLSTATE only.
     const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : '';
     console.error(`payer intel: record search failed (sqlstate ${code || 'unknown'})`);
   }
 
-  // ── 8. Assemble, flag, strip LAST ─────────────────────────────────────────────────────────────
-  const to = deps.today();
-  const from = addDaysIsoLocal(to, -(deps.windowDays - 1));
   const facets: PayerIntelFacets = {
     payer: resolvedPayer,
     prefix,
-    facilityCodes,
-    facilityLabels: facilityCodes, // page maps codes → names client-side from the board's census/names
+    facilities,
     employerNames,
     funding,
     groupNumberMasked: groupNumber !== null ? maskGroupNumber(groupNumber) : null,
+    cpt,
+    revenue,
+    windowDays,
   };
   const placement = derivePlacementFlags(
     agg.placement.map((p) => ({
@@ -531,6 +609,11 @@ export async function runPayerIntelSearchCore(
       flag: null,
     })),
   );
+  const groupOf = (g: { label: string | null; count: number; charge: number }): PayerIntelGroupItem => ({
+    label: g.label,
+    count: g.count,
+    charge: g.charge,
+  });
   const result: PayerIntelResult = {
     facets,
     resolved: resolvedPayer !== null,
@@ -545,6 +628,8 @@ export async function runPayerIntelSearchCore(
       paid: agg.totals.total_paid,
     }),
     rating,
+    byPayer: agg.byPayer.map(groupOf),
+    byFacility: agg.byFacility.map(groupOf),
     placement,
     combos: agg.combos.map((c) => ({
       cpt: c.cpt,
@@ -555,10 +640,145 @@ export async function runPayerIntelSearchCore(
       pctPaid: c.pct_paid,
       pctZeroPaid: c.pct_zero_paid,
     })),
-    window: { from, to },
+    window: { from, to, days: windowDays },
     viewerHasAmountsCapability: gate.hasAmounts,
   };
   return gate.hasAmounts ? result : stripResultAmounts(result); // strip LAST
+}
+
+// ── Charge-line grid core ────────────────────────────────────────────────────────────────────────
+
+export async function getPayerIntelGridCore(
+  deps: PayerIntelDeps,
+  input: PayerIntelSearchInput,
+  cursor: PayerIntelGridCursor | null,
+): Promise<PayerIntelGridPage> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) throw new Error(gate.error);
+
+  const resolved = await resolvePayerIntelSearch(deps, gate, input);
+  if (resolved.termUnresolved) return { rows: [], nextCursor: null };
+
+  const page = await deps.loadGridRows(resolved.filter, cursor, gate.entityIds);
+  const shaped: PayerIntelGridPage = {
+    rows: page.rows.map((r) => ({
+      id: r.id,
+      chargeDate: r.charge_date,
+      paymentReceived: r.payment_received,
+      cpt: r.cpt_code || null,
+      revenue: r.revenue_code,
+      payer: r.primary_payer,
+      facility: r.facility,
+      employerName: r.employer_name,
+      chargeAmount: r.charge_amount,
+      allowedAmount: r.allowed_amount,
+      insurancePayments: r.insurance_payments,
+      patientBalanceDue: r.patient_balance_due,
+      pctAllowed: r.pct_allowed,
+      pctPaid: r.pct_paid,
+    })),
+    nextCursor: page.nextCursor,
+  };
+  return gate.hasAmounts ? shaped : stripGridAmounts(shaped); // strip LAST
+}
+
+// ── AI payload assembly (server-side — the spec's requirement) ───────────────────────────────────
+
+/**
+ * Assemble the aggregates-only AI payload for the ACTIVE search, SERVER-SIDE. The client sends
+ * only the search input; every number in the payload is derived here from the same builders the
+ * RESULT screen uses, so the model can never be fed figures the screen does not show.
+ *
+ * BLIND PARITY BY CONSTRUCTION: when the viewer is amounts-blind, every dollar field is nulled
+ * BEFORE the payload leaves this function — the model cannot leak a number it never received.
+ * Ratios/counts ride for everyone (they survive the amounts strip everywhere else too).
+ */
+export async function buildPayerIntelAiPayloadCore(
+  deps: PayerIntelDeps,
+  input: PayerIntelSearchInput,
+): Promise<{ ok: true; payload: Record<string, unknown> } | { ok: false; reason: 'denied' | 'insufficient' }> {
+  const gate = await deps.requirePrincipal();
+  if (!gate.ok) return { ok: false, reason: 'denied' };
+
+  const resolved = await resolvePayerIntelSearch(deps, gate, input);
+  if (resolved.termUnresolved) return { ok: false, reason: 'insufficient' };
+
+  const [agg, curve] = await Promise.all([
+    deps.loadAggregates(resolved.filter, gate.entityIds),
+    resolved.prefixToken !== null
+      ? deps.loadCohortCurve(resolved.prefixToken, gate.entityIds)
+      : Promise.resolve(null),
+  ]);
+  if (agg.totals.total_count <= 0) return { ok: false, reason: 'insufficient' };
+
+  const ratingRow = resolved.resolvedPayer !== null ? await deps.loadRating(resolved.prefixToken, resolved.resolvedPayer) : null;
+  const y = deriveYield({
+    billed: agg.totals.total_charge,
+    allowed: agg.totals.total_allowed,
+    paid: agg.totals.total_paid,
+  });
+  const blind = !gate.hasAmounts;
+  const facetKinds: string[] = [];
+  if (resolved.resolvedPayer !== null) facetKinds.push('payer');
+  if (resolved.prefix !== null) facetKinds.push('prefix');
+  if (resolved.facilities.length > 0) facetKinds.push('facility');
+  if (resolved.employerNames.length > 0) facetKinds.push('employer');
+  if (resolved.funding.length > 0) facetKinds.push('funding');
+  if (resolved.groupNumber !== null) facetKinds.push('group');
+
+  const bucketOf = (p: { bucket: number; patients: number; claims: number; pct_allowed: number | null; pct_paid: number | null; pct_zero_paid: number }) => ({
+    bucket: p.bucket,
+    patients: p.patients,
+    lines: p.claims,
+    pct_allowed: p.pct_allowed,
+    pct_paid: p.pct_paid,
+    pct_zero_paid: p.pct_zero_paid,
+  });
+
+  const payload: Record<string, unknown> = {
+    window: { from: resolved.from, to: resolved.to },
+    patients: agg.distinctMembers,
+    line_count: agg.totals.total_count,
+    min_bucket_size: deps.cohortMinPatients,
+    totals: {
+      pct_allowed: y.pct_allowed,
+      pct_paid: y.pct_paid,
+      pct_collected: y.pct_collected,
+      zero_paid_pct: null, // whole-selection zero-paid share is not aggregated yet — per-combo rates ride below
+      billed: blind ? null : agg.totals.total_charge,
+    },
+    ...(curve !== null ? { by_visit: curve.byPosition.slice(0, 40).map(bucketOf) } : {}),
+    ...(curve !== null ? { by_days_bucket: curve.byDays.slice(0, 40).map(bucketOf) } : {}),
+    cpt_rev: agg.combos.slice(0, 25).map((c) => ({
+      cpt: c.cpt,
+      revenue: c.revenue,
+      lines: c.count,
+      charge: blind ? null : c.charge,
+      pct_allowed: c.pct_allowed,
+      pct_paid: c.pct_paid,
+      pct_zero_paid: c.pct_zero_paid,
+    })),
+    search_context: {
+      entity_type: resolved.entityType,
+      resolution: resolved.resolvedPayer !== null ? 'resolved' : 'unresolved',
+      payer: resolved.resolvedPayer,
+      funding: resolved.funding,
+      facet_kinds: facetKinds,
+    },
+    ...(ratingRow !== null && ratingRow.rating !== null
+      ? { rating: { value: ratingRow.rating, band: iqBandOf(ratingRow.rating) } }
+      : {}),
+    ...(ratingRow !== null && ratingRow.rating_then !== null
+      ? {
+          prior_run: {
+            rating: ratingRow.rating_then,
+            pct_paid: null, // prior % paid is not snapshotted per search yet — a results table is the follow-up
+            as_of: addDaysIsoLocal(ratingRow.as_of, -resolved.windowDays),
+          },
+        }
+      : {}),
+  };
+  return { ok: true, payload };
 }
 
 /** Local ISO date add (UTC-slice arithmetic on a plain date string — no clock reads). */
@@ -601,107 +821,6 @@ export async function clearPayerIntelHistoryCore(
   if (!gate.ok) return { ok: false, persisted: false };
   const res = await deps.clearSearches(gate.actor.userId);
   return { ok: true, persisted: res.persisted };
-}
-
-// ── AI payload assembly (server-side — the spec's requirement) ───────────────────────────────────
-
-/**
- * Assemble the aggregates-only AI payload for the ACTIVE search, SERVER-SIDE. The client sends
- * only the search input; every number in the payload is derived here from the same builders the
- * RESULT screen uses, so the model can never be fed figures the screen does not show.
- *
- * BLIND PARITY BY CONSTRUCTION: when the viewer is amounts-blind, every dollar field is nulled
- * BEFORE the payload leaves this function — the model cannot leak a number it never received.
- * Ratios/counts ride for everyone (they survive the amounts strip everywhere else too).
- */
-export async function buildPayerIntelAiPayloadCore(
-  deps: PayerIntelDeps,
-  input: PayerIntelSearchInput,
-): Promise<{ ok: true; payload: Record<string, unknown> } | { ok: false; reason: 'denied' | 'insufficient' }> {
-  const gate = await deps.requirePrincipal();
-  if (!gate.ok) return { ok: false, reason: 'denied' };
-
-  const resolved = await resolvePayerIntelSearch(deps, gate, input);
-  if (resolved.termUnresolved) return { ok: false, reason: 'insufficient' };
-
-  const [agg, curve] = await Promise.all([
-    deps.loadAggregates(resolved.filter, gate.entityIds),
-    resolved.prefixToken !== null
-      ? deps.loadCohortCurve(resolved.prefixToken, gate.entityIds)
-      : Promise.resolve(null),
-  ]);
-  if (agg.totals.total_count <= 0) return { ok: false, reason: 'insufficient' };
-
-  const ratingRow = resolved.resolvedPayer !== null ? await deps.loadRating(resolved.prefixToken, resolved.resolvedPayer) : null;
-  const y = deriveYield({
-    billed: agg.totals.total_charge,
-    allowed: agg.totals.total_allowed,
-    paid: agg.totals.total_paid,
-  });
-  const blind = !gate.hasAmounts;
-  const to = deps.today();
-  const from = addDaysIsoLocal(to, -(deps.windowDays - 1));
-  const facetKinds: string[] = [];
-  if (resolved.resolvedPayer !== null) facetKinds.push('payer');
-  if (resolved.prefix !== null) facetKinds.push('prefix');
-  if (resolved.facilityCodes.length > 0) facetKinds.push('facility');
-  if (resolved.employerNames.length > 0) facetKinds.push('employer');
-  if (resolved.funding.length > 0) facetKinds.push('funding');
-  if (resolved.groupNumber !== null) facetKinds.push('group');
-
-  const bucketOf = (p: { bucket: number; patients: number; claims: number; pct_allowed: number | null; pct_paid: number | null; pct_zero_paid: number }) => ({
-    bucket: p.bucket,
-    patients: p.patients,
-    lines: p.claims,
-    pct_allowed: p.pct_allowed,
-    pct_paid: p.pct_paid,
-    pct_zero_paid: p.pct_zero_paid,
-  });
-
-  const payload: Record<string, unknown> = {
-    window: { from, to },
-    patients: agg.distinctMembers,
-    line_count: agg.totals.total_count,
-    min_bucket_size: deps.cohortMinPatients,
-    totals: {
-      pct_allowed: y.pct_allowed,
-      pct_paid: y.pct_paid,
-      pct_collected: y.pct_collected,
-      zero_paid_pct: null, // whole-selection zero-paid share is not aggregated yet — per-combo rates ride below
-      billed: blind ? null : agg.totals.total_charge,
-    },
-    ...(curve !== null ? { by_visit: curve.byPosition.slice(0, 40).map(bucketOf) } : {}),
-    ...(curve !== null ? { by_days_bucket: curve.byDays.slice(0, 40).map(bucketOf) } : {}),
-    cpt_rev: agg.combos.slice(0, 25).map((c) => ({
-      cpt: c.cpt,
-      revenue: c.revenue,
-      lines: c.count,
-      charge: blind ? null : c.charge,
-      pct_allowed: c.pct_allowed,
-      pct_paid: c.pct_paid,
-      pct_zero_paid: c.pct_zero_paid,
-    })),
-    search_context: {
-      entity_type: resolved.entityType,
-      resolution: resolved.resolvedPayer !== null ? 'resolved' : 'unresolved',
-      payer: resolved.resolvedPayer,
-      funding: resolved.funding,
-      facet_kinds: facetKinds,
-    },
-    ...(ratingRow !== null && ratingRow.rating !== null
-      ? { rating: { value: ratingRow.rating, band: iqBandOf(ratingRow.rating) } }
-      : {}),
-    ...(ratingRow !== null && ratingRow.rating_then !== null
-      ? {
-          prior_run: {
-            rating: ratingRow.rating_then,
-            pct_paid: null, // prior % paid is not snapshotted per search yet — a results table is the follow-up
-            as_of: addDaysIsoLocal(ratingRow.as_of, -deps.windowDays),
-          },
-        }
-      : {}),
-  };
-  return { ok: true, payload };
 }
 
 export type PayerIntelWatchResult = { ok: true; persisted: boolean } | { ok: false; reason: 'denied' | 'invalid' | 'failed' };
