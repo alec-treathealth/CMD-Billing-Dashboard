@@ -9,7 +9,6 @@
  * server-side regardless).
  */
 import type { Metadata } from 'next';
-import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { CollectionsView } from '@/components/dashboard';
 import { DataFreshness } from '@/components/dashboard/data-freshness';
@@ -66,19 +65,10 @@ export default async function CollectionsPage({
           masked by default and revealed in bulk on an explicit, audited action.
         </p>
         <DataFreshness view={view} />
-        {/* Facility Resolution entry point. admin/super_admin ONLY — the same gate the page and
-            its server actions enforce; rendered by DOM omission, never CSS-hidden, so a plain
-            'user' never receives the link in their HTML. */}
-        {access.access.role === 'admin' || access.access.role === 'super_admin' ? (
-          <Link
-            href={`/dashboard/collections/facility-resolution?view=${view}`}
-            className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-sm text-ink900 hover:border-teal700/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          >
-            Facility Resolution
-            <span aria-hidden>→</span>
-            <span className="sr-only">— attribute charges CMD posted with no facility</span>
-          </Link>
-        ) : null}
+        {/* Facility Resolution's entry point MOVED to the Claims Desk header (Alec, 2026-08-17):
+            the workbench changes claim attribution, which is desk work, not collections reporting.
+            The old route still forwards, so nothing breaks — but this tab no longer advertises it,
+            deliberately. Do not re-add a link here. */}
       </header>
       {/* Payer Intel pointer (2026-08-17) — non-blocking, and rendered ONLY for the one Collections
           role that can actually open /payer-intel (super_admin; admin/user are denied there, and a

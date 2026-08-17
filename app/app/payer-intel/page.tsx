@@ -88,7 +88,11 @@ export default async function PayerIntelPage({
   ]);
 
   return (
-    <main className="mx-auto max-w-[1240px] space-y-6 p-6 sm:p-10">
+    // Wider than the 1240px first cut (Alec, 2026-08-17: "the page is constricted with margins"),
+    // and the census now rides a 318px right rail inside it — so the main column keeps roughly the
+    // width it had while the board stops eating the fold. Still narrower than Collections' 1800px:
+    // this surface leads with prose-width analysis, not a full-bleed grid.
+    <main className="mx-auto max-w-[1560px] space-y-6 p-6 sm:px-8 sm:py-10">
       <header>
         <h1 className="font-display text-2xl font-medium tracking-tight text-ink900">Payer Intel</h1>
         <p className="mt-1 text-sm text-muted-foreground">

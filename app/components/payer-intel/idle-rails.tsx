@@ -162,8 +162,8 @@ export function PayerIntelDeclinersRail({
     ];
     const body = (
       <>
-        <span className="flex items-center gap-2">
-          <span className="whitespace-nowrap text-[12.5px] font-semibold tracking-wide text-white">{d.facility}</span>
+        <span className="flex items-center gap-1.5">
+          <span className="whitespace-nowrap text-[13px] font-semibold tracking-wide text-white">{d.facility}</span>
           {d.careSetting !== null ? (
             <span
               className="rounded-full border px-1.5 text-[9px] font-bold uppercase tracking-wider"
@@ -179,10 +179,14 @@ export function PayerIntelDeclinersRail({
             ▼ −{Math.abs(d.deltaPts).toFixed(1)}
           </span>
         </span>
-        {/* Second micro-line. NO why-tag in v1: decline_reason attribution does not exist
-            server-side, and fabricating one client-side is forbidden by spec.
+        {/* Second micro-line. Sized 12px at white/70, NOT 10px at white/45 (Alec, 2026-08-17:
+            "make the small text ... bigger and easier to see"): white at 45% over this warm-dark
+            ground blends to ≈#938280, which measures 3.7:1 — under the 4.5:1 floor for text this
+            small. 70% blends to ≈#C4BBB9 ≈ 7.2:1, so the readability ask and SC 1.4.3 land in the
+            same change. NO why-tag in v1: decline_reason attribution does not exist server-side,
+            and fabricating one client-side is forbidden by spec.
             TODO(payer-intel): render `declineReason` here once the attribution service ships. */}
-        <span className="flex items-center gap-2 whitespace-nowrap font-mono text-[10px] text-white/45">
+        <span className="flex items-center gap-2 whitespace-nowrap font-mono text-xs text-white/70">
           {microParts.join(' · ')}
         </span>
       </>
@@ -201,12 +205,12 @@ export function PayerIntelDeclinersRail({
             tabIndex={dup ? -1 : undefined}
             aria-label={dup ? undefined : label}
             onClick={() => onSeed(d)}
-            className="flex flex-col justify-center gap-1 px-5 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/70 hover:bg-[rgba(240,145,124,0.06)]"
+            className="flex flex-col justify-center gap-0.5 px-4 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/70 hover:bg-[rgba(240,145,124,0.06)]"
           >
             {body}
           </button>
         ) : (
-          <span className="flex flex-col justify-center gap-1 px-5 py-2.5">{body}</span>
+          <span className="flex flex-col justify-center gap-0.5 px-4 py-2">{body}</span>
         )}
       </li>
     );

@@ -515,10 +515,17 @@ function fmtPctStr(v: string | null): string {
 export function PayerIntelGridTable({
   page,
   loading,
+  failed = false,
+  onRetry,
   onLoadMore,
 }: {
   page: PayerIntelGridPage | null;
   loading: boolean;
+  /** The page came back refusing, or the action rejected outright. NEVER conflated with "pending":
+   *  the pre-fix section printed "Loading charge lines…" through both, so a dead request was
+   *  indistinguishable from a slow one and the user had nothing to click. */
+  failed?: boolean;
+  onRetry?: () => void;
   onLoadMore: () => void;
 }) {
   return (
@@ -529,7 +536,23 @@ export function PayerIntelGridTable({
           row-level detail · newest payment first
         </span>
       </div>
-      {page === null ? (
+      {failed && !loading ? (
+        <div
+          className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-surface px-4 py-3 text-sm text-ink600"
+          role="status"
+        >
+          <span>Charge lines could not be loaded. The summary above is unaffected.</span>
+          {onRetry ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="rounded-md border border-line px-3 py-1.5 text-xs font-semibold text-ink900 transition-colors hover:bg-teal50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500"
+            >
+              Retry
+            </button>
+          ) : null}
+        </div>
+      ) : page === null ? (
         <p className="rounded-md border border-line bg-surface px-4 py-3 text-sm text-ink400" role="status">
           {loading ? 'Loading charge lines…' : 'Charge lines will load with the search.'}
         </p>

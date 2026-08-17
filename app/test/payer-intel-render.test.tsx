@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { PayerIntelDeclinersRail, PayerIntelGainersRail } from '../components/payer-intel/idle-rails';
-import { PayerIntelCensusStrip } from '../components/payer-intel/census-strip';
+import { PayerIntelCensusPanel } from '../components/payer-intel/census-panel';
 import { PayerIntelSavedSearches } from '../components/payer-intel/saved-searches';
 import {
   PayerIntelChargeLines,
@@ -119,7 +119,7 @@ test('gainers rail: static render shows ONE set (effects never run, so no duplic
   assert.doesNotMatch(html, /\$/); // non-dollar by construction
 });
 
-test('census strip: outpatient rows render em dashes, never 0 beds or "full"', () => {
+test('census panel: outpatient rows never render beds or "full", and sit behind a disclosure', () => {
   const rows: PayerIntelCensusRow[] = [
     {
       facilityCode: 'TREAT_CA',
@@ -146,12 +146,19 @@ test('census strip: outpatient rows render em dashes, never 0 beds or "full"', (
       syncedAt: '2026-08-17T16:40:00Z',
     },
   ];
-  const html = renderToStaticMarkup(<PayerIntelCensusStrip rows={rows} syncedAt="2026-08-17T16:40:00Z" />);
-  assert.match(html, /OP caseload/);
+  const html = renderToStaticMarkup(<PayerIntelCensusPanel rows={rows} syncedAt="2026-08-17T16:40:00Z" />);
+  // The residential board at capacity reads as a pill, and the summary counts it.
   assert.match(html, /Full/);
-  assert.match(html, /Pending admits are not stored/);
-  // The outpatient row's bed cells are dashes; the strip stamp is Pacific time.
-  assert.match(html, /live from admissions boards ·/);
+  assert.match(html, /1 residential/);
+  assert.match(html, /0 open beds/);
+  // The OP caseload rides the disclosure (collapsed => `hidden`), labelled by count, and reports
+  // its ACTIVE census — never an open-bed number and never "Full" (the 0078 sentinel contract).
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /1 outpatient caseloads/);
+  assert.match(html, /51 active/);
+  assert.doesNotMatch(html, /51 open/);
+  // The panel stamps Pacific time.
+  assert.match(html, /live ·/);
 });
 
 test('saved-search card: resolution status is meta text and degraded re-runs say so', () => {
@@ -290,6 +297,26 @@ test('grid table (blind): dollar cells render em dashes; ratios and labels survi
   assert.doesNotMatch(html, /\$\d/);
 });
 
+test('grid table: a failed load says so and offers Retry — never a spinner, never "will load"', () => {
+  // The 2026-08-17 "charge lines will not load" report: `page===null` printed "Loading charge
+  // lines…" whenever `loading` was true and "will load with the search" otherwise, so a request
+  // that came back refusing (or never came back at all) was indistinguishable from a slow one and
+  // there was nothing to click. Failed must beat BOTH pending messages.
+  const html = renderToStaticMarkup(
+    <PayerIntelGridTable page={null} loading={false} failed onRetry={() => {}} onLoadMore={() => {}} />,
+  );
+  assert.match(html, /could not be loaded/);
+  assert.match(html, /Retry/);
+  assert.doesNotMatch(html, /Loading charge lines/);
+  assert.doesNotMatch(html, /will load with the search/);
+  // The pending state is unchanged and still distinct.
+  const pending = renderToStaticMarkup(
+    <PayerIntelGridTable page={null} loading failed={false} onLoadMore={() => {}} />,
+  );
+  assert.match(pending, /Loading charge lines/);
+  assert.doesNotMatch(pending, /Retry/);
+});
+
 test('placement table (blind): dollar column renders em dash while ratios and flags survive', () => {
   const html = renderToStaticMarkup(
     <PayerIntelPlacementTable
@@ -351,6 +378,60 @@ test('view source: reduced-motion is checked before every GSAP leg and the URL c
   // no employer or group value may be interpolated into a URL here.
   assert.match(src, /encodePayerIntelUrl/);
   assert.doesNotMatch(src, /groupNumber[^\n]*history\.replaceState/);
+});
+
+test('view source: EVERY Server Action promise chain terminates in .catch', () => {
+  // The charge-lines defect in one sentence: a bare `.then()` on a Server Action leaves the UI
+  // holding whatever pending state it set. `loadPayerIntelChargeRows` rejecting (stale action id
+  // after a redeploy, dropped POST, function timeout) left "Loading charge lines…" on screen
+  // forever with nothing in the server logs, because the rejection never reached the server.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(here, '..', 'components', 'payer-intel', 'payer-intel-view.tsx'), 'utf8');
+  const ACTIONS = [
+    'getPayerIntelBoard',
+    'loadPayerIntelChargeRows',
+    'runPayerIntelSearch',
+    'togglePayerIntelStar',
+    'clearPayerIntelHistory',
+    'watchPayerIntelSubject',
+  ];
+  for (const name of ACTIONS) {
+    const at = src.indexOf(`${name}(`, src.indexOf(`  ${name},`) + 1); // skip the import list
+    assert.ok(at > 0, `${name} is not called in the view`);
+    // The chain has to close within its own callback — 1600 chars covers the longest one here.
+    const chain = src.slice(at, at + 1600);
+    assert.match(chain, /\.catch\(/, `${name}'s promise chain has no .catch — a rejection would strand the UI`);
+  }
+  // searchPayerIntelEmployers is awaited rather than chained; it gets a try/catch instead.
+  assert.match(src, /try \{\s*\n\s*const r = await searchPayerIntelEmployers/);
+  // The failed grid renders an honest state rather than an eternal spinner.
+  assert.match(src, /setGridFailed\(true\)/);
+});
+
+test('facility resolution: the old collections path FORWARDS and the desk owns the entry link', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const app = join(here, '..', 'app');
+  const moved = readFileSync(join(app, 'billing-audit', 'facility-resolution', 'page.tsx'), 'utf8');
+  const stub = readFileSync(join(app, 'dashboard', 'collections', 'facility-resolution', 'page.tsx'), 'utf8');
+  const desk = readFileSync(join(app, 'billing-audit', 'page.tsx'), 'utf8');
+  const collections = readFileSync(join(app, 'dashboard', 'collections', 'page.tsx'), 'utf8');
+
+  // The workbench self-redirects within its NEW path when it clamps the view.
+  assert.match(moved, /redirect\(`\/billing-audit\/facility-resolution\?view=/);
+  assert.doesNotMatch(moved, /redirect\(`\/dashboard\/collections\/facility-resolution/);
+  // ...and keeps the admin/super_admin gate it has always had.
+  assert.match(moved, /role !== 'admin' && role !== 'super_admin'/);
+
+  // The old path is a FORWARDER — it must carry ?view= and must not load any data of its own.
+  assert.match(stub, /redirect\(/);
+  assert.match(stub, /\/billing-audit\/facility-resolution\?view=/);
+  assert.doesNotMatch(stub, /FacilityResolutionView|loadResolutionOverview|queryResolutionQueue/);
+
+  // The entry link lives on the desk now, still role-gated by DOM omission, and is GONE from
+  // Collections (a stray second link is exactly the drift this test exists to catch).
+  assert.match(desk, /href=\{`\/billing-audit\/facility-resolution\?view=\$\{view\}`\}/);
+  assert.match(desk, /role === 'admin' \|\| access\.access\.role === 'super_admin'/);
+  assert.doesNotMatch(collections, /href=\{`\/dashboard\/collections\/facility-resolution/);
 });
 
 test('page source: force-dynamic is exported and searchParams parse only the non-PHI allowlist', () => {

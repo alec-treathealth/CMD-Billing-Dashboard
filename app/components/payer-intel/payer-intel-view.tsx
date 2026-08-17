@@ -45,7 +45,7 @@ import {
 } from '../../lib/payer-intel/actions';
 import { generatePayerIntelAiRead } from '../../lib/payer-intel/ai-actions';
 import { PayerIntelGainersRail, PayerIntelDeclinersRail } from './idle-rails';
-import { PayerIntelCensusStrip } from './census-strip';
+import { PayerIntelCensusPanel } from './census-panel';
 import { PayerIntelSavedSearches } from './saved-searches';
 import { PayerIntelSearchBar, type PayerIntelSearchBarSubmit } from './search-bar';
 import {
@@ -61,6 +61,16 @@ import { PayerIntelAiPanel } from './ai-panel';
 function reducedMotion(): boolean {
   return typeof window === 'undefined' || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
 }
+
+/**
+ * The main-column / census-rail split, shared by both view states (Alec, 2026-08-17: the census
+ * "takes up too much of the screen … put it on the side"). ONE column below 1280px — the rail
+ * stacks under the content rather than squeezing a 12-column grid into a phone. `items-start` is
+ * load-bearing: without it the grid stretches the aside to the row height and `sticky` has no
+ * scroll range to work in.
+ */
+const SPLIT = 'grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_318px] xl:items-start';
+const RAIL = 'xl:sticky xl:top-6';
 
 export function PayerIntelView({
   initialBoard,
@@ -84,6 +94,7 @@ export function PayerIntelView({
   const [windowDays, setWindowDays] = useState(initialUrlState.windowDays ?? PAYER_INTEL_DEFAULT_WINDOW_DAYS);
   const [grid, setGrid] = useState<PayerIntelGridPage | null>(null);
   const [gridLoading, setGridLoading] = useState(false);
+  const [gridFailed, setGridFailed] = useState(false);
   const [announce, setAnnounce] = useState('');
   const lastInput = useRef<PayerIntelSearchInput>({});
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -113,24 +124,49 @@ export function PayerIntelView({
   /** Refetch the ambient board — after a search (history changed) or a window toggle (rails adapt). */
   const refreshBoard = useCallback((days: number) => {
     const seq = ++boardSeq.current;
-    void getPayerIntelBoard(days).then((r) => {
-      if (r.ok && boardSeq.current === seq) setBoard(r.board);
-    });
+    void getPayerIntelBoard(days)
+      .then((r) => {
+        if (r.ok && boardSeq.current === seq) setBoard(r.board);
+      })
+      // The board is AMBIENT: a failed refresh keeps whatever is already on screen and says
+      // nothing. It is the one action here whose failure genuinely does not need surfacing.
+      .catch(() => {});
   }, []);
 
-  const loadGrid = useCallback((input: PayerIntelSearchInput, cursor: PayerIntelGridPage['nextCursor']) => {
+  /**
+   * One keyset page of the charge-line grid.
+   *
+   * ⚠ EVERY Server Action call on this surface MUST terminate in `.catch`. A bare `.then()` chain
+   * strands the UI in whatever pending state it set: this section showed "Loading charge lines…"
+   * FOREVER on any rejection — a stale action id after a redeploy, a dropped POST, a function
+   * timeout — with no error, no retry, and nothing in the server logs to find (the rejection never
+   * reached the server). That was the 2026-08-17 "charge lines will not load" report.
+   */
+  const loadGrid = useCallback((input: PayerIntelSearchInput, cursor: PayerIntelGridPage['nextCursor']): Promise<void> => {
     const seq = ++gridSeq.current;
     setGridLoading(true);
-    void loadPayerIntelChargeRows(input, cursor).then((r) => {
-      if (gridSeq.current !== seq) return;
-      setGridLoading(false);
-      if (!r.ok) return; // the section keeps its previous rows; the search itself already reported
-      setGrid((prev) =>
-        cursor !== null && prev !== null
-          ? { rows: [...prev.rows, ...r.page.rows], nextCursor: r.page.nextCursor }
-          : r.page,
-      );
-    });
+    setGridFailed(false);
+    return loadPayerIntelChargeRows(input, cursor)
+      .then((r) => {
+        if (gridSeq.current !== seq) return;
+        setGridLoading(false);
+        if (!r.ok) {
+          // An honest failed state, never "will load with the search" — that message is a lie once
+          // the request has already come back refusing.
+          setGridFailed(true);
+          return;
+        }
+        setGrid((prev) =>
+          cursor !== null && prev !== null
+            ? { rows: [...prev.rows, ...r.page.rows], nextCursor: r.page.nextCursor }
+            : r.page,
+        );
+      })
+      .catch(() => {
+        if (gridSeq.current !== seq) return;
+        setGridLoading(false);
+        setGridFailed(true);
+      });
   }, []);
 
   const runSearch = useCallback(
@@ -142,27 +178,39 @@ export function PayerIntelView({
       const withWindow = { ...input, windowDays: input.windowDays ?? windowDays };
       lastInput.current = withWindow;
       setGrid(null);
-      void runPayerIntelSearch(withWindow).then((r) => {
-        if (searchSeq.current !== seq) return; // superseded
-        setBusy(false);
-        if (!r.ok) {
+      setGridFailed(false);
+      void runPayerIntelSearch(withWindow)
+        .then((r) => {
+          if (searchSeq.current !== seq) return; // superseded
+          setBusy(false);
+          if (!r.ok) {
+            setFailed(true);
+            setAnnounce('The search failed.');
+            return;
+          }
+          setWatchState('idle');
+          setResult(r.result);
+          setMode('result');
+          setWindowDays(r.result.facets.windowDays);
+          setAnnounce(
+            `${r.result.totals.lineCount.toLocaleString('en-US')} charge lines over the past ${r.result.facets.windowDays} days.`,
+          );
+          syncUrl(r.result, r.result.facets.windowDays);
+          // The row-level grid rides along with every search, and the board refresh (the search we
+          // just ran lands in Recent) waits for it — DELIBERATELY SEQUENCED, not concurrent. One
+          // reader pool serves this tab with max 4 connections and a 10s acquire timeout; the
+          // board is five more queries, so firing them alongside the grid puts the one read the
+          // user is actually waiting on at the back of a twelve-deep queue.
+          void loadGrid(withWindow, null).then(() => refreshBoard(r.result.facets.windowDays));
+          // Focus the result heading so keyboard/AT users land on the new content (SC 2.4.3).
+          window.requestAnimationFrame(() => resultHeadingRef.current?.focus());
+        })
+        .catch(() => {
+          if (searchSeq.current !== seq) return;
+          setBusy(false);
           setFailed(true);
           setAnnounce('The search failed.');
-          return;
-        }
-        setWatchState('idle');
-        setResult(r.result);
-        setMode('result');
-        setWindowDays(r.result.facets.windowDays);
-        setAnnounce(
-          `${r.result.totals.lineCount.toLocaleString('en-US')} charge lines over the past ${r.result.facets.windowDays} days.`,
-        );
-        syncUrl(r.result, r.result.facets.windowDays);
-        loadGrid(withWindow, null); // the row-level grid rides along with every search
-        refreshBoard(r.result.facets.windowDays); // the search we just ran lands in Recent
-        // Focus the result heading so keyboard/AT users land on the new content (SC 2.4.3).
-        window.requestAnimationFrame(() => resultHeadingRef.current?.focus());
-      });
+        });
     },
     [loadGrid, refreshBoard, syncUrl, windowDays],
   );
@@ -173,6 +221,8 @@ export function PayerIntelView({
     lastInput.current = {};
     setResult(null);
     setGrid(null);
+    setGridLoading(false);
+    setGridFailed(false);
     setMode('idle');
     setBusy(false);
     setAnnounce('Cleared — back to the overview.');
@@ -336,9 +386,13 @@ export function PayerIntelView({
           searches: { starred: all.filter((x) => x.starred), recent: all.filter((x) => !x.starred) },
         };
       });
-      void togglePayerIntelStar(s.id, !s.starred).then((r) => {
-        if (!r.ok) refreshBoard(windowDays); // roll back the optimistic flip (limit / not found / failed)
-      });
+      void togglePayerIntelStar(s.id, !s.starred)
+        .then((r) => {
+          if (!r.ok) refreshBoard(windowDays); // roll back the optimistic flip (limit / not found / failed)
+        })
+        // A rejected star must roll the optimistic flip back too, or the UI shows a star that
+        // never persisted.
+        .catch(() => refreshBoard(windowDays));
     },
     [refreshBoard, windowDays],
   );
@@ -352,7 +406,9 @@ export function PayerIntelView({
 
   const clearHistory = useCallback(() => {
     setBoard((b) => ({ ...b, searches: { ...b.searches, recent: [] } }));
-    void clearPayerIntelHistory().then(() => refreshBoard(windowDays));
+    void clearPayerIntelHistory()
+      .then(() => refreshBoard(windowDays))
+      .catch(() => refreshBoard(windowDays)); // reconcile either way — the optimistic clear may not have stuck
   }, [refreshBoard, windowDays]);
 
   // ── Rail seeds ──────────────────────────────────────────────────────────────────────────────────
@@ -388,14 +444,20 @@ export function PayerIntelView({
     const cur = result;
     if (cur === null || cur.facets.payer === null) return;
     setWatchState('saving');
-    void watchPayerIntelSubject(cur.facets.payer, cur.facets.prefix).then((r) => {
-      setWatchState(r.ok ? 'saved' : 'failed');
-    });
+    void watchPayerIntelSubject(cur.facets.payer, cur.facets.prefix)
+      .then((r) => {
+        setWatchState(r.ok ? 'saved' : 'failed');
+      })
+      .catch(() => setWatchState('failed')); // the button says "Retry watch" rather than sticking on "Saving…"
   }, [result]);
 
   const employerSearch = useCallback(async (term: string) => {
-    const r = await searchPayerIntelEmployers(term);
-    return r.ok ? r.employers : [];
+    try {
+      const r = await searchPayerIntelEmployers(term);
+      return r.ok ? r.employers : [];
+    } catch {
+      return []; // a type-ahead that throws must not take the search bar down with it
+    }
   }, []);
 
   const searchBar = (compressed: boolean) => (
@@ -426,6 +488,7 @@ export function PayerIntelView({
 
       {mode === 'idle' ? (
         <>
+          {/* The rails stay FULL-BLEED above the split — a marquee wants every pixel of track. */}
           <PayerIntelGainersRail
             items={board.gainers.items}
             asOf={board.gainers.asOf}
@@ -438,17 +501,23 @@ export function PayerIntelView({
             thresholdPts={board.decliners.thresholdPts}
             onSeed={seedFromDecliner}
           />
-          {searchBar(false)}
-          {/* Saved searches sit DIRECTLY under the bar (2026-08-17 review) — they ARE searches. */}
-          <PayerIntelSavedSearches
-            starred={board.searches.starred}
-            recent={board.searches.recent}
-            persisted
-            onToggleStar={toggleStar}
-            onRerun={rerunSaved}
-            onClearHistory={clearHistory}
-          />
-          <PayerIntelCensusStrip rows={board.census.rows} syncedAt={board.census.syncedAt} />
+          <div className={SPLIT}>
+            <div className="min-w-0 space-y-7">
+              {searchBar(false)}
+              {/* Saved searches sit DIRECTLY under the bar (2026-08-17 review) — they ARE searches. */}
+              <PayerIntelSavedSearches
+                starred={board.searches.starred}
+                recent={board.searches.recent}
+                persisted
+                onToggleStar={toggleStar}
+                onRerun={rerunSaved}
+                onClearHistory={clearHistory}
+              />
+            </div>
+            <aside className={RAIL}>
+              <PayerIntelCensusPanel rows={board.census.rows} syncedAt={board.census.syncedAt} />
+            </aside>
+          </div>
         </>
       ) : result !== null ? (
         <>
@@ -463,32 +532,40 @@ export function PayerIntelView({
               onClearAll={clearAll}
             />
           </div>
-          <PayerIntelTopGroups
-            byPayer={result.byPayer}
-            byFacility={result.byFacility}
-            onDrillPayer={drillPayer}
-            onDrillFacility={drillFacility}
-          />
-          <PayerIntelPctBand result={result} />
-          <PayerIntelPlacementTable
-            items={result.placement}
-            window={result.window}
-            censusSyncedAt={board.census.syncedAt}
-            cohortLabel={result.facets.prefix ?? result.facets.payer ?? 'this search'}
-          />
-          <PayerIntelChargeLines
-            combos={result.combos}
-            totalLines={result.totals.lineCount}
-            onDrillCombo={drillCombo}
-          />
-          <PayerIntelGridTable
-            page={grid}
-            loading={gridLoading}
-            onLoadMore={() => loadGrid(lastInput.current, grid?.nextCursor ?? null)}
-          />
-          {/* The census rides on RESULT too (2026-08-17 ruling) — compact, collapsed by default. */}
-          <PayerIntelCensusStrip rows={board.census.rows} syncedAt={board.census.syncedAt} />
-          <PayerIntelAiPanel generate={() => generatePayerIntelAiRead(lastInput.current)} />
+          <div className={SPLIT}>
+            <div className="min-w-0 space-y-7">
+              <PayerIntelTopGroups
+                byPayer={result.byPayer}
+                byFacility={result.byFacility}
+                onDrillPayer={drillPayer}
+                onDrillFacility={drillFacility}
+              />
+              <PayerIntelPctBand result={result} />
+              <PayerIntelPlacementTable
+                items={result.placement}
+                window={result.window}
+                censusSyncedAt={board.census.syncedAt}
+                cohortLabel={result.facets.prefix ?? result.facets.payer ?? 'this search'}
+              />
+              <PayerIntelChargeLines
+                combos={result.combos}
+                totalLines={result.totals.lineCount}
+                onDrillCombo={drillCombo}
+              />
+              <PayerIntelGridTable
+                page={grid}
+                loading={gridLoading}
+                failed={gridFailed}
+                onRetry={() => loadGrid(lastInput.current, null)}
+                onLoadMore={() => loadGrid(lastInput.current, grid?.nextCursor ?? null)}
+              />
+              <PayerIntelAiPanel generate={() => generatePayerIntelAiRead(lastInput.current)} />
+            </div>
+            {/* The census rides on RESULT too (2026-08-17 ruling) — same rail, same panel. */}
+            <aside className={RAIL}>
+              <PayerIntelCensusPanel rows={board.census.rows} syncedAt={board.census.syncedAt} />
+            </aside>
+          </div>
         </>
       ) : null}
     </div>
