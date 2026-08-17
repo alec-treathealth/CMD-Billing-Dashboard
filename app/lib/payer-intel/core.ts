@@ -49,6 +49,7 @@ import {
   type PayerIntelFacets,
   type PayerIntelGridCursor,
   type PayerIntelGridPage,
+  type PayerIntelGridSort,
   type PayerIntelGroupItem,
   type PayerIntelPlacementItem,
   type PayerIntelResult,
@@ -87,11 +88,14 @@ export interface PayerIntelDeps {
   ) => Promise<{ label: string | null; count: number }[]>;
   loadRating: (token: string | null, payer: string) => Promise<PayerIntelRatingRow | null>;
   loadPayerVocabulary: (entityIds: string[]) => Promise<string[]>;
-  /** One keyset page of the charge-line grid (the Collections grid behind THIS tab's gate). */
+  /** One keyset page of the charge-line grid (the Collections grid behind THIS tab's gate).
+   *  `sort` is absent for page 1 (which always uses the Payment-Received-DESC default) and present
+   *  only when the viewer has clicked a column header. */
   loadGridRows: (
     filter: CmdExplorerFilter,
     cursor: PayerIntelGridCursor | null,
     entityIds: string[],
+    sort?: PayerIntelGridSort,
   ) => Promise<{ rows: CmdExplorerRow[]; nextCursor: PayerIntelGridCursor | null }>;
   /** Keyed-HMAC blind-index fns (blindIndex.ts) — injected so the core stays hermetic. */
   alphaPrefixToken: (raw: string) => string | null;
@@ -713,6 +717,7 @@ export async function getPayerIntelGridCore(
   deps: PayerIntelDeps,
   input: PayerIntelSearchInput,
   cursor: PayerIntelGridCursor | null,
+  sort?: PayerIntelGridSort,
 ): Promise<PayerIntelGridPage> {
   const gate = await deps.requirePrincipal();
   if (!gate.ok) throw new Error(gate.error);
@@ -720,7 +725,7 @@ export async function getPayerIntelGridCore(
   const resolved = await resolvePayerIntelSearch(deps, gate, input);
   if (resolved.termUnresolved) return { rows: [], nextCursor: null };
 
-  const shaped = shapeGridPage(await deps.loadGridRows(resolved.filter, cursor, gate.entityIds));
+  const shaped = shapeGridPage(await deps.loadGridRows(resolved.filter, cursor, gate.entityIds, sort));
   return gate.hasAmounts ? shaped : stripGridAmounts(shaped); // strip LAST
 }
 

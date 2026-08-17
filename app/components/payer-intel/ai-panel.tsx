@@ -1,8 +1,14 @@
 'use client';
 
 /**
- * The Cohort Read panel — the AI analysis that REPLACES the cohort visit/day tables as the
- * default view; the underlying aggregate tables stay behind "Show underlying data".
+ * The Cohort Read panel — the AI analysis that REPLACES the cohort visit/day tables as the default
+ * view; the underlying aggregate tables stay behind "Show underlying data".
+ *
+ * ⚠ IT IS NO LONGER A PAGE SECTION. Alec, 2026-08-17 (third placement, and the ruling that
+ * settles it): at the page bottom it was "still at the bottom of the screen and hidden", and in
+ * the right rail it competed with the census for the same 356px. It is now the BODY of a floating
+ * dock — a sticky launcher button that opens this panel over the page (ai-dock.tsx). This
+ * component stays presentational so it renders identically in the dock, in a rail, or in a test.
  *
  * The server action returns a PARSED fixed shape (TLDR · 3 signals · BASIS) or a typed failure —
  * raw model text never reaches this component, so a malformed response renders a RETRY state by
@@ -71,33 +77,36 @@ export function PayerIntelAiPanel({
   const run = () => {
     const mySeq = ++seq.current;
     setState({ phase: 'loading' });
-    void generate().then((res) => {
-      if (seq.current !== mySeq) return; // superseded by a newer run
-      if (res.ok) setState({ phase: 'done', result: res });
-      else if (res.reason === 'insufficient') setState({ phase: 'error', reason: 'insufficient' });
-      else setState({ phase: 'error', reason: 'retry' });
-    });
+    void generate()
+      .then((res) => {
+        if (seq.current !== mySeq) return; // superseded by a newer run
+        if (res.ok) setState({ phase: 'done', result: res });
+        else if (res.reason === 'insufficient') setState({ phase: 'error', reason: 'insufficient' });
+        else setState({ phase: 'error', reason: 'retry' });
+      })
+      // A bare `.then` on a Server Action strands the button on "Reading…" forever if the request
+      // rejects — the same defect that made the charge lines look like they never loaded. Every
+      // action chain on this surface terminates in a catch.
+      .catch(() => {
+        if (seq.current !== mySeq) return;
+        setState({ phase: 'error', reason: 'retry' });
+      });
   };
 
   return (
-    <section aria-label="Cohort read" data-pi-section="ai">
-      <div className="mb-2 flex items-baseline gap-2.5 px-0.5">
-        <h2 className="font-head text-[17px] font-medium tracking-tight text-ink900">Cohort read</h2>
-        <span className="font-mono text-[10px] font-medium uppercase tracking-wider text-ink400">AI · aggregates only</span>
-      </div>
-      <div className="rounded-md border border-line border-t-2 border-t-teal500 bg-surface p-5 shadow-ths-sm">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <h3 className="font-head text-base font-medium text-ink900">AI analysis</h3>
-          {/* The required aggregates-only badge. */}
-          <span className="rounded-full bg-teal50 px-2.5 py-0.5 font-mono text-[10px] text-teal700">
-            cohort · no patient data leaves the server
-          </span>
-          <span className="flex-1" />
+    <div data-pi-ai>
+      <div>
+        {/* The required aggregates-only badge — verbatim. It is a claim about the data path, not
+            decoration, so it is never shortened to fit a narrower container. */}
+        <p className="rounded bg-teal50 px-2 py-1 font-mono text-[10px] leading-snug text-teal700">
+          cohort · no patient data leaves the server
+        </p>
+        <div className="mt-2.5">
           <button
             type="button"
             onClick={run}
             disabled={state.phase === 'loading'}
-            className="rounded-md bg-teal700 px-4 py-2 text-[13px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal900"
+            className="w-full rounded-md bg-teal700 px-4 py-2 text-[13px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal900"
           >
             {state.phase === 'loading' ? 'Reading…' : state.phase === 'done' ? 'Regenerate' : 'Read this cohort'}
           </button>
@@ -112,7 +121,7 @@ export function PayerIntelAiPanel({
         ) : null}
 
         {state.phase === 'done' ? (
-          <div className="mt-4 rounded-md border border-line bg-ground px-4 py-4">
+          <div className="mt-3 rounded-md border border-line bg-ground px-3 py-3">
             <p className="text-[13.5px] leading-relaxed text-ink900">
               <b className="font-semibold">TL;DR</b> — {state.result.read.tldr}
             </p>
@@ -157,11 +166,11 @@ export function PayerIntelAiPanel({
           </div>
         ) : state.phase === 'idle' ? (
           <p className="mt-4 text-sm text-ink400">
-            One click summarizes this cohort&apos;s payment behavior — {EM_DASH} aggregates only, nothing
-            patient-level is sent.
+            One click summarizes this cohort&apos;s payment behavior {EM_DASH} aggregates only,
+            nothing patient-level is sent.
           </p>
         ) : null}
       </div>
-    </section>
+    </div>
   );
 }

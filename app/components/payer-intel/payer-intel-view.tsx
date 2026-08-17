@@ -28,12 +28,17 @@ import type {
   PayerIntelDeclinerItem,
   PayerIntelFacetKey,
   PayerIntelGridPage,
+  PayerIntelGridSort,
   PayerIntelResult,
   PayerIntelSavedSearch,
   PayerIntelSearchInput,
   PayerIntelUrlState,
 } from '../../lib/payer-intel/contract';
-import { PAYER_INTEL_DEFAULT_WINDOW_DAYS, encodePayerIntelUrl } from '../../lib/payer-intel/contract';
+import {
+  PAYER_INTEL_DEFAULT_WINDOW_DAYS,
+  PAYER_INTEL_GRID_DEFAULT_SORT,
+  encodePayerIntelUrl,
+} from '../../lib/payer-intel/contract';
 import {
   clearPayerIntelHistory,
   getPayerIntelBoard,
@@ -57,7 +62,7 @@ import {
   PayerIntelSectionBox,
   PayerIntelTopGroups,
 } from './result-sections';
-import { PayerIntelAiPanel } from './ai-panel';
+import { PayerIntelAiDock } from './ai-dock';
 
 function reducedMotion(): boolean {
   return typeof window === 'undefined' || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
@@ -71,7 +76,7 @@ function reducedMotion(): boolean {
  * scroll range to work in.
  */
 const SPLIT = 'grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1fr)_318px] xl:items-start';
-const RAIL = 'xl:sticky xl:top-6';
+const RAIL = 'xl:sticky xl:top-6 space-y-5';
 
 export function PayerIntelView({
   initialBoard,
@@ -96,6 +101,7 @@ export function PayerIntelView({
   const [grid, setGrid] = useState<PayerIntelGridPage | null>(null);
   const [gridLoading, setGridLoading] = useState(false);
   const [gridFailed, setGridFailed] = useState(false);
+  const [gridSort, setGridSort] = useState<PayerIntelGridSort>(PAYER_INTEL_GRID_DEFAULT_SORT);
   const [announce, setAnnounce] = useState('');
   const lastInput = useRef<PayerIntelSearchInput>({});
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -143,11 +149,16 @@ export function PayerIntelView({
    * timeout — with no error, no retry, and nothing in the server logs to find (the rejection never
    * reached the server). That was the 2026-08-17 "charge lines will not load" report.
    */
-  const loadGrid = useCallback((input: PayerIntelSearchInput, cursor: PayerIntelGridPage['nextCursor']): Promise<void> => {
+  const loadGrid = useCallback(
+    (
+      input: PayerIntelSearchInput,
+      cursor: PayerIntelGridPage['nextCursor'],
+      sort: PayerIntelGridSort,
+    ): Promise<void> => {
     const seq = ++gridSeq.current;
     setGridLoading(true);
     setGridFailed(false);
-    return loadPayerIntelChargeRows(input, cursor)
+    return loadPayerIntelChargeRows(input, cursor, sort)
       .then((r) => {
         if (gridSeq.current !== seq) return;
         setGridLoading(false);
@@ -168,7 +179,20 @@ export function PayerIntelView({
         setGridLoading(false);
         setGridFailed(true);
       });
-  }, []);
+    },
+    [],
+  );
+
+  /** A header click refetches PAGE 1 in the new order. The keyset cursor is rebuilt from that
+   *  page, so a stale cursor can never walk the previous ordering (silently skipping/repeating
+   *  rows — the failure mode that makes keyset paging worth getting right). */
+  const changeGridSort = useCallback(
+    (next: PayerIntelGridSort) => {
+      setGridSort(next);
+      void loadGrid(lastInput.current, null, next);
+    },
+    [loadGrid],
+  );
 
   const runSearch = useCallback(
     (input: PayerIntelSearchInput) => {
@@ -206,6 +230,7 @@ export function PayerIntelView({
           // failure was the hop itself. `loadGrid` now serves "Load more" only.
           gridSeq.current += 1; // any in-flight Load-more from the previous result is superseded
           setGrid(r.result.grid);
+          setGridSort(PAYER_INTEL_GRID_DEFAULT_SORT); // the embedded page is always default-ordered
           setGridLoading(false);
           setGridFailed(false);
           refreshBoard(r.result.facets.windowDays); // the search we just ran lands in Recent
@@ -556,20 +581,31 @@ export function PayerIntelView({
                     onDrillFacility={drillFacility}
                   />
                 </div>
-                <div className="p-4">
-                  <PayerIntelPlacementTable
-                    items={result.placement}
-                    window={result.window}
-                    censusSyncedAt={board.census.syncedAt}
-                    cohortLabel={result.facets.prefix ?? result.facets.payer ?? 'this search'}
-                  />
-                </div>
-                <div className="p-4">
-                  <PayerIntelChargeLines
-                    combos={result.combos}
-                    totalLines={result.totals.lineCount}
-                    onDrillCombo={drillCombo}
-                  />
+                {/* Placement and CPT×rev SIDE BY SIDE (Alec, 2026-08-17).
+                    ⚠ THE BREAKPOINT IS 1600px, NOT 1280, and that is the whole fix. At 1280 the
+                    main column is viewport − 64 padding − 318 rail − 24 gap = 874px, so each table
+                    would get ~429px and BOTH would scroll horizontally — the exact thing this
+                    layout exists to remove ("no side scrolling as there is lots of space"). At
+                    1600 each side gets ~590px, which the compacted 5- and 6-column tables fit
+                    without a scrollbar. Below 1600 they stack at full width, which also never
+                    scrolls. Measure before lowering this. */}
+                <div className="grid grid-cols-1 gap-4 p-4 min-[1600px]:grid-cols-2 min-[1600px]:divide-x min-[1600px]:divide-line">
+                  <div className="min-w-0">
+                    <PayerIntelPlacementTable
+                      items={result.placement}
+                      window={result.window}
+                      censusSyncedAt={board.census.syncedAt}
+                      cohortLabel={result.facets.prefix ?? result.facets.payer ?? 'this search'}
+                      onDrillFacility={drillFacility}
+                    />
+                  </div>
+                  <div className="min-w-0 min-[1600px]:pl-4">
+                    <PayerIntelChargeLines
+                      combos={result.combos}
+                      totalLines={result.totals.lineCount}
+                      onDrillCombo={drillCombo}
+                    />
+                  </div>
                 </div>
               </PayerIntelSectionBox>
               {/* Charge lines stay their OWN section: row-level detail with its own paging and
@@ -578,16 +614,23 @@ export function PayerIntelView({
                 page={grid}
                 loading={gridLoading}
                 failed={gridFailed}
-                onRetry={() => loadGrid(lastInput.current, null)}
-                onLoadMore={() => loadGrid(lastInput.current, grid?.nextCursor ?? null)}
+                sort={gridSort}
+                onSort={changeGridSort}
+                onRetry={() => loadGrid(lastInput.current, null, gridSort)}
+                onLoadMore={() => loadGrid(lastInput.current, grid?.nextCursor ?? null, gridSort)}
               />
-              <PayerIntelAiPanel generate={() => generatePayerIntelAiRead(lastInput.current)} />
             </div>
-            {/* The census rides on RESULT too (2026-08-17 ruling) — same rail, same panel. */}
+            {/* The rail is the CENSUS only. The AI read moved to a sticky dock (ai-dock.tsx) —
+                its third placement and the one that settles it: the page bottom hid it, and the
+                rail made it fight the census for the same column. */}
             <aside className={RAIL}>
               <PayerIntelCensusPanel rows={board.census.rows} syncedAt={board.census.syncedAt} />
             </aside>
           </div>
+          <PayerIntelAiDock
+            generate={() => generatePayerIntelAiRead(lastInput.current)}
+            subject={result.facets.prefix ?? result.facets.payer ?? 'this search'}
+          />
         </>
       ) : null}
     </div>

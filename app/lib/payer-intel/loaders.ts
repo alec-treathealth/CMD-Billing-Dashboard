@@ -42,7 +42,6 @@ import {
   type PayerIntelSavedSearchRow,
 } from '../../../src/collections/payerIntelSearch';
 import {
-  CMD_EXPLORER_DEFAULT_SORT,
   CMD_EXPLORER_PAGE_SIZE,
   buildCmdCollectionsEmployerOptionsQuery,
   buildCmdExplorerQuery,
@@ -52,7 +51,9 @@ import {
   buildCohortCurveQueries,
   cmdExplorerSortValue,
   resolveCmdExplorerCursor,
+  resolveCmdExplorerSort,
   type CmdExplorerFilter,
+  type CmdExplorerSort,
   type CohortCurvePoint,
 } from '../../../src/collections/cmdExplorerQuery';
 import type { CmdExplorerRow } from '../../../src/collections/cmdExplorer';
@@ -350,15 +351,20 @@ export async function loadPayerIntelRating(
 // ── Charge-line grid (the Collections keyset grid behind THIS tab's gate) ────────────────────────
 
 /** One over-fetched keyset page: CMD_EXPLORER_PAGE_SIZE rows + the cursor for the next (null at
- *  end). Fixed Payment-Received-DESC order (the Collections default) — column sorting is a
- *  follow-up, not a v1.1 knob. Non-PHI projection by construction (CmdExplorerRow carries no
- *  identifier; dollar strip happens in the core's choke point). */
+ *  end). Non-PHI projection by construction (CmdExplorerRow carries no identifier; the dollar
+ *  strip happens at the core's choke point).
+ *
+ *  `sort` is re-clamped HERE through `resolveCmdExplorerSort` even though the action already
+ *  clamped it — the keyset cursor is built from the sort column's value, so an unvalidated column
+ *  would produce a cursor that walks a different ordering than the page it came from (silently
+ *  skipped and repeated rows, not an error). */
 export async function loadPayerIntelGridRows(
   filter: CmdExplorerFilter,
   cursor: PayerIntelGridCursor | null,
   entityIds: string[],
+  sortIn?: { column: string; direction: 'asc' | 'desc' },
 ): Promise<{ rows: CmdExplorerRow[]; nextCursor: PayerIntelGridCursor | null }> {
-  const sort = { ...CMD_EXPLORER_DEFAULT_SORT };
+  const sort = resolveCmdExplorerSort(sortIn as CmdExplorerSort | undefined);
   const resolved = resolveCmdExplorerCursor(cursor);
   const q = buildCmdExplorerQuery(resolved, filter, sort, CMD_EXPLORER_PAGE_SIZE + 1, entityIds);
   const res = await payerIntelReader().query<CmdExplorerRow>(q.sql, q.params);

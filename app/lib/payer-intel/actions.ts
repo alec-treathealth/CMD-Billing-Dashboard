@@ -21,6 +21,7 @@ import {
   type PayerIntelWatchResult,
 } from './core';
 import {
+  clampPayerIntelGridSort,
   clampPayerIntelWindowDays,
   type PayerIntelBoard,
   type PayerIntelEntityType,
@@ -52,11 +53,15 @@ export async function getPayerIntelBoard(
   }
 }
 
-/** One keyset page of the charge-line grid for the ACTIVE search (fixed Payment-Received-DESC).
- *  Dollar columns arrive already stripped for amounts-blind sessions. */
+/** One keyset page of the charge-line grid for the ACTIVE search.
+ *
+ *  ⚠ LOAD MORE + COLUMN SORT ONLY. Page 1 in the default order rides `runPayerIntelSearch`
+ *  (PayerIntelResult.grid) so a search costs ONE action — see that field's note for why the second
+ *  hop was removed. Dollar columns arrive already stripped for amounts-blind sessions. */
 export async function loadPayerIntelChargeRows(
   input: unknown,
   cursor: unknown,
+  sort?: unknown,
 ): Promise<{ ok: true; page: PayerIntelGridPage } | { ok: false }> {
   try {
     const c =
@@ -65,7 +70,12 @@ export async function loadPayerIntelChargeRows(
         : null;
     return {
       ok: true,
-      page: await getPayerIntelGridCore(buildPayerIntelRealDeps(), sanitizePayerIntelSearchInput(input), c),
+      page: await getPayerIntelGridCore(
+        buildPayerIntelRealDeps(),
+        sanitizePayerIntelSearchInput(input),
+        c,
+        clampPayerIntelGridSort(sort),
+      ),
     };
   } catch (err) {
     console.error('loadPayerIntelChargeRows failed', err instanceof Error ? err.message : '');

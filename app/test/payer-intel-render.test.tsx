@@ -29,6 +29,7 @@ import {
   PayerIntelTopGroups,
 } from '../components/payer-intel/result-sections';
 import { PayerIntelPointerBanner } from '../components/payer-intel/pointer-banner';
+import { PayerIntelAiDock } from '../components/payer-intel/ai-dock';
 import type {
   PayerIntelCensusRow,
   PayerIntelDeclinerItem,
@@ -401,6 +402,27 @@ test('drill rows: placement and CPT rows are clickable AND keyboard-reachable, w
   assert.doesNotMatch(inert, /cursor-pointer/);
 });
 
+test('ai dock: a non-modal dialog behind a sticky launcher, hidden until opened', () => {
+  // Third placement, and the ruling that settles it: the page bottom hid it, the rail made it
+  // fight the census for one column. NON-MODAL on purpose — the point is reading the answer
+  // against the tables it cites, so it must not trap focus or scrim the page.
+  const html = renderToStaticMarkup(
+    <PayerIntelAiDock generate={async () => ({ ok: false, reason: 'insufficient' })} subject="W29" />,
+  );
+  assert.match(html, /aria-expanded="false"/); // the launcher starts closed
+  assert.match(html, /aria-controls="pi-ai-dock"/);
+  assert.match(html, /role="dialog"/);
+  assert.match(html, /aria-modal="false"/);
+  assert.match(html, /aria-label="AI analysis of W29"/);
+  assert.match(html, /hidden=""/); // closed => hidden, not merely off-screen
+  // The launcher is nameable — an icon-only control would be unreachable by voice and by AT.
+  assert.match(html, />AI analysis</);
+  // The aggregates-only claim is a data-path statement and must survive every relocation.
+  assert.match(html, /no patient data leaves the server/);
+  // The idle copy lost its doubled em dash (visible in the 2026-08-17 screenshot).
+  assert.doesNotMatch(html, /— —/);
+});
+
 test('placement table (blind): dollar column renders em dash while ratios and flags survive', () => {
   const html = renderToStaticMarkup(
     <PayerIntelPlacementTable
@@ -418,7 +440,10 @@ test('placement table (blind): dollar column renders em dash while ratios and fl
 
 test('charge lines (blind): zero-paid column renders; charged renders em dash, never $', () => {
   const html = renderToStaticMarkup(<PayerIntelChargeLines combos={RESULT.combos} totalLines={558} />);
-  assert.match(html, /Zero-paid/);
+  // Header abbreviated to "Zero" and CPT·Rev merged into one cell so the table fits a half-width
+  // column without a horizontal scrollbar (2026-08-17 side-by-side ruling).
+  assert.match(html, /Zero</);
+  assert.match(html, /CPT · Rev/);
   assert.match(html, /4\.8%/);
   assert.doesNotMatch(html, /\$\d/);
 });

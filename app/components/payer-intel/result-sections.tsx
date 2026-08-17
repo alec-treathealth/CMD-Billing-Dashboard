@@ -10,13 +10,16 @@
  * bail under prefers-reduced-motion inside useCountUp.
  */
 import { useMemo, useState, type ReactNode } from 'react';
-import type {
-  PayerIntelComboItem,
-  PayerIntelFacetKey,
-  PayerIntelGridPage,
-  PayerIntelGroupItem,
-  PayerIntelPlacementItem,
-  PayerIntelResult,
+import {
+  PAYER_INTEL_GRID_DEFAULT_SORT,
+  type PayerIntelComboItem,
+  type PayerIntelFacetKey,
+  type PayerIntelGridPage,
+  type PayerIntelGridSort,
+  type PayerIntelGridSortColumn,
+  type PayerIntelGroupItem,
+  type PayerIntelPlacementItem,
+  type PayerIntelResult,
 } from '../../lib/payer-intel/contract';
 import { TAPE_PALETTE } from '../qualify/tokens';
 import { EM_DASH, fmtInt, fmtMoney, fmtPct, fmtPstTime } from './format';
@@ -306,8 +309,10 @@ export function PayerIntelTopGroups({
           onDrill={onDrillPayer}
         />
         <div className="md:pl-4">
+          {/* "Highest collected" (Alec, 2026-08-17) — the list is ordered by dollars collected,
+              and "Top facilities" read as a volume ranking. */}
           <GroupCard
-            title="Top facilities"
+            title="Highest collected"
             items={byFacility}
             drillLabel={(l) => `Narrow this search to facility ${l}`}
             onDrill={onDrillFacility}
@@ -325,11 +330,17 @@ export function PayerIntelPlacementTable({
   window,
   censusSyncedAt,
   cohortLabel,
+  onDrillFacility,
 }: {
   items: readonly PayerIntelPlacementItem[];
   window: { from: string; to: string; days: number };
   censusSyncedAt: string | null;
   cohortLabel: string;
+  /** A ROW IS A FILTER (Alec, 2026-08-17): clicking narrows the search to that facility, which
+   *  re-runs it — and since page 1 of the charge lines rides the search, the grid below filters
+   *  with it. The row carries `cursor-pointer` so the affordance is visible, and the first cell is
+   *  a real <button> so the keyboard path is not a mouse-only feature. */
+  onDrillFacility?: (facility: string) => void;
 }) {
   const asOfLive = `live · ${fmtPstTime(censusSyncedAt)}`;
   const asOfTrailing = `${window.days}d thru ${window.to}`;
@@ -343,42 +354,62 @@ export function PayerIntelPlacementTable({
           <table className="w-full border-collapse text-[13px]">
             <thead>
               <tr className="bg-teal50 text-left text-[10px] font-semibold uppercase tracking-wide text-ink600">
-                <th className="px-4 py-2">Facility</th>
+                <th className="px-2 py-2">Facility</th>
                 {/* PENDING ADMITS HAS NO COLUMN, deliberately. The Monday census sync drops every
                     non-admitted status before it writes, so the number does not exist anywhere in
                     the database — a column of em dashes read as "broken" twice in review. It comes
                     back when the aggregation stores pending and the census table gains the column,
                     not before. Open beds ARE joined (residential only; OP boards store 0 to mean
                     N/A — the 0078 contract). */}
-                <th className="px-4 py-2 text-right">
+                <th className="px-2 py-2 text-right">
                   Open beds
                   <span className="mt-0.5 block font-mono text-[9px] font-normal normal-case tracking-normal text-ink400">
                     {asOfLive}
                   </span>
                 </th>
-                <th className="px-4 py-2 text-right">
+                <th className="px-2 py-2 text-right">
                   % collected — {cohortLabel}
                   <span className="mt-0.5 block font-mono text-[9px] font-normal normal-case tracking-normal text-ink400">
                     {asOfTrailing}
                   </span>
                 </th>
-                <th className="px-4 py-2 text-right">
+                <th className="px-2 py-2 text-right">
                   $ paid / patient
                   <span className="mt-0.5 block font-mono text-[9px] font-normal normal-case tracking-normal text-ink400">
                     {asOfTrailing}
                   </span>
                 </th>
-                <th className="px-4 py-2 text-right">Lines</th>
+                <th className="px-2 py-2 text-right">Lines</th>
               </tr>
             </thead>
             <tbody>
               {items.map((p) => (
                 <tr
                   key={p.facility}
-                  className={p.flag !== null ? 'border-t border-line bg-[#FFFCF5] hover:bg-[#FDF6E7]' : 'border-t border-line hover:bg-teal50'}
+                  onClick={onDrillFacility ? () => onDrillFacility(p.facility) : undefined}
+                  className={[
+                    p.flag !== null
+                      ? 'border-t border-line bg-[#FFFCF5] hover:bg-[#FDF6E7]'
+                      : 'border-t border-line hover:bg-teal50',
+                    onDrillFacility ? 'cursor-pointer' : '',
+                  ].join(' ')}
                 >
-                  <td className="px-4 py-2.5 font-semibold text-ink900">
-                    {p.facility}
+                  <td className="max-w-[240px] truncate px-2 py-2 font-semibold text-ink900">
+                    {onDrillFacility ? (
+                      <button
+                        type="button"
+                        aria-label={`Narrow this search to ${p.facility}`}
+                        onClick={(e) => {
+                          e.stopPropagation(); // the row handler would otherwise fire twice
+                          onDrillFacility(p.facility);
+                        }}
+                        className="rounded text-left underline decoration-teal200 underline-offset-2 hover:text-teal700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500"
+                      >
+                        {p.facility}
+                      </button>
+                    ) : (
+                      p.facility
+                    )}
                     {p.flag === 'best_yield_full' ? (
                       <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-[#EFF1F0] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#5F6D6C]">
                         Full
@@ -390,7 +421,7 @@ export function PayerIntelPlacementTable({
                       </span>
                     ) : null}
                   </td>
-                  <td className="px-4 py-2.5 text-right font-mono tabular-nums">
+                  <td className="whitespace-nowrap px-2 py-2 text-right font-mono tabular-nums">
                     {p.openBeds !== null ? (
                       <>
                         {fmtInt(p.openBeds)}
@@ -402,9 +433,9 @@ export function PayerIntelPlacementTable({
                       EM_DASH
                     )}
                   </td>
-                  <td className="px-4 py-2.5 text-right font-mono tabular-nums">{fmtPct(p.pctCollected)}</td>
-                  <td className="px-4 py-2.5 text-right font-mono tabular-nums">{fmtMoney(p.paidPerPatient)}</td>
-                  <td className="px-4 py-2.5 text-right font-mono tabular-nums">{fmtInt(p.lineCount)}</td>
+                  <td className="px-2 py-2 text-right font-mono tabular-nums">{fmtPct(p.pctCollected)}</td>
+                  <td className="whitespace-nowrap px-2 py-2 text-right font-mono tabular-nums">{fmtMoney(p.paidPerPatient)}</td>
+                  <td className="px-2 py-2 text-right font-mono tabular-nums">{fmtInt(p.lineCount)}</td>
                 </tr>
               ))}
             </tbody>
@@ -486,24 +517,41 @@ export function PayerIntelChargeLines({
           <table className="w-full border-collapse text-[13px]">
             <thead>
               <tr className="bg-teal50 text-left text-[10px] font-semibold uppercase tracking-wide text-ink600">
-                <th className="px-4 py-2">CPT</th>
-                <th className="px-4 py-2">Revenue</th>
-                <th className="px-4 py-2 text-right">Lines</th>
-                <th className="px-4 py-2 text-right">Charged</th>
-                <th className="px-4 py-2 text-right">% allowed</th>
-                <th className="px-4 py-2 text-right">% paid</th>
-                <th className="px-4 py-2 text-right">Zero-paid</th>
+                {/* CPT and revenue share ONE cell: the pair is the identity of the row, and two
+                    columns cost ~70px this table does not have once it sits half-width. */}
+                <th className="px-2 py-2">CPT · Rev</th>
+                <th className="px-2 py-2 text-right">Lines</th>
+                <th className="px-2 py-2 text-right">Charged</th>
+                <th className="px-2 py-2 text-right">% alw</th>
+                <th className="px-2 py-2 text-right">% paid</th>
+                <th className="px-2 py-2 text-right">Zero</th>
               </tr>
             </thead>
             <tbody>
               {combos.map((c) => (
-                <tr key={`${c.cpt ?? '·'}-${c.revenue ?? '·'}`} className="border-t border-line hover:bg-teal50">
-                  <td className="px-4 py-2 font-mono">
+                /* THE WHOLE ROW IS THE FILTER (Alec, 2026-08-17), not just the CPT cell: clicking
+                   narrows the search to this CPT × revenue pairing, which re-runs it — and since
+                   page 1 of the charge lines rides the search, the grid below filters with it.
+                   `cursor-pointer` makes the affordance visible; the CPT cell stays a real
+                   <button> so keyboard users have the same path, and its click stops propagating
+                   so the row handler cannot fire twice. */
+                <tr
+                  key={`${c.cpt ?? '·'}-${c.revenue ?? '·'}`}
+                  onClick={onDrillCombo ? () => onDrillCombo(c.cpt, c.revenue) : undefined}
+                  className={[
+                    'border-t border-line hover:bg-teal50',
+                    onDrillCombo ? 'cursor-pointer' : '',
+                  ].join(' ')}
+                >
+                  <td className="whitespace-nowrap px-2 py-2 font-mono">
                     {onDrillCombo ? (
                       <button
                         type="button"
                         aria-label={`Narrow this search to ${c.cpt ?? 'no CPT'} with revenue code ${c.revenue ?? 'none'}`}
-                        onClick={() => onDrillCombo(c.cpt, c.revenue)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDrillCombo(c.cpt, c.revenue);
+                        }}
                         className="rounded font-mono underline decoration-teal200 underline-offset-2 hover:text-teal700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500"
                       >
                         {c.cpt ?? EM_DASH}
@@ -511,13 +559,13 @@ export function PayerIntelChargeLines({
                     ) : (
                       (c.cpt ?? EM_DASH)
                     )}
+                    <span className="text-ink400"> · {c.revenue ?? EM_DASH}</span>
                   </td>
-                  <td className="px-4 py-2 font-mono">{c.revenue ?? EM_DASH}</td>
-                  <td className="px-4 py-2 text-right font-mono tabular-nums">{fmtInt(c.count)}</td>
-                  <td className="px-4 py-2 text-right font-mono tabular-nums">{fmtMoney(c.charge)}</td>
-                  <td className="px-4 py-2 text-right font-mono tabular-nums">{fmtPct(c.pctAllowed)}</td>
-                  <td className="px-4 py-2 text-right font-mono tabular-nums">{fmtPct(c.pctPaid)}</td>
-                  <td className="px-4 py-2 text-right font-mono tabular-nums">{fmtPct(c.pctZeroPaid)}</td>
+                  <td className="px-2 py-2 text-right font-mono tabular-nums">{fmtInt(c.count)}</td>
+                  <td className="whitespace-nowrap px-2 py-2 text-right font-mono tabular-nums">{fmtMoney(c.charge)}</td>
+                  <td className="px-2 py-2 text-right font-mono tabular-nums">{fmtPct(c.pctAllowed)}</td>
+                  <td className="px-2 py-2 text-right font-mono tabular-nums">{fmtPct(c.pctPaid)}</td>
+                  <td className="px-2 py-2 text-right font-mono tabular-nums">{fmtPct(c.pctZeroPaid)}</td>
                 </tr>
               ))}
             </tbody>
@@ -545,10 +593,57 @@ function fmtPctStr(v: string | null): string {
 /** Row-level charge lines, keyset-paged, newest payment first — the Collections grid experience.
  *  No identifier columns (PHI reveal is a follow-up); dollar cells arrive already stripped for
  *  amounts-blind viewers and render em dashes. */
+/** One sortable column header. `aria-sort` is on the <th> (where AT expects it) while the button
+ *  inside carries the action and the accessible name — a <th> with an onClick would be a
+ *  mouse-only control, which is the failure this pattern exists to avoid. */
+function SortableTh({
+  column,
+  label,
+  sort,
+  onSort,
+  align = 'left',
+}: {
+  column: PayerIntelGridSortColumn;
+  label: string;
+  sort: PayerIntelGridSort;
+  onSort?: (next: PayerIntelGridSort) => void;
+  align?: 'left' | 'right';
+}) {
+  const active = sort.column === column;
+  const dir = active ? sort.direction : null;
+  const cls = align === 'right' ? 'px-3 py-2 text-right' : 'px-3 py-2';
+  if (!onSort) return <th className={cls}>{label}</th>;
+  return (
+    <th className={cls} aria-sort={dir === null ? 'none' : dir === 'asc' ? 'ascending' : 'descending'}>
+      <button
+        type="button"
+        // First click on a new column sorts DESC (biggest/newest first — what a reader wants from
+        // money and dates); clicking the active column flips it.
+        onClick={() => onSort({ column, direction: active && sort.direction === 'desc' ? 'asc' : 'desc' })}
+        aria-label={`Sort by ${label}${dir === 'desc' ? ', ascending' : ', descending'}`}
+        className={[
+          'inline-flex items-center gap-1 rounded uppercase tracking-wide hover:text-teal700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal500',
+          active ? 'text-teal700' : '',
+        ].join(' ')}
+      >
+        {label}
+        <span aria-hidden className={active ? '' : 'opacity-30'}>
+          {dir === 'asc' ? '▲' : '▼'}
+        </span>
+      </button>
+    </th>
+  );
+}
+
+/** Row-level charge lines, keyset-paged — the Collections grid experience behind this tab's gate.
+ *  No identifier columns (PHI reveal is a follow-up); dollar cells arrive already stripped for
+ *  amounts-blind viewers and render em dashes. */
 export function PayerIntelGridTable({
   page,
   loading,
   failed = false,
+  sort = PAYER_INTEL_GRID_DEFAULT_SORT,
+  onSort,
   onRetry,
   onLoadMore,
 }: {
@@ -558,17 +653,19 @@ export function PayerIntelGridTable({
    *  the pre-fix section printed "Loading charge lines…" through both, so a dead request was
    *  indistinguishable from a slow one and the user had nothing to click. */
   failed?: boolean;
+  sort?: PayerIntelGridSort;
+  /** Absent = the headers render as plain text. Sorting refetches page 1 in the new order; the
+   *  keyset cursor is rebuilt from it, so a stale cursor can never walk the previous ordering. */
+  onSort?: (next: PayerIntelGridSort) => void;
   onRetry?: () => void;
   onLoadMore: () => void;
 }) {
   return (
     <section aria-label="Charge lines" data-pi-section="grid">
-      <div className="mb-2 flex items-baseline gap-2.5 px-0.5">
-        <h2 className="font-head text-[17px] font-medium tracking-tight text-ink900">Charge lines</h2>
-        <span className="font-mono text-[10px] font-medium uppercase tracking-wider text-ink400">
-          row-level detail · newest payment first
-        </span>
-      </div>
+      <SectionHead
+        title="Charge lines"
+        meta={`row-level detail · ${page?.rows.length ?? 0} shown`}
+      />
       {failed && !loading ? (
         <div
           className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-surface px-4 py-3 text-sm text-ink600"
@@ -599,18 +696,20 @@ export function PayerIntelGridTable({
             <table className="w-full border-collapse text-[13px]">
               <thead>
                 <tr className="bg-teal50 text-left text-[10px] font-semibold uppercase tracking-wide text-ink600">
-                  <th className="px-3 py-2">Charge From</th>
-                  <th className="px-3 py-2">Payment Received</th>
+                  <SortableTh column="charge_date" label="Charge From" sort={sort} onSort={onSort} />
+                  <SortableTh column="payment_received" label="Payment Received" sort={sort} onSort={onSort} />
+                  {/* CPT / Revenue / Payer / Facility / Employer are NOT sortable — the keyset
+                      cursor is built from the sort column, and these have no index to walk. */}
                   <th className="px-3 py-2">CPT</th>
                   <th className="px-3 py-2">Revenue</th>
                   <th className="px-3 py-2">Primary Payer</th>
                   <th className="px-3 py-2">Facility</th>
                   <th className="px-3 py-2">Employer</th>
-                  <th className="px-3 py-2 text-right">Charged</th>
-                  <th className="px-3 py-2 text-right">Allowed</th>
-                  <th className="px-3 py-2 text-right">% Allowed</th>
-                  <th className="px-3 py-2 text-right">Ins. Paid</th>
-                  <th className="px-3 py-2 text-right">% Paid</th>
+                  <SortableTh column="charge_amount" label="Charged" sort={sort} onSort={onSort} align="right" />
+                  <SortableTh column="allowed_amount" label="Allowed" sort={sort} onSort={onSort} align="right" />
+                  <SortableTh column="pct_allowed" label="% Allowed" sort={sort} onSort={onSort} align="right" />
+                  <SortableTh column="insurance_payments" label="Ins. Paid" sort={sort} onSort={onSort} align="right" />
+                  <SortableTh column="pct_paid" label="% Paid" sort={sort} onSort={onSort} align="right" />
                 </tr>
               </thead>
               <tbody>

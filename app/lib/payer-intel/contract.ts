@@ -278,6 +278,49 @@ export interface PayerIntelGridPage {
   nextCursor: PayerIntelGridCursor | null;
 }
 
+/**
+ * The charge-line columns a viewer may sort by, and the ONLY ones the header renders as buttons.
+ *
+ * This is the Collections allowlist (`CMD_EXPLORER_SORTABLE_COLUMNS`) restated client-side so a
+ * Client Component never imports the query module. CPT / revenue / payer / facility / employer are
+ * absent ON PURPOSE and must stay absent: the keyset cursor is built from the sort column's value,
+ * so a column with no matching index turns every page fetch into a full sort of the tenant slice.
+ * Adding one here without adding its index is a latency regression that only shows up in
+ * production.
+ */
+export const PAYER_INTEL_GRID_SORTABLE = [
+  'payment_received',
+  'charge_date',
+  'charge_amount',
+  'allowed_amount',
+  'pct_allowed',
+  'pct_paid',
+  'insurance_payments',
+  'patient_balance_due',
+] as const;
+export type PayerIntelGridSortColumn = (typeof PAYER_INTEL_GRID_SORTABLE)[number];
+export interface PayerIntelGridSort {
+  column: PayerIntelGridSortColumn;
+  direction: 'asc' | 'desc';
+}
+/** Newest payment first — the Collections default, and what the embedded first page always uses. */
+export const PAYER_INTEL_GRID_DEFAULT_SORT: PayerIntelGridSort = {
+  column: 'payment_received',
+  direction: 'desc',
+};
+
+/** Clamp an untrusted sort to the allowlist. Returns the default rather than throwing: a sort is a
+ *  view preference, and a stale/garbage one should show the grid, not an error. */
+export function clampPayerIntelGridSort(value: unknown): PayerIntelGridSort {
+  if (typeof value !== 'object' || value === null) return { ...PAYER_INTEL_GRID_DEFAULT_SORT };
+  const v = value as { column?: unknown; direction?: unknown };
+  const column = (PAYER_INTEL_GRID_SORTABLE as readonly string[]).includes(String(v.column))
+    ? (v.column as PayerIntelGridSortColumn)
+    : PAYER_INTEL_GRID_DEFAULT_SORT.column;
+  const direction = v.direction === 'asc' || v.direction === 'desc' ? v.direction : PAYER_INTEL_GRID_DEFAULT_SORT.direction;
+  return { column, direction };
+}
+
 // ── AI cohort read ───────────────────────────────────────────────────────────────────────────────
 
 export type PayerIntelAiSignalTone = 'ok' | 'watch' | 'risk';
