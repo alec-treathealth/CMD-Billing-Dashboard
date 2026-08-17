@@ -187,6 +187,23 @@ test('saved-search card: resolution status is meta text and degraded re-runs say
   assert.match(html, /aria-pressed="true"/);
 });
 
+const GRID_ROW = {
+  id: 15,
+  chargeDate: '2026-07-21',
+  paymentReceived: '2026-08-18',
+  cpt: 'H0035',
+  revenue: '0913',
+  payer: 'AETNA',
+  facility: 'LONESTAR MENTAL HEALTH LLC',
+  employerName: null,
+  chargeAmount: null,
+  allowedAmount: null,
+  insurancePayments: null,
+  patientBalanceDue: null,
+  pctAllowed: '20.06',
+  pctPaid: '86.45',
+};
+
 const RESULT: PayerIntelResult = {
   facets: {
     payer: 'AETNA',
@@ -320,6 +337,70 @@ test('grid table: a failed load says so and offers Retry — never a spinner, ne
   assert.doesNotMatch(pending, /Retry/);
 });
 
+test('grid table: sortable headers carry aria-sort and flip direction; identifiers stay unsortable', () => {
+  const page = {
+    rows: [],
+    nextCursor: null,
+  };
+  const html = renderToStaticMarkup(
+    <PayerIntelGridTable
+      page={{ ...page, rows: [GRID_ROW] }}
+      loading={false}
+      sort={{ column: 'pct_paid', direction: 'asc' }}
+      onSort={() => {}}
+      onLoadMore={() => {}}
+    />,
+  );
+  // The ACTIVE column announces its direction; the rest announce "none".
+  assert.match(html, /aria-sort="ascending"/);
+  assert.match(html, /aria-sort="none"/);
+  // Clicking the active ascending column offers descending next.
+  assert.match(html, /aria-label="Sort by % Paid, descending"/);
+  // A fresh column starts descending (newest/biggest first).
+  assert.match(html, /aria-label="Sort by Charged, descending"/);
+  // ⚠ Identifier/text columns must NEVER become sort buttons: the keyset cursor is built from the
+  // sort column and these have no index to walk.
+  assert.doesNotMatch(html, /Sort by CPT/);
+  assert.doesNotMatch(html, /Sort by Facility/);
+  assert.doesNotMatch(html, /Sort by Employer/);
+  assert.doesNotMatch(html, /Sort by Primary Payer/);
+  // Without onSort the headers are plain text, not dead buttons.
+  const plain = renderToStaticMarkup(
+    <PayerIntelGridTable page={{ ...page, rows: [GRID_ROW] }} loading={false} onLoadMore={() => {}} />,
+  );
+  assert.doesNotMatch(plain, /aria-sort/);
+  assert.doesNotMatch(plain, /Sort by/);
+});
+
+test('drill rows: placement and CPT rows are clickable AND keyboard-reachable, with a hand cursor', () => {
+  // Alec, 2026-08-17: the rows must filter the charge lines when clicked and LOOK clickable. The
+  // row carries the pointer + onClick for the mouse; the first cell stays a real <button> so this
+  // is not a mouse-only feature.
+  const placement = renderToStaticMarkup(
+    <PayerIntelPlacementTable
+      items={RESULT.placement}
+      window={RESULT.window}
+      censusSyncedAt={null}
+      cohortLabel="W29"
+      onDrillFacility={() => {}}
+    />,
+  );
+  assert.match(placement, /cursor-pointer/);
+  assert.match(placement, /aria-label="Narrow this search to Lonestar Mental Health"/);
+
+  const combos = renderToStaticMarkup(
+    <PayerIntelChargeLines combos={RESULT.combos} totalLines={558} onDrillCombo={() => {}} />,
+  );
+  assert.match(combos, /cursor-pointer/);
+  assert.match(combos, /aria-label="Narrow this search to H0017 with revenue code 0158"/);
+
+  // No handler => no pointer affordance, so a non-interactive render never lies about being one.
+  const inert = renderToStaticMarkup(
+    <PayerIntelPlacementTable items={RESULT.placement} window={RESULT.window} censusSyncedAt={null} cohortLabel="W29" />,
+  );
+  assert.doesNotMatch(inert, /cursor-pointer/);
+});
+
 test('placement table (blind): dollar column renders em dash while ratios and flags survive', () => {
   const html = renderToStaticMarkup(
     <PayerIntelPlacementTable
@@ -401,14 +482,22 @@ test('view source: EVERY Server Action promise chain terminates in .catch', () =
   for (const name of ACTIONS) {
     const at = src.indexOf(`${name}(`, src.indexOf(`  ${name},`) + 1); // skip the import list
     assert.ok(at > 0, `${name} is not called in the view`);
-    // The chain has to close within its own callback — 1600 chars covers the longest one here.
-    const chain = src.slice(at, at + 1600);
+    // The chain has to close within its own callback — 2800 chars covers the longest one here
+    // (runSearch, whose success branch also seeds the grid, the sort and the board refresh).
+    const chain = src.slice(at, at + 2800);
     assert.match(chain, /\.catch\(/, `${name}'s promise chain has no .catch — a rejection would strand the UI`);
   }
   // searchPayerIntelEmployers is awaited rather than chained; it gets a try/catch instead.
   assert.match(src, /try \{\s*\n\s*const r = await searchPayerIntelEmployers/);
   // The failed grid renders an honest state rather than an eternal spinner.
   assert.match(src, /setGridFailed\(true\)/);
+
+  // The AI panel calls its own action from its own file — same rule, same reason (a rejection
+  // there would strand the button on "Reading…" forever).
+  const ai = readFileSync(join(here, '..', 'components', 'payer-intel', 'ai-panel.tsx'), 'utf8');
+  const aiAt = ai.indexOf('generate()');
+  assert.ok(aiAt > 0);
+  assert.match(ai.slice(aiAt, aiAt + 1200), /\.catch\(/);
 });
 
 test('facility resolution: the old collections path FORWARDS and the desk owns the entry link', () => {
