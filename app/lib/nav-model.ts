@@ -14,6 +14,7 @@ import {
   BookOpen,
   FileSearch,
   LayoutDashboard,
+  Radar,
   Target,
   Wallet,
   type LucideIcon,
@@ -68,6 +69,17 @@ const QUALIFY_LINK: NavLink = {
   isBeta: true,
 };
 
+// Payer Intel (2026-08-17): the consolidated Collections-search × Qualify-intelligence tab —
+// cross-tenant like Qualify, same role pair (super_admin + admissions_seat; the ruling lives in
+// lib/payer-intel/principal.ts). NOT ?view=-scoped. ⚠ The NAME already means the monthly intel.*
+// research cron elsewhere in this repo — this link is the PAGE, /api/cron/payer-intel is not it.
+const PAYER_INTEL_LINK: NavLink = {
+  href: '/payer-intel',
+  label: 'Payer Intel',
+  railIcon: Radar,
+  isBeta: true,
+};
+
 /** The tenant-scoped routes that carry a ?view= scope; the rest are view-agnostic (Qualify included:
  *  it is cross-tenant and pins its own scope). Billing Audit is PHI + tenant-scoped (BXR-only). */
 export const VIEW_SCOPED = new Set<string>([
@@ -77,13 +89,16 @@ export const VIEW_SCOPED = new Set<string>([
 ]);
 
 /**
- * The visible nav links for a role. admissions_seat is a single-surface persona — it sees ONLY
- * Qualify (every other route redirects it here anyway, so dead links are hidden). super_admin sees
- * Qualify plus the standard set; admin / user / unknown see the standard set with NO Qualify entry.
+ * The visible nav links for a role. admissions_seat WAS a single-surface persona; as of
+ * 2026-08-17 it sees Qualify + Payer Intel (both cross-tenant admissions surfaces that admit it —
+ * every other route still redirects it to Qualify, so those stay hidden). super_admin sees the
+ * full set with the two beta surfaces after Overview; admin / user / unknown see the standard set
+ * with neither (both routes deny them server-side).
  */
 export function linksFor(role: Role | undefined): NavLink[] {
-  if (role === 'admissions_seat') return [QUALIFY_LINK];
-  if (role === 'super_admin') return [OVERVIEW, QUALIFY_LINK, COLLECTIONS, CLAIMS_AUDIT, CODE_REFERENCE];
+  if (role === 'admissions_seat') return [QUALIFY_LINK, PAYER_INTEL_LINK];
+  if (role === 'super_admin')
+    return [OVERVIEW, QUALIFY_LINK, PAYER_INTEL_LINK, COLLECTIONS, CLAIMS_AUDIT, CODE_REFERENCE];
   return [...BASE_LINKS];
 }
 

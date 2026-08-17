@@ -141,8 +141,8 @@ test('rail: Beta reads as a badge when expanded and a dot when collapsed', () =>
 
   const collapsed = render({ role: 'super_admin', expanded: false });
   assert.ok(!collapsed.includes('q-beta-badge'));
-  // Two Beta surfaces (Qualify + Claims Desk) → two collapsed dot markers.
-  assert.equal(collapsed.match(/rounded-full bg-coral400/g)?.length, 2);
+  // Three Beta surfaces (Qualify + Payer Intel + Claims Desk) → three collapsed dot markers.
+  assert.equal(collapsed.match(/rounded-full bg-coral400/g)?.length, 3);
 });
 
 test('rail: expanding widens the panel but never the reserved footprint', () => {

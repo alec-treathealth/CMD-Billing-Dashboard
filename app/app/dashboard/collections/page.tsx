@@ -13,6 +13,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { CollectionsView } from '@/components/dashboard';
 import { DataFreshness } from '@/components/dashboard/data-freshness';
+import { PayerIntelPointerBanner } from '@/components/payer-intel/pointer-banner';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
 import { listGridViews, loadCmdReport } from '@/lib/actions';
@@ -79,6 +80,10 @@ export default async function CollectionsPage({
           </Link>
         ) : null}
       </header>
+      {/* Payer Intel pointer (2026-08-17) — non-blocking, and rendered ONLY for the one Collections
+          role that can actually open /payer-intel (super_admin; admin/user are denied there, and a
+          banner to a door that won't open is worse than none). DOM omission, never CSS-hidden. */}
+      {access.access.role === 'super_admin' ? <PayerIntelPointerBanner from="collections" /> : null}
       <CollectionsView
         view={view}
         canRevealPhi={access.access.canRevealPhi}
