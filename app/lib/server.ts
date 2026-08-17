@@ -3348,11 +3348,25 @@ export const cmdExplorerCollectionsEmployers = unstable_cache(
  * lands), so re-asking per request would be pure waste — and the negative answer is the expensive
  * one to compute, which is also the one served most often before cutover.
  */
+export type CmdEmployerCoverage = {
+  /** ANY selected tenant has employer values — gates whether the segment/type-ahead is shown. */
+  hasEmployerData: boolean;
+  /** EVERY selected tenant has them — gates the "Individual" LABEL. False in Consolidated while
+   *  Indigo carries none, so an Indigo blank renders '—' instead of asserting "no employer". */
+  allHaveEmployerData: boolean;
+};
+
 export const cmdExplorerEmployerCoverage = unstable_cache(
-  async (entityIds: string[]): Promise<boolean> => {
+  async (entityIds: string[]): Promise<CmdEmployerCoverage> => {
     const { sql, params } = buildCmdEmployerCoverageQuery(entityIds);
-    const { rows } = await readerExecutor().query<{ has_employer_data: boolean }>(sql, params);
-    return rows[0]?.has_employer_data === true;
+    const { rows } = await readerExecutor().query<{
+      has_employer_data: boolean;
+      all_have_employer_data: boolean;
+    }>(sql, params);
+    return {
+      hasEmployerData: rows[0]?.has_employer_data === true,
+      allHaveEmployerData: rows[0]?.all_have_employer_data === true,
+    };
   },
   ['cmd-explorer-employer-coverage'],
   { revalidate: 3600, tags: ['cmd-collections-employers'] },

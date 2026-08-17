@@ -553,11 +553,28 @@ export function buildCmdEmployerOptionsQuery(
  * answer (a full scan finding nothing), and that is precisely the state this exists to detect.
  */
 export function buildCmdEmployerCoverageQuery(entityIds: string[]): { sql: string; params: unknown[] } {
+  // TWO booleans, because the coverage question has two different answers and they were conflated:
+  //
+  //   has_employer_data — does ANY selected tenant have employer values? Gates whether the
+  //                       All/Employer/Individual segment and the type-ahead are shown at all.
+  //   all_have_employer_data — does EVERY selected tenant have them? Gates the "Individual" LABEL.
+  //
+  // ⚠ WHY THE SECOND ONE EXISTS (2026-08-17). A blank employer means "not yet populated", never
+  // "this patient has no employer" — Alec's ruling. In CONSOLIDATED view the old single flag was
+  // computed across BOTH tenants at once, so BXR's employers flipped it true and every blank INDIGO
+  // cell then rendered "Individual". That is false for all of them: Indigo's facilities do not enter
+  // an employer in CMD at all, so their column is structurally empty rather than meaningfully blank.
+  // Ruled 2026-08-17: an Indigo row shows a DASH. With these split, Consolidated shows '—' (Indigo
+  // drags `all` false) while the filter itself stays available (BXR keeps `has` true).
   return {
     sql:
       'select exists(select 1 from collections.cmd_explorer_rows ' +
       'where business_entity_id = any($1::uuid[]) ' +
-      "and employer_name is not null and employer_name <> '') as has_employer_data",
+      "and employer_name is not null and employer_name <> '') as has_employer_data, " +
+      '(select count(distinct business_entity_id) from collections.cmd_explorer_rows ' +
+      'where business_entity_id = any($1::uuid[]) ' +
+      "and employer_name is not null and employer_name <> '') >= cardinality($1::uuid[]) " +
+      'as all_have_employer_data',
     params: [entityIds],
   };
 }

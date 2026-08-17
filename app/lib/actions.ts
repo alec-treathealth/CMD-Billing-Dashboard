@@ -2018,7 +2018,9 @@ export async function searchCollectionsEmployers(
   }
 }
 
-export type CmdEmployerCoverageResult = { ok: true; hasEmployerData: boolean } | { ok: false };
+export type CmdEmployerCoverageResult =
+  | { ok: true; hasEmployerData: boolean; allHaveEmployerData: boolean }
+  | { ok: false };
 
 /**
  * Whether the caller's tenant has any employer data yet — gates the All/Employer/Individual toggle.
@@ -2037,7 +2039,8 @@ export async function loadCollectionsEmployerCoverage(
   const entityIds = await viewEntityScope(view);
   if (entityIds === null) return { ok: false };
   try {
-    return { ok: true, hasEmployerData: await cmdExplorerEmployerCoverage(entityIds) };
+    const cov = await cmdExplorerEmployerCoverage(entityIds);
+    return { ok: true, hasEmployerData: cov.hasEmployerData, allHaveEmployerData: cov.allHaveEmployerData };
   } catch {
     return { ok: false };
   }

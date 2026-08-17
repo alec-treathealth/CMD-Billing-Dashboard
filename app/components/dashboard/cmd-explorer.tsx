@@ -111,6 +111,8 @@ import {
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
 import { deriveGridLayout } from '../../../src/collections/gridViewLayout';
+import { facilityCodesForEntity } from '../../../src/collections/cmdCustomers';
+import { INDIGO_ENTITY_ID } from '../../../src/tenants';
 import {
   isSufficientForAi,
   parseAiSections,
@@ -164,6 +166,20 @@ const MIN_SEARCH_LEN = 3;
  *  the helper text — the server enforces the real ceiling and returns the authoritative number, so
  *  a drift here misleads the reader but cannot widen the decrypt. */
 const NAME_SEARCH_CAP = 2000;
+
+/**
+ * Indigo's facility codes, for deciding what a BLANK employer cell means on a per-ROW basis.
+ *
+ * Indigo does not enter an employer name in CMD at all, so its column is structurally empty rather
+ * than "not yet populated" — the row says so explicitly instead of showing a bare dash that reads
+ * as an app failure. Derived from the SHARED roster (src/collections/cmdCustomers.ts) rather than a
+ * second hardcoded list, so onboarding or retiring an Indigo facility cannot desync this.
+ *
+ * Facility is the only tenant signal the grid row carries — business_entity_id is not projected —
+ * and one CMD customer IS one facility, so the mapping is exact. Set for O(1) lookup per cell.
+ */
+const INDIGO_FACILITY_CODES = new Set(facilityCodesForEntity(INDIGO_ENTITY_ID));
+
 
 const COLUMN_LABEL: Record<string, string> = Object.fromEntries(COLUMNS.map((c) => [c.key, c.label]));
 const IS_PHI = new Set<string>(COLUMNS.filter((c) => c.phi).map((c) => c.key));
@@ -403,6 +419,10 @@ export function CmdCollectionsExplorer({
   const [employerSelection, setEmployerSelection] = useState<string[]>([]);
   // Whether ANY employer value exists in this tenant scope — see the coverage effect below.
   const [hasEmployerData, setHasEmployerData] = useState(false);
+  // EVERY tenant in scope has employer data. Distinct from hasEmployerData on purpose: in
+  // Consolidated, BXR has employers and Indigo structurally does not, so `has` is true (keep the
+  // filter available) while `all` is false (a blank must not claim "Individual").
+  const [allHaveEmployerData, setAllHaveEmployerData] = useState(false);
   // Employer type-ahead is SERVER-driven (the vocabulary is far too large to load whole, unlike
   // the ~260-entry facility/payer lists). The picker reports the typed query; we debounce it and
   // hand back whatever the server returned, unfiltered — re-filtering client-side would drop rows
@@ -757,7 +777,10 @@ export function CmdCollectionsExplorer({
     let live = true;
     loadCollectionsEmployerCoverage(view)
       .then((r) => {
-        if (live) setHasEmployerData(r.ok ? r.hasEmployerData : false);
+        if (live) {
+          setHasEmployerData(r.ok ? r.hasEmployerData : false);
+          setAllHaveEmployerData(r.ok ? r.allHaveEmployerData : false);
+        }
       })
       .catch(() => {
         if (live) setHasEmployerData(false);
@@ -1283,7 +1306,25 @@ export function CmdCollectionsExplorer({
     // em dash, which correctly reads as "no value" rather than as a classification.
     // Nothing is ever written to the row to mark it individual (ruled 2026-08-15) — this label is
     // derived at render time only.
-    if (key === 'employer_name') return v ?? (hasEmployerData ? 'Individual' : '—');
+    // A blank employer means THREE different things, and the row's own tenant is what tells them
+    // apart. RULED BY ALEC 2026-08-17:
+    //
+    //   Indigo row  -> "No Employer Name in CMD". Indigo's facilities do not enter an employer at
+    //                  the source AT ALL, so the column is structurally empty. A bare dash reads as
+    //                  a UI failure; naming the source makes it clear the app is not dropping data.
+    //   BXR row     -> "Individual" — a real classification: the policy has no plan sponsor. Only
+    //                  valid once employer data EXISTS for that tenant, otherwise every row would
+    //                  be labelled from a book that is simply not populated yet.
+    //   otherwise   -> the ordinary em dash, which reads as "no value" rather than a claim.
+    //
+    // Decided per ROW, not per view, so Consolidated stays honest in both directions: an Indigo row
+    // says why it is empty while a BXR row beside it can still say "Individual".
+    // Nothing is ever written to the row to mark it (ruled 2026-08-15) — derived at render only.
+    if (key === 'employer_name') {
+      if (v !== null && v !== '') return v;
+      if (INDIGO_FACILITY_CODES.has(row.facility)) return 'No Employer Name in CMD';
+      return allHaveEmployerData || hasEmployerData ? 'Individual' : '—';
+    }
     return v ?? '—';
   }
 

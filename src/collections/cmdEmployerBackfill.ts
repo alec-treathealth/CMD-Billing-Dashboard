@@ -535,6 +535,32 @@ async function main(): Promise<void> {
   }
 
   if (!url) throw new Error('CMD_ROLLUP_WRITER_DATABASE_URL not set (required for --commit; never hardcode or log it)');
+
+  // ⚠ RESOLVE THE TARGETS FIRST, AND HONOUR --key ON THE WRITE PATH.
+  //
+  // This block exists because the first version did NOT: --key was wired into the dry run only, so
+  // --commit silently fell back to plan.pairs (the FINGERPRINT map) and wrote 5,439 rows where the
+  // charge-identity key had just measured 94,605. The data written was correct — a fingerprint match
+  // is exact — but the run was silently PARTIAL, which is the one failure mode this script's own
+  // documentation warns is indistinguishable from success afterwards. A dry run and a commit that
+  // resolve their targets differently is a trap; they now share this resolution.
+  let pairs = plan.pairs;
+  if (key === 'charge') {
+    const readUrl = process.env.CLAIMS_READER_DATABASE_URL?.trim();
+    if (!readUrl) {
+      throw new Error('CLAIMS_READER_DATABASE_URL not set (required for --key=charge: the charge-identity match reads six columns the writer role deliberately cannot SELECT)');
+    }
+    const readPool = makeClient(readUrl);
+    try {
+      pairs = await withTenant(readPool, entityId, (client) =>
+        resolveChargeKeyTargets(client, plan.chargeKeys, entityId),
+      );
+    } finally {
+      await readPool.end();
+    }
+    console.log(`\n  charge identities  : ${plan.chargeKeys.size}`);
+    console.log(`  resolved to rows   : ${pairs.size}`);
+  }
   const pool = makeClient(url);
   try {
     // ⚠ withTenant IS MANDATORY, NOT TIDINESS. collections.cmd_explorer_rows has RLS ENABLED and
@@ -551,14 +577,15 @@ async function main(): Promise<void> {
     // backend before any query runs, which matters on the 6543 transaction pooler where a different
     // backend can serve each transaction.
     const updated = await withTenant(pool, entityId, (client) =>
-      applyEmployerBackfill(client, plan.pairs, entityId),
+      applyEmployerBackfill(client, pairs, entityId),
     );
-    const rate = plan.pairs.size === 0 ? 0 : Math.round((updated / plan.pairs.size) * 1000) / 10;
-    console.log(`\n  rows updated     : ${updated} of ${plan.pairs.size} pairs (${rate}%)`);
-    if (updated < plan.pairs.size) {
-      console.log('  NOTE: the shortfall is pairs whose fingerprint is not in this tenant, or whose');
-      console.log('  row already had an employer. Both are expected in small numbers; a LARGE gap');
-      console.log('  means the CSV normalizes differently than the ingest did — investigate.');
+    const rate = pairs.size === 0 ? 0 : Math.round((updated / pairs.size) * 1000) / 10;
+    console.log(`\n  key              : ${key}`);
+    console.log(`  rows updated     : ${updated} of ${pairs.size} target rows (${rate}%)`);
+    if (updated < pairs.size) {
+      console.log('  NOTE: the shortfall is targets whose row already had an employer (the hourly');
+      console.log('  cron is fresher and is never overwritten), or that fall outside this tenant.');
+      console.log('  Re-running is safe and idempotent — it fills only what is still NULL.');
     }
   } finally {
     await pool.end();

@@ -29,6 +29,7 @@ import {
   deriveYield,
   type CmdExplorerFilter,
   type CmdExplorerSort,
+  buildCmdEmployerCoverageQuery,
   buildCmdExplorerNameCandidateCountQuery,
   buildCmdExplorerNameCandidatesQuery,
 } from '../src/collections/cmdExplorerQuery.js';
@@ -1070,4 +1071,19 @@ test('name CANDIDATES query projects ONLY id + ciphertext, and caps in SQL', () 
   assert.match(q.sql, /limit \$\d+/);
   assert.ok(q.params.includes(2000), 'cap is a BOUND parameter');
   assert.match(q.sql, /e\.patient_name is not null/);
+});
+
+test('employer coverage returns TWO booleans — "any tenant" gates the filter, "every tenant" gates the label', () => {
+  const q = buildCmdEmployerCoverageQuery(['a1b2c3d4-0000-0000-0000-000000000001']);
+  // `has` gates VISIBILITY of the segment/type-ahead.
+  assert.match(q.sql, /as has_employer_data/);
+  // `all` gates the "Individual" LABEL. Conflating them is the 2026-08-17 bug: in Consolidated,
+  // BXR's employers made every blank INDIGO cell read "Individual" — false, because Indigo does not
+  // enter an employer in CMD at all. Split, Consolidated shows '—' while the filter stays usable.
+  assert.match(q.sql, /as all_have_employer_data/);
+  assert.match(q.sql, /count\(distinct business_entity_id\)/);
+  assert.match(q.sql, /cardinality\(\$1::uuid\[\]\)/, 'compares against the NUMBER of tenants in scope');
+  // Both halves must stay tenant-scoped to the SAME bound param — a second literal would let the
+  // two answers describe different tenant sets.
+  assert.equal(q.params.length, 1, 'exactly one bound param, reused by both halves');
 });
