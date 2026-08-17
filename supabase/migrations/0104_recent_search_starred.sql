@@ -75,7 +75,12 @@ begin
     raise exception 'set_qualify_search_starred: user, id and starred required' using errcode = 'check_violation';
   end if;
 
-  if p_starred and (
+  if p_starred
+      and not exists (
+        select 1 from claims.qualify_recent_search
+         where app_user_id = p_user and id = p_id and starred
+      )
+      and (
     select count(*) from claims.qualify_recent_search
      where app_user_id = p_user and starred
   ) >= 12 then
