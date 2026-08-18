@@ -275,6 +275,35 @@ export function buildPatientDirectoryInsert(
   };
 }
 
+
+/**
+ * Record that the sync RAN: advance the watermark, accumulate the counters, and stamp refreshed_at.
+ *
+ * Called on BOTH paths — after a batch, and on the zero-row scan that means "already caught up".
+ * The second call is the one that matters for the alarm: without it, `refreshed_at` only moves when
+ * there is new data, so a quiet feed is indistinguishable from a dead sync.
+ *
+ * Counters ACCUMULATE (`+ excluded`), so passing 0/0 stamps the time without disturbing the totals.
+ */
+async function touchDirectoryState(
+  write: DirectoryWriter,
+  watermark: number,
+  rowsScanned = 0,
+  namesInserted = 0,
+): Promise<void> {
+  await write.query(
+    `insert into collections.cmd_patient_directory_state
+            (singleton, last_row_id, rows_scanned, names_inserted, refreshed_at)
+          values (true, $1, $2, $3, now())
+     on conflict (singleton) do update
+          set last_row_id    = excluded.last_row_id,
+              rows_scanned   = collections.cmd_patient_directory_state.rows_scanned + excluded.rows_scanned,
+              names_inserted = collections.cmd_patient_directory_state.names_inserted + excluded.names_inserted,
+              refreshed_at   = excluded.refreshed_at`,
+    [watermark, rowsScanned, namesInserted],
+  );
+}
+
 /**
  * Bring the directory up to date with cmd_explorer_rows.
  *
@@ -334,6 +363,13 @@ export async function syncPatientDirectory(
     const scan = buildPatientDirectoryScanQuery(watermark, batch);
     const { rows } = await deps.read.query<DirectoryScanRow>(scan.sql, scan.params);
     if (rows.length === 0) {
+      // ⚠ STAMP refreshed_at ANYWAY. "Nothing to do" is a SUCCESSFUL run and must be recorded as
+      // one: the freshness alarm reads this column to decide whether the sync is still alive, and
+      // breaking out without touching it froze the timestamp for as long as the ingest was quiet.
+      // Overnight the CMD feed legitimately adds nothing for hours, so the alarm would have fired
+      // "the index last updated 3h ago" against a directory that was completely current — the
+      // always-on alarm this replaced, wearing the opposite disguise.
+      await touchDirectoryState(deps.write, watermark);
       stats.exhausted = true;
       break;
     }
@@ -357,17 +393,7 @@ export async function syncPatientDirectory(
     // The scan is ordered by id, so the last row carries the batch maximum.
     watermark = Number(rows[rows.length - 1]!.id);
     stats.last_row_id = watermark;
-    await deps.write.query(
-      `insert into collections.cmd_patient_directory_state
-              (singleton, last_row_id, rows_scanned, names_inserted, refreshed_at)
-            values (true, $1, $2, $3, now())
-       on conflict (singleton) do update
-            set last_row_id    = excluded.last_row_id,
-                rows_scanned   = collections.cmd_patient_directory_state.rows_scanned + excluded.rows_scanned,
-                names_inserted = collections.cmd_patient_directory_state.names_inserted + excluded.names_inserted,
-                refreshed_at   = excluded.refreshed_at`,
-      [watermark, rows.length, entries.length],
-    );
+    await touchDirectoryState(deps.write, watermark, rows.length, entries.length);
 
     if (rows.length < batch) {
       stats.exhausted = true;

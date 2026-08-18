@@ -763,12 +763,20 @@ export function CmdCollectionsExplorer({
           : `${r.matchedPatients.toLocaleString()} of ${r.patientsInScope.toLocaleString()} patients matched` +
             `${hasAnySearch ? ' — the grid also applies your other filters.' : '.'}`,
       );
-      // ⚠ WARN ON A STOPPED SYNC, NOT ON A NON-ZERO LAG. The sync runs hourly and ~6,000 charge
-      // lines land per day, so `lag > 0` is true for most of every hour on a perfectly healthy
-      // system — and nearly all of those lines belong to patients already indexed. Warning on it
-      // would put a scary sentence under almost every search and teach the user to ignore it.
-      // Three missed hourly syncs is a real fault, and then the row count says how big it is.
-      if (r.indexStaleMinutes > STALE_INDEX_MINUTES) {
+      // ⚠ IT TAKES BOTH NUMBERS, AND EACH ALONE WAS WRONG ONCE — this condition has been broken in
+      // both directions and the two failures are worth keeping side by side:
+      //
+      //   `lag > 0` alone           — fires on a HEALTHY system. ~6,000 lines land per day against
+      //                               an hourly sync, so lag is non-zero most of every hour, and
+      //                               nearly all of it is patients already indexed. Always-on.
+      //   `staleMinutes > N` alone  — fires on a QUIET system. The CMD feed adds nothing overnight,
+      //                               so the sync legitimately has no work and `refreshed_at` only
+      //                               moves when there IS work. Cries wolf every night.
+      //
+      // Together they are exact: unindexed rows EXIST and the sync has not collected them for three
+      // hourly cycles. A directory with nothing outstanding is current by definition, whenever it
+      // last ran; a sync that clears its backlog each hour is healthy, however big the backlog got.
+      if (r.indexLagRows > 0 && r.indexStaleMinutes > STALE_INDEX_MINUTES) {
         setNameNotice((prev) =>
           `${prev ?? ''} ⚠ The name index last updated ${Math.round(r.indexStaleMinutes / 60)}h ago ` +
           `(${r.indexLagRows.toLocaleString()} charge lines unindexed), so a recent patient may be missing.`.trim(),

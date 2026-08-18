@@ -3629,7 +3629,7 @@ export type CmdNameSearchResult =
        * Minutes since the directory sync last advanced. The sync runs hourly, so >180 means it has
        * failed roughly three times running.
        *
-       * ⚠ THIS IS THE ALARM, NOT `indexLagRows`. A partial directory is indistinguishable from a
+       * ⚠ NEITHER NUMBER IS THE ALARM ON ITS OWN — it takes BOTH, and each alone was wrong once. A partial directory is indistinguishable from a
        * complete one to the empty-guard, so a patient past the watermark reads as "no match" while
        * the UI promises the whole book — that is the silent miss this design exists to prevent. But
        * the FIRST version alarmed on lag > 0, which is true for most of every hour on a perfectly

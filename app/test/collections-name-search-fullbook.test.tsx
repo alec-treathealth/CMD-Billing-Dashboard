@@ -161,8 +161,12 @@ test('the index alarm fires on a STOPPED sync, not on a non-zero lag', () => {
   assert.match(body, /buildPatientDirectoryFreshnessQuery\(\)/);
   // A failed freshness probe reports 0 (= believed current), never a fabricated warning.
   assert.match(body, /indexStaleMinutes = 0;/);
-  assert.match(explorerSrc, /r\.indexStaleMinutes > STALE_INDEX_MINUTES/);
-  assert.doesNotMatch(explorerSrc, /r\.indexLagRows > 0/, 'lag alone must not be the trigger');
+  // ⚠ IT TAKES BOTH, AND EACH ALONE HAS ALREADY BEEN SHIPPED AND BEEN WRONG:
+  //   lag > 0 alone          -> fires on a HEALTHY system (lag is non-zero most of every hour)
+  //   staleMinutes > N alone -> fires on a QUIET system (the feed adds nothing overnight, so
+  //                             refreshed_at only advances when there is work to do)
+  // Conjunction is the only correct form, so the test pins the conjunction, not either half.
+  assert.match(explorerSrc, /r\.indexLagRows > 0 && r\.indexStaleMinutes > STALE_INDEX_MINUTES/);
   assert.match(explorerSrc, /const STALE_INDEX_MINUTES = 180;/);
 });
 

@@ -187,7 +187,7 @@ test('THE WATERMARK ADVANCES EVEN WHEN A BATCH INSERTS NOTHING', async () => {
   assert.equal(stats.rows_scanned, 2);
   assert.equal(stats.last_row_id, 2, 'the mark reached the last row SEEN, not the last row written');
   const stateWrites = db.writes.filter((w) => w.sql.includes('cmd_patient_directory_state'));
-  assert.equal(stateWrites.length, 2, 'committed after every batch, so a kill resumes mid-run');
+  assert.equal(stateWrites.length, 3, 'one per batch, plus the caught-up stamp that ends the run');
   assert.deepEqual(stateWrites.at(-1)!.params?.[0], 2);
 });
 
@@ -224,12 +224,21 @@ test('a fingerprint key that yields null THROWS before any work', async () => {
   assert.equal(db.writes.length, 0, 'it throws BEFORE writing anything');
 });
 
-test('an empty table is a clean, exhausted, zero-work run', async () => {
+test('an empty table is a clean, exhausted run that STILL records itself', async () => {
+  // ⚠ THIS TEST USED TO ASSERT `db.writes.length === 0` — "nothing scanned, nothing written, not
+  // even a state row" — and that assertion WAS the bug. It sounded like admirable restraint and it
+  // meant `refreshed_at` never advanced on a run with no work, so a quiet feed was indistinguishable
+  // from a dead sync and the freshness alarm fired against a perfectly current directory.
+  //
+  // A test can encode a defect as confidently as code can. Nothing about "no writes" was ever a
+  // requirement; it was an observation about the implementation, promoted to an assertion.
   const db = fakeDb([[]], '0');
   const stats = await syncPatientDirectory({ read: db.read, write: db.write, decrypt, fingerprint });
   assert.equal(stats.exhausted, true);
   assert.equal(stats.rows_scanned, 0);
-  assert.equal(db.writes.length, 0, 'nothing scanned, nothing written - not even a state row');
+  assert.equal(db.writes.length, 1, 'exactly one write: the "I ran, there was nothing to do" stamp');
+  assert.match(db.writes[0]!.sql, /cmd_patient_directory_state/);
+  assert.deepEqual(db.writes[0]!.params, [0, 0, 0]);
 });
 
 test('the sync resumes from the STORED watermark, not from zero', async () => {
@@ -237,4 +246,30 @@ test('the sync resumes from the STORED watermark, not from zero', async () => {
   const stats = await syncPatientDirectory({ read: db.read, write: db.write, decrypt, fingerprint, batch: 1 });
   assert.equal(stats.last_row_id, 501);
   assert.equal(stats.rows_scanned, 1, 'the first 500 rows were not re-scanned');
+});
+
+// -- 5. Freshness: "already caught up" is a SUCCESSFUL run and must be recorded ----------------
+
+test('a zero-row scan STILL stamps the state row', async () => {
+  // ⚠ IT DID NOT, AND THAT MADE THE FRESHNESS ALARM CRY WOLF EVERY NIGHT. The loop broke out on an
+  // empty scan before writing, so `refreshed_at` only advanced when there was new data. The CMD
+  // feed legitimately adds nothing overnight (measured: 0 rows in 3 hours at 03:30 Pacific), so a
+  // completely current directory would report itself hours stale and warn the user its search was
+  // incomplete. "Nothing to do" is a successful run.
+  const db = fakeDb([[]], '500');
+  const stats = await syncPatientDirectory({ read: db.read, write: db.write, decrypt, fingerprint });
+  assert.equal(stats.exhausted, true);
+  assert.equal(stats.rows_scanned, 0);
+  const stateWrites = db.writes.filter((w) => w.sql.includes('cmd_patient_directory_state'));
+  assert.equal(stateWrites.length, 1, 'the caught-up run records itself');
+  assert.deepEqual(stateWrites[0]!.params, [500, 0, 0], 'watermark held; counters add zero');
+});
+
+test('the counters ACCUMULATE, so a caught-up stamp cannot reset them', async () => {
+  const db = fakeDb([[row('1', 'm1', 'A')], []], '0');
+  await syncPatientDirectory({ read: db.read, write: db.write, decrypt, fingerprint, batch: 1 });
+  const stateWrites = db.writes.filter((w) => w.sql.includes('cmd_patient_directory_state'));
+  assert.equal(stateWrites.length, 2, 'one for the batch, one for the caught-up scan');
+  assert.match(stateWrites[0]!.sql, /rows_scanned\s*=\s*collections\.cmd_patient_directory_state\.rows_scanned \+ excluded/);
+  assert.deepEqual(stateWrites[1]!.params, [1, 0, 0], 'the final stamp adds nothing but the time');
 });
