@@ -197,8 +197,8 @@ export function buildPatientDirectoryFreshnessQuery(): { sql: string; params: un
     sql:
       'select coalesce((select max(id) from collections.cmd_explorer_rows), 0) ' +
       '     - coalesce((select last_row_id from collections.cmd_patient_directory_state), 0) as lag_rows, ' +
-      'coalesce(extract(epoch from (now() - (select refreshed_at ' +
-      '  from collections.cmd_patient_directory_state))) / 60, 0)::int as stale_minutes',
+      'coalesce(extract(epoch from (now() - (select completed_at ' +
+      '  from collections.cmd_patient_directory_state))) / 60, 999999)::int as stale_minutes',
     params: [],
   };
 }
@@ -365,7 +365,8 @@ export async function syncPatientDirectory(
             set last_row_id    = excluded.last_row_id,
                 rows_scanned   = collections.cmd_patient_directory_state.rows_scanned + excluded.rows_scanned,
                 names_inserted = collections.cmd_patient_directory_state.names_inserted + excluded.names_inserted,
-                refreshed_at   = excluded.refreshed_at`,
+                refreshed_at   = excluded.refreshed_at,
+                  completed_at   = null`,
       [watermark, rows.length, entries.length],
     );
 
@@ -375,6 +376,12 @@ export async function syncPatientDirectory(
     }
   }
 
-  stats.duration_ms = now() - startedMs;
+  if (stats.exhausted) {
+      await deps.write.query(
+        'update collections.cmd_patient_directory_state set completed_at = now() where singleton',
+        [],
+      );
+    }
+    stats.duration_ms = now() - startedMs;
   return stats;
 }

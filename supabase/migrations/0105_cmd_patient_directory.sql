@@ -124,7 +124,9 @@ create table if not exists collections.cmd_patient_directory_state (
   last_row_id    bigint      not null default 0,
   rows_scanned   bigint      not null default 0,
   names_inserted bigint      not null default 0,
-  refreshed_at   timestamptz not null default now()
+  refreshed_at   timestamptz not null default now(),
+  -- Set only when a scan reaches the source end; batch progress alone is not freshness.
+  completed_at   timestamptz
 );
 
 insert into collections.cmd_patient_directory_state (singleton) values (true)
