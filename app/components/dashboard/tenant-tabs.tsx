@@ -95,19 +95,38 @@ export function TenantTabs({ allowedViews }: { allowedViews?: DashboardView[] })
             className={[
               // ⚠ THESE WERE BORDERLESS BY REQUEST, AND THAT WAS REVERSED (Alec, 2026-08-18):
               // "put 2pt borders around Consolidated / BXR Consulting / Indigo Billing to make them
-              // more visible". The original ask was for borderless sub-tabs; carrying the active
-              // state on weight, ink and a soft tint alone turned out not to read as a CONTROL —
-              // nothing said "these are clickable" until you hovered one. So every tab now has a
-              // 2px stroke and the active one takes the brand accent, which keeps selection legible
-              // without going back to a pill-vs-plain-text distinction.
+              // more visible". Carrying the active state on weight, ink and a soft tint alone did
+              // not read as a CONTROL — nothing said "these are clickable" until you hovered one.
+              //
+              // ⚠ THE FIRST STROKE WAS INVISIBLE, WHICH MISSED THE POINT OF THE ASK ENTIRELY. It
+              // used `border-line` (#E4E9E6) on inactive tabs and `--brand-accent` on the active
+              // one. MEASURED against the #FBF8F4 page ground (WCAG 1.4.11 wants >=3:1 for the
+              // boundary of a control):
+              //
+              //     line          #E4E9E6   1.16:1   FAIL  <- a border you cannot see
+              //     brand-accent  #c8a24b   2.27:1   FAIL  <- BXR gold, on the ACTIVE tab
+              //     brand-accent  #1c8b82   3.92:1   pass  (consolidated)
+              //     brand-accent  #7c3aed   5.38:1   pass  (indigo)
+              //     ink400        #63756E   4.61:1   PASS
+              //     brand-ink     #135e5a / #1a1a2e / #5b2a9e   7.14 / 16.11 / 8.74   PASS
+              //
+              // A stroke that cannot be perceived is worse than no stroke: it looks addressed and is
+              // not. Both roles now use tokens clearing 3:1 on all THREE tenant themes, checked
+              // against the tab's own --brand-soft fill as well as the ground (the active tab sits
+              // on the tint, not on the ground).
+              //
+              // brand-ink is already the active tab's TEXT colour, so matching the border to it is
+              // more coherent than the accent was, not merely more compliant.
               //
               // The container gap went 1 -> 2 at the same time: at gap-1 two adjacent 2px strokes
               // sit 4px apart and read as one divided box rather than two tabs.
               'relative inline-flex items-center gap-2 rounded-lg border-2 px-4 py-2 text-[15px] transition-colors',
               'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)]/50',
               active
-                ? 'border-[var(--brand-accent)] bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)]'
-                : 'border-line font-medium text-muted-foreground hover:border-[var(--brand-accent)]/50 hover:bg-[var(--brand-soft)]/60 hover:text-ink900',
+                ? 'border-[var(--brand-ink)] bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)]'
+                // Hover must not REDUCE contrast: the old `--brand-accent/50` was fainter than the
+                // resting border, so moving the pointer onto a tab made its outline weaker.
+                : 'border-ink400 font-medium text-muted-foreground hover:border-[var(--brand-ink)] hover:bg-[var(--brand-soft)]/60 hover:text-ink900',
             ].join(' ')}
           >
             {/* Per-tenant swatch: `data-view` makes globals.css resolve THIS element's

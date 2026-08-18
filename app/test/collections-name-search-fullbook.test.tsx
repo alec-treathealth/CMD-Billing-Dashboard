@@ -101,9 +101,12 @@ test('BOTH halves of the pair are validated, and the pair is rebuilt not passed 
 });
 
 test('all three grid actions run the pair sanitizer, not just the grid page', () => {
-  // The grid, the summary and the cohort/refinement paths each build their own reader filter. A
-  // sanitizer wired into only one of them is how a name search ends up applying to the table but
-  // not to the totals above it.
+  // loadCmdReport, loadCmdReportGrouped and loadCmdSearchSummary each build their own reader filter.
+  // A sanitizer wired into only one of them is how a name search ends up applying to the table but
+  // not to the totals above it — or to the flat rows but not the grouped ones.
+  //
+  // The cohort loaders deliberately take NO grid filter (the cohort is defined by prefix + tenant
+  // alone, so a patient's lifetime sequence stays intact), which is why the count is three.
   const calls = actionsSrc.match(/applyPatientMembers\(filter, readerFilter\)/g) ?? [];
   assert.equal(calls.length, 3, 'grid + summary + cohort');
   const rowIdCalls = actionsSrc.match(/applyRowIds\(filter, readerFilter\)/g) ?? [];
@@ -145,17 +148,29 @@ test('the name result is wired into BOTH dependency lists', () => {
   assert.match(explorerSrc, /nameMatchTokens === null \? 'none' :/);
 });
 
-test('an index that trails the book is reported, not hidden', () => {
-  // A budget-stopped sync leaves a NON-EMPTY but PARTIAL directory, which the empty-directory guard
-  // cannot tell from a complete one - so a patient beyond the watermark reads as "no match" while
-  // the UI promises the whole book.
+test('the index alarm fires on a STOPPED sync, not on a non-zero lag', () => {
+  // A budget-stopped sync leaves a NON-EMPTY but PARTIAL directory the empty-guard cannot tell from
+  // a complete one, so a patient past the watermark reads as "no match".
+  //
+  // ⚠ BUT THE FIRST VERSION ALARMED ON `lag > 0`, WHICH IS A HEALTHY STATE. The sync runs hourly and
+  // ~6,000 charge lines land per day, so lag is non-zero for most of every hour — and nearly all of
+  // those lines belong to patients already indexed. That warning would have appeared under almost
+  // every search. This pins the corrected trigger so it cannot regress to the noisy one.
   const body = serverSrc.slice(serverSrc.indexOf('export const CMD_NAME_SEARCH_MEMBER_CAP'));
-  assert.match(body, /indexLagRows: number;/);
-  assert.match(body, /buildPatientDirectoryLagQuery\(\)/);
+  assert.match(body, /indexStaleMinutes: number;/);
+  assert.match(body, /buildPatientDirectoryFreshnessQuery\(\)/);
   // A failed freshness probe reports 0 (= believed current), never a fabricated warning.
-  assert.match(body, /indexLagRows = 0;/);
-  assert.match(explorerSrc, /r\.indexLagRows > 0/);
-  assert.match(explorerSrc, /charge lines behind/);
+  assert.match(body, /indexStaleMinutes = 0;/);
+  assert.match(explorerSrc, /r\.indexStaleMinutes > STALE_INDEX_MINUTES/);
+  assert.doesNotMatch(explorerSrc, /r\.indexLagRows > 0/, 'lag alone must not be the trigger');
+  assert.match(explorerSrc, /const STALE_INDEX_MINUTES = 180;/);
+});
+
+test('a tenant switch clears the search UI, not just the filter', () => {
+  // ⚠ THE TOKEN GUARD ALONE LEFT A PHANTOM SEARCH: the filter correctly stopped applying, while the
+  // term stayed in the input and the match count stayed under it describing nothing. Both mechanisms
+  // are required — the guard is synchronous and correct for the render before this effect flushes.
+  assert.match(explorerSrc, /useEffect\(\(\) => \{\s*setNameMatch\(null\);\s*setNameQuery\(''\);\s*setNameNotice\(null\);\s*\}, \[view\]\);/);
 });
 
 // -- 4. The client ------------------------------------------------------------------------------
@@ -193,4 +208,38 @@ test('a null token set means "no search"; an empty one still reaches the filter'
   assert.match(explorerSrc, /if \(nameMatchTokens !== null\) f\.patient_members = nameMatchTokens;/);
   const occurrences = explorerSrc.match(/if \(nameMatchTokens !== null\) f\.patient_members/g) ?? [];
   assert.equal(occurrences.length, 2, 'grid page + summary both carry it');
+});
+
+// -- 5. The time-window control (Alec, 2026-08-18: "small and unnoticeable") --------------------
+
+test('the time-window group is labelled, bounded in a visible token, and big enough to hit', () => {
+  // Three separate reasons it disappeared, each pinned so a restyle has to re-argue them:
+  //   1. its border was `border-line` (#E4E9E6) = 1.23:1 on the white surface — no perceptible
+  //      boundary, so it read as loose text rather than a control (WCAG 1.4.11 wants >=3:1);
+  //   2. every sibling facet in that row carries a visible uppercase label and this one had only an
+  //      aria-label, making it the one facet a sighted user could not name;
+  //   3. segments were text-xs at px-2.5/py-1 — the smallest thing in the row.
+  const group = explorerSrc.slice(
+    explorerSrc.indexOf('aria-label="Time window"') - 400,
+    explorerSrc.indexOf('aria-label="Time window"') + 200,
+  );
+  assert.match(group, /border border-ink400/, 'ink400 = 4.61:1, not line = 1.23:1');
+  assert.doesNotMatch(group, /border border-line/, 'the invisible token must not come back');
+  assert.match(group, /uppercase tracking-wide text-muted-foreground/, 'labelled like its siblings');
+  assert.match(group, /Window/);
+});
+
+test('the ACTIVE window segment is not distinguished by tint alone', () => {
+  // WCAG 1.4.1: colour must not be the only channel. It previously carried --brand-soft (a pale
+  // fill) and nothing else — no weight change, no boundary — so the selected window was nearly
+  // unreadable. Fill + weight + an inset ring means three channels, any one of which survives.
+  const seg = explorerSrc.slice(
+    explorerSrc.indexOf("'rounded-md px-3 py-1.5 text-sm transition-colors'"),
+    explorerSrc.indexOf("'rounded-md px-3 py-1.5 text-sm transition-colors'") + 320,
+  );
+  assert.match(seg, /font-semibold/, 'weight');
+  assert.match(seg, /ring-1 ring-inset ring-\[var\(--brand-ink\)\]/, 'boundary');
+  assert.match(seg, /bg-\[var\(--brand-soft\)\]/, 'fill');
+  // px-3/py-1.5 at text-sm is ~48x34 — over the 24x24 WCAG 2.5.8 minimum. text-xs/px-2.5 was not.
+  assert.doesNotMatch(explorerSrc, /'rounded-md px-2\.5 py-1 text-xs/, 'the small target must not return');
 });

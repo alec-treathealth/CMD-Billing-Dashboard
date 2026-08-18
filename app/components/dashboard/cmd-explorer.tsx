@@ -26,6 +26,7 @@ import {
   ArrowUpDown,
   Bookmark,
   Building2,
+  CalendarRange,
   ChevronDown,
   Columns3,
   CreditCard,
@@ -175,6 +176,9 @@ const COLUMNS: readonly { key: ColKey; label: string; phi: boolean; numeric: boo
  * per-keystroke employer search, which shares the constant.)
  */
 const MIN_SEARCH_LEN = 3;
+/** Directory staleness (minutes) past which the name search warns. The sync runs hourly, so this is
+ *  three consecutive failures — well clear of one slow run, well short of a day of silence. */
+const STALE_INDEX_MINUTES = 180;
 
 /**
  * Indigo's facility codes, for deciding what a BLANK employer cell means on a per-ROW basis.
@@ -696,6 +700,25 @@ export function CmdCollectionsExplorer({
   // unchanged and is still re-checked server-side.
   const nameSearchAllowed = canRevealPhi;
 
+  /**
+   * Clear the patient-name search when the tenant changes.
+   *
+   * ⚠ THE TOKEN GUARD ALONE LEFT A PHANTOM SEARCH. Binding the result to its originating view (see
+   * `nameMatch` above) correctly stops the FILTER applying after a view switch — but it left the
+   * term sitting in the input and "148 of 9,986 patients matched" sitting under it, describing a
+   * search that was no longer affecting anything. The grid was unfiltered while the UI claimed
+   * otherwise, which is a worse failure than the one the guard fixed.
+   *
+   * BOTH are kept on purpose and they are not redundant: the guard is SYNCHRONOUS, so it is already
+   * correct during the render that happens before this effect flushes; the effect is what makes the
+   * VISIBLE state agree. A reset effect alone would leave one render with the stale filter applied.
+   */
+  useEffect(() => {
+    setNameMatch(null);
+    setNameQuery('');
+    setNameNotice(null);
+  }, [view]);
+
   /** Curated key → its raw CMD spellings. The picker merges; the FILTER still matches raw text. */
   const facilityGroups = useMemo(() => facilityGroupsFrom(facilityOptions), [facilityOptions]);
 
@@ -740,11 +763,15 @@ export function CmdCollectionsExplorer({
           : `${r.matchedPatients.toLocaleString()} of ${r.patientsInScope.toLocaleString()} patients matched` +
             `${hasAnySearch ? ' — the grid also applies your other filters.' : '.'}`,
       );
-      // The index can legitimately trail the book when a sync was budget-stopped. Saying so is the
-      // difference between "this patient is not here" and "this patient may not be indexed yet".
-      if (r.indexLagRows > 0) {
+      // ⚠ WARN ON A STOPPED SYNC, NOT ON A NON-ZERO LAG. The sync runs hourly and ~6,000 charge
+      // lines land per day, so `lag > 0` is true for most of every hour on a perfectly healthy
+      // system — and nearly all of those lines belong to patients already indexed. Warning on it
+      // would put a scary sentence under almost every search and teach the user to ignore it.
+      // Three missed hourly syncs is a real fault, and then the row count says how big it is.
+      if (r.indexStaleMinutes > STALE_INDEX_MINUTES) {
         setNameNotice((prev) =>
-          `${prev ?? ''} The name index is ${r.indexLagRows.toLocaleString()} charge lines behind, so a very recent patient may not appear yet.`.trim(),
+          `${prev ?? ''} ⚠ The name index last updated ${Math.round(r.indexStaleMinutes / 60)}h ago ` +
+          `(${r.indexLagRows.toLocaleString()} charge lines unindexed), so a recent patient may be missing.`.trim(),
         );
       }
     } catch {
@@ -1644,11 +1671,32 @@ export function CmdCollectionsExplorer({
               given selection — a presentational consolidation, plus the 90d default window.
               Reaching "All months": re-click the active chip (toggles off) or pick "All months"
               in the Month select — exactly as before. */}
-          <div
-            className="inline-flex items-center gap-0.5 rounded-lg border border-line bg-surface p-0.5"
-            role="group"
-            aria-label="Time window"
-          >
+          {/* ⚠ THIS WAS "small and unnoticeable" (Alec, 2026-08-18). Three causes, all fixed here:
+                · the group's border was `border-line` (#E4E9E6) — 1.23:1 against the white surface
+                  it sits on — so the control had no perceptible boundary and read as loose text
+                  rather than a control. WCAG 1.4.11 wants >=3:1 for a control boundary; ink400
+                  (#63756E) measures 4.61:1 on the #FBF8F4 ground. Same invisible token, and the
+                  same fix, as the tenant tabs.
+                · every sibling in this row (Facility / Payer / Employer) carries a visible uppercase
+                  label; this one had only an aria-label, making it the single facet a sighted user
+                  could not name.
+                · the segments were text-xs at px-2.5/py-1 — the smallest thing in the row — and the
+                  ACTIVE segment was marked by a pale --brand-soft fill ALONE, with no weight change
+                  and no boundary, so "which window am I on" was barely readable.
+              Now: labelled like its siblings, bordered in a token that can actually be seen, text-sm
+              at px-3/py-1.5 (~48x34, comfortably over the 24x24 WCAG 2.5.8 target minimum), and the
+              active segment carries fill + WEIGHT + an inset ring so selection never rests on tint
+              alone (WCAG 1.4.1 — colour must not be the only channel). */}
+          <div>
+            <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              <CalendarRange className="h-3.5 w-3.5" aria-hidden />
+              Window
+            </div>
+            <div
+              className="inline-flex items-center gap-1 rounded-lg border border-ink400 bg-surface p-1"
+              role="group"
+              aria-label="Time window"
+            >
             {RECENCY_OPTIONS.map((d) => {
               const active = recencyDays === d;
               return (
@@ -1659,10 +1707,10 @@ export function CmdCollectionsExplorer({
                   title={RECENCY_LABEL[d]}
                   onClick={() => selectRecency(d)}
                   className={[
-                    'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                    'rounded-md px-3 py-1.5 text-sm transition-colors',
                     active
-                      ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]'
-                      : 'text-muted-foreground hover:bg-[var(--brand-soft)]',
+                      ? 'bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)] ring-1 ring-inset ring-[var(--brand-ink)]'
+                      : 'font-medium text-muted-foreground hover:bg-[var(--brand-soft)] hover:text-ink900',
                   ].join(' ')}
                 >
                   {d}d
@@ -1678,10 +1726,10 @@ export function CmdCollectionsExplorer({
                 aria-haspopup="true"
                 onClick={() => setMonthYearOpen((o) => !o)}
                 className={[
-                  'flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                  'flex items-center gap-1 rounded-md px-3 py-1.5 text-sm transition-colors',
                   month > 0
-                    ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]'
-                    : 'text-muted-foreground hover:bg-[var(--brand-soft)]',
+                    ? 'bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)] ring-1 ring-inset ring-[var(--brand-ink)]'
+                    : 'font-medium text-muted-foreground hover:bg-[var(--brand-soft)] hover:text-ink900',
                 ].join(' ')}
               >
                 {month > 0 ? `${MONTH_NAMES[month - 1]} ${year}` : 'Month/Year'}
@@ -1718,6 +1766,7 @@ export function CmdCollectionsExplorer({
                   </ControlSelect>
                 </div>
               )}
+              </div>
             </div>
           </div>
         </div>
