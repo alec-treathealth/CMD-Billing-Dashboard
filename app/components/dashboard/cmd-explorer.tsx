@@ -727,8 +727,8 @@ export function CmdCollectionsExplorer({
       setNameMatchTokens(r.memberTokens);
       setNameNotice(
         r.matchedPatients === 0
-          ? `No patient name matched across all ${r.scanned.toLocaleString()} patients.`
-          : `${r.matchedPatients.toLocaleString()} of ${r.scanned.toLocaleString()} patients matched` +
+          ? `No patient name matched across all ${r.patientsInScope.toLocaleString()} patients.`
+          : `${r.matchedPatients.toLocaleString()} of ${r.patientsInScope.toLocaleString()} patients matched` +
             `${hasAnySearch ? ' — the grid also applies your other filters.' : '.'}`,
       );
     } catch {

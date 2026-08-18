@@ -3617,8 +3617,14 @@ export type CmdNameSearchResult =
       memberTokens: string[];
       /** Distinct NAMES matched. Differs from memberTokens.length when a policy carries dependents. */
       matchedPatients: number;
-      /** Directory rows decrypted — the whole tenant slice, so this is the book's patient count. */
-      scanned: number;
+      /**
+       * DISTINCT PATIENT NAMES in the caller's tenant scope — the honest denominator for "N of M
+       * matched". NOT the number of directory rows: the directory is keyed on (member, name), and
+       * a name that appears under two member policies is two rows and one patient. Measured live
+       * 2026-08-18: 11,161 rows, 9,986 distinct names — reporting the row count would over-state
+       * the book by 12% in a number the user reads.
+       */
+      patientsInScope: number;
     }
   /** Matched more policies than may be listed. `count` is what the user must get below. */
   | { ok: false; reason: 'too_broad'; count: number; cap: number }
@@ -3714,7 +3720,9 @@ export async function searchCmdExplorerPatientName(
 
   const memberTokens = new Set<string>();
   const nameHits = new Set<string>();
+  const namesInScope = new Set<string>();
   for (const r of rows) {
+    namesInScope.add(r.name_fp);
     // One undecryptable row must not deny the whole search. Skipped silently — the error carries
     // ciphertext context and is deliberately NOT logged.
     let name: string;
@@ -3744,7 +3752,7 @@ export async function searchCmdExplorerPatientName(
     ok: true,
     memberTokens: [...memberTokens],
     matchedPatients: nameHits.size,
-    scanned: rows.length,
+    patientsInScope: namesInScope.size,
   };
 }
 

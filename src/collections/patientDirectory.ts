@@ -24,10 +24,15 @@
  * this is an application-built table rather than a matview refreshed by the rollup's definer.
  *
  * -- THE GRAIN IS (tenant, member, NAME) -------------------------------------------------------
- * 0.44% of members carry more than one distinct patient name - dependents on a subscriber's policy;
- * 6 of the 1,374 members currently measurable. Keying on the member alone would keep ONE name per
- * member and make the other UNFINDABLE. A silent miss is the one failure a search must not have, so
- * the name is part of the key and coverage is complete by construction.
+ * Members carry more than one distinct patient name - dependents on a subscriber's policy. Keying on
+ * the member alone would keep ONE name per member and make the others UNFINDABLE. A silent miss is
+ * the one failure a search must not have, so the name is part of the key and coverage is complete by
+ * construction.
+ *
+ * MEASURED AT BUILD (2026-08-18): 213 of 10,941 members = 1.95%, against a 0.44% estimate. The
+ * estimate was 4x low because it could only count the 1,374 members inside the 7.18% of rows where
+ * patient_name_bidx is populated, which is not a random sample. 213 patients would have been
+ * unfindable, not ~50.
  *
  * -- PHI DISCIPLINE ----------------------------------------------------------------------------
  *   - Plaintext names exist ONLY as locals inside `entriesFromRows`, for exactly as long as it takes

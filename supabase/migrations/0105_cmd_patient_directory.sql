@@ -32,19 +32,28 @@
 --   name-grain filter a join away, without a second vocabulary.
 --
 -- WHY THE GRAIN IS (entity, member, name) AND NOT (entity, member):
---   0.44% of members carry MORE THAN ONE distinct patient name — 6 of the 1,374 members currently
---   measurable (patient_name_bidx is populated on only 7.18% of rows, so 1,374 is what can be
---   counted, not the whole book). Those are dependents sharing a subscriber policy. Keying on the
---   member alone would keep ONE name per member and make the other name UNFINDABLE — a silent miss,
---   which is the one failure a search must never have. Keying on the name makes coverage complete
---   by construction.
+--   Members carry MORE THAN ONE distinct patient name — dependents sharing a subscriber policy.
+--   Keying on the member alone would keep ONE name per member and make the others UNFINDABLE: a
+--   silent miss, the one failure a search must never have. Keying on the name makes coverage
+--   complete by construction.
+--
+--   ⚠ MEASURED AT BUILD (2026-08-18): 213 of 10,941 members = 1.95%. The pre-build ESTIMATE was
+--   0.44% (6 of 1,374) and it was 4x LOW, because 1,374 was all that could be counted — it came
+--   from the 7.18% of rows where patient_name_bidx happens to be populated, which is not a random
+--   sample of the book. The correction strengthens this decision rather than weakening it: 213
+--   real patients would have been unfindable, not ~50. Keep the measured number here; do not let
+--   it drift back to the sample.
 --
 --   Deduping by ciphertext LENGTH instead was measured and REJECTED: it separates 5 of those 6, so
 --   it trades a rigorous key for a heuristic that is wrong 1 time in 1,374 and cannot be reasoned
 --   about at the call site.
 --
--- SIZE: ~11k rows x (16 uuid + ~44 member token + ~44 name token + ~55 ciphertext + 8 + 8) ≈ 2 MB
---   including the primary key. Grows with distinct PATIENTS, not with charge lines.
+-- SIZE: MEASURED 5,496 kB at build (11,161 rows), against a 2 MB estimate — 2.7x low. The estimate
+--   priced the ciphertext and under-priced the PRIMARY KEY, which is two 64-char hex HMAC columns
+--   plus a uuid and is therefore wider than the row payload it indexes. Same class of error as
+--   0092 (12x on an INCLUDE payload) and 0093 (1.4x on a constant text column): PRICE THE KEY, NOT
+--   JUST THE VALUES. It grows with distinct PATIENTS, not with charge lines, so 5.5 MB is the
+--   shape of the whole thing, not a starting point.
 --
 -- PHI DISCIPLINE:
 --   · patient_name is the SAME libsodium ciphertext already stored on cmd_explorer_rows — this

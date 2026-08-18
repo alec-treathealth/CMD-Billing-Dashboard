@@ -120,6 +120,20 @@ test('the client sends member tokens, and the narrowing gate is gone', () => {
   assert.match(explorerSrc, /no need to narrow first/);
 });
 
+test('the match denominator is DISTINCT NAMES, not directory rows', () => {
+  // Measured at build 2026-08-18: 11,161 directory rows but 9,986 distinct names, because the
+  // directory is keyed on (member, name) and one name can sit under two member policies. Reporting
+  // the row count as "patients" over-states the book by 12% in a number the user reads, so the
+  // result carries a separately-counted denominator.
+  const body = serverSrc.slice(serverSrc.indexOf('export const CMD_NAME_SEARCH_MEMBER_CAP'));
+  assert.match(body, /patientsInScope: namesInScope\.size/);
+  assert.match(body, /namesInScope\.add\(r\.name_fp\)/);
+  assert.doesNotMatch(body, /scanned: rows\.length,\n\s*\};/, 'the row count must not be the headline');
+  // The AUDIT still records rows decrypted — that is a PHI-volume fact and a different question.
+  assert.match(body, /scanned: rows\.length/);
+  assert.match(explorerSrc, /r\.patientsInScope\.toLocaleString\(\)/);
+});
+
 test('a null token set means "no search"; an empty one still reaches the filter', () => {
   // `null` = never searched -> omit the key entirely. `[]` = searched, matched nobody -> send it, so
   // the shared builder emits its impossible predicate. Collapsing the two would silently widen the
