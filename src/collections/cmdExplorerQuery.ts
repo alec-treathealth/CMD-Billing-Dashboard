@@ -1859,7 +1859,11 @@ export function buildCmdExplorerGroupedQuery(
     `case when sum(t.allowed_reliable) > 0 ` +
     `then round(sum(t.insurance_payments) / sum(t.allowed_reliable) * 100, 2) else null end as pct_paid ` +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} ` +
-    `group by t.member_id_bidx, t.payment_received, t.facility, t.primary_payer${havingSql} ` +
+    // Keep groups tenant-scoped. Null member indexes cannot identify a patient, so give each
+      // unindexed rollup row its own grouping key instead of merging unrelated patients.
+      `group by t.business_entity_id, t.member_id_bidx, ` +
+      `case when t.member_id_bidx is null then t.id end, ` +
+      `t.payment_received, t.facility, t.primary_payer${havingSql} ` +
     `order by t.payment_received ${dir} nulls last, max(t.id) ${dir} limit ${add(limit)}` +
     `) g left join collections.cmd_explorer_rows e on e.id = g.id ` +
     // Re-stated on the OUTER query: a LEFT JOIN does not preserve the subquery's ordering, and the
