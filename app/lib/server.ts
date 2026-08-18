@@ -285,7 +285,7 @@ import {
 } from '../../src/routes/refreshChargeRollupHandler.js';
 import { refreshChargeRollup } from '../../src/collections/refreshChargeRollup.js';
 import {
-  buildPatientDirectoryLagQuery,
+  buildPatientDirectoryFreshnessQuery,
   buildPatientDirectoryReadQuery,
   syncPatientDirectory,
   type PatientDirectorySyncStats,
@@ -3626,14 +3626,18 @@ export type CmdNameSearchResult =
       /** Distinct NAMES matched. Differs from members.length when a policy carries dependents. */
       matchedPatients: number;
       /**
-       * Charge lines ingested since the directory was last synced. 0 means the index is current.
+       * Minutes since the directory sync last advanced. The sync runs hourly, so >180 means it has
+       * failed roughly three times running.
        *
-       * ⚠ NON-ZERO MEANS THE SEARCH IS INCOMPLETE, AND THE UI MUST SAY SO. A budget-stopped sync
-       * leaves a NON-EMPTY but PARTIAL directory, which the empty-directory guard cannot distinguish
-       * from a complete one — so a patient beyond the watermark reads as "no match" while the UI
-       * promises the whole book. That is exactly the silent miss this design exists to prevent,
-       * coming back through the door marked "resumable".
+       * ⚠ THIS IS THE ALARM, NOT `indexLagRows`. A partial directory is indistinguishable from a
+       * complete one to the empty-guard, so a patient past the watermark reads as "no match" while
+       * the UI promises the whole book — that is the silent miss this design exists to prevent. But
+       * the FIRST version alarmed on lag > 0, which is true for most of every hour on a perfectly
+       * healthy system (~6,000 lines/day, and nearly all of them belong to patients already indexed).
+       * An always-on warning is not a safeguard; it is training to ignore warnings.
        */
+      indexStaleMinutes: number;
+      /** Charge lines not yet indexed. The SIZE of the exposure, meaningful only once stale. */
       indexLagRows: number;
       /**
        * DISTINCT PATIENT NAMES in the caller's tenant scope — the honest denominator for "N of M
@@ -3770,17 +3774,20 @@ export async function searchCmdExplorerPatientName(
     return { ok: false, reason: 'too_broad', count: memberPairs.size, cap: CMD_NAME_SEARCH_MEMBER_CAP };
   }
 
-  // How stale is the index? Read AFTER the match so a current search pays nothing extra on the
-  // hot path's critical section, and BEFORE the audit so the number is part of the recorded run.
+  // How fresh is the index? Read AFTER the match so a healthy search pays nothing on the critical
+  // path, and BEFORE the audit so the numbers are part of the recorded run.
+  let indexStaleMinutes = 0;
   let indexLagRows = 0;
   try {
-    const lagQ = buildPatientDirectoryLagQuery();
-    const lagRes = await readerExecutor().query<{ lag: string }>(lagQ.sql, lagQ.params);
-    indexLagRows = Math.max(0, Number(lagRes.rows[0]?.lag ?? 0));
+    const fq = buildPatientDirectoryFreshnessQuery();
+    const fr = await readerExecutor().query<{ lag_rows: string; stale_minutes: number }>(fq.sql, fq.params);
+    indexLagRows = Math.max(0, Number(fr.rows[0]?.lag_rows ?? 0));
+    indexStaleMinutes = Math.max(0, Number(fr.rows[0]?.stale_minutes ?? 0));
   } catch {
-    // Non-fatal: a failed freshness probe must not deny a search that already has its answer. It
-    // reports 0 (= "believed current"), which is the same thing the caller assumed before this
-    // existed — never a fabricated non-zero that would raise a false incomplete-index warning.
+    // Non-fatal: a failed freshness probe must not deny a search that already has its answer. Both
+    // report 0 (= "believed current"), which is what the caller assumed before this existed — never
+    // a fabricated non-zero that would raise a false incomplete-index warning.
+    indexStaleMinutes = 0;
     indexLagRows = 0;
   }
 
@@ -3796,6 +3803,7 @@ export async function searchCmdExplorerPatientName(
     members: [...memberPairs.values()],
     matchedPatients: nameHits.size,
     patientsInScope: namesInScope.size,
+    indexStaleMinutes,
     indexLagRows,
   };
 }

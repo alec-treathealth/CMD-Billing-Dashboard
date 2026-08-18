@@ -175,6 +175,9 @@ const COLUMNS: readonly { key: ColKey; label: string; phi: boolean; numeric: boo
  * per-keystroke employer search, which shares the constant.)
  */
 const MIN_SEARCH_LEN = 3;
+/** Directory staleness (minutes) past which the name search warns. The sync runs hourly, so this is
+ *  three consecutive failures — well clear of one slow run, well short of a day of silence. */
+const STALE_INDEX_MINUTES = 180;
 
 /**
  * Indigo's facility codes, for deciding what a BLANK employer cell means on a per-ROW basis.
@@ -696,6 +699,25 @@ export function CmdCollectionsExplorer({
   // unchanged and is still re-checked server-side.
   const nameSearchAllowed = canRevealPhi;
 
+  /**
+   * Clear the patient-name search when the tenant changes.
+   *
+   * ⚠ THE TOKEN GUARD ALONE LEFT A PHANTOM SEARCH. Binding the result to its originating view (see
+   * `nameMatch` above) correctly stops the FILTER applying after a view switch — but it left the
+   * term sitting in the input and "148 of 9,986 patients matched" sitting under it, describing a
+   * search that was no longer affecting anything. The grid was unfiltered while the UI claimed
+   * otherwise, which is a worse failure than the one the guard fixed.
+   *
+   * BOTH are kept on purpose and they are not redundant: the guard is SYNCHRONOUS, so it is already
+   * correct during the render that happens before this effect flushes; the effect is what makes the
+   * VISIBLE state agree. A reset effect alone would leave one render with the stale filter applied.
+   */
+  useEffect(() => {
+    setNameMatch(null);
+    setNameQuery('');
+    setNameNotice(null);
+  }, [view]);
+
   /** Curated key → its raw CMD spellings. The picker merges; the FILTER still matches raw text. */
   const facilityGroups = useMemo(() => facilityGroupsFrom(facilityOptions), [facilityOptions]);
 
@@ -740,11 +762,15 @@ export function CmdCollectionsExplorer({
           : `${r.matchedPatients.toLocaleString()} of ${r.patientsInScope.toLocaleString()} patients matched` +
             `${hasAnySearch ? ' — the grid also applies your other filters.' : '.'}`,
       );
-      // The index can legitimately trail the book when a sync was budget-stopped. Saying so is the
-      // difference between "this patient is not here" and "this patient may not be indexed yet".
-      if (r.indexLagRows > 0) {
+      // ⚠ WARN ON A STOPPED SYNC, NOT ON A NON-ZERO LAG. The sync runs hourly and ~6,000 charge
+      // lines land per day, so `lag > 0` is true for most of every hour on a perfectly healthy
+      // system — and nearly all of those lines belong to patients already indexed. Warning on it
+      // would put a scary sentence under almost every search and teach the user to ignore it.
+      // Three missed hourly syncs is a real fault, and then the row count says how big it is.
+      if (r.indexStaleMinutes > STALE_INDEX_MINUTES) {
         setNameNotice((prev) =>
-          `${prev ?? ''} The name index is ${r.indexLagRows.toLocaleString()} charge lines behind, so a very recent patient may not appear yet.`.trim(),
+          `${prev ?? ''} ⚠ The name index last updated ${Math.round(r.indexStaleMinutes / 60)}h ago ` +
+          `(${r.indexLagRows.toLocaleString()} charge lines unindexed), so a recent patient may be missing.`.trim(),
         );
       }
     } catch {

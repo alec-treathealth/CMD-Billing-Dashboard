@@ -101,9 +101,12 @@ test('BOTH halves of the pair are validated, and the pair is rebuilt not passed 
 });
 
 test('all three grid actions run the pair sanitizer, not just the grid page', () => {
-  // The grid, the summary and the cohort/refinement paths each build their own reader filter. A
-  // sanitizer wired into only one of them is how a name search ends up applying to the table but
-  // not to the totals above it.
+  // loadCmdReport, loadCmdReportGrouped and loadCmdSearchSummary each build their own reader filter.
+  // A sanitizer wired into only one of them is how a name search ends up applying to the table but
+  // not to the totals above it — or to the flat rows but not the grouped ones.
+  //
+  // The cohort loaders deliberately take NO grid filter (the cohort is defined by prefix + tenant
+  // alone, so a patient's lifetime sequence stays intact), which is why the count is three.
   const calls = actionsSrc.match(/applyPatientMembers\(filter, readerFilter\)/g) ?? [];
   assert.equal(calls.length, 3, 'grid + summary + cohort');
   const rowIdCalls = actionsSrc.match(/applyRowIds\(filter, readerFilter\)/g) ?? [];
@@ -145,17 +148,29 @@ test('the name result is wired into BOTH dependency lists', () => {
   assert.match(explorerSrc, /nameMatchTokens === null \? 'none' :/);
 });
 
-test('an index that trails the book is reported, not hidden', () => {
-  // A budget-stopped sync leaves a NON-EMPTY but PARTIAL directory, which the empty-directory guard
-  // cannot tell from a complete one - so a patient beyond the watermark reads as "no match" while
-  // the UI promises the whole book.
+test('the index alarm fires on a STOPPED sync, not on a non-zero lag', () => {
+  // A budget-stopped sync leaves a NON-EMPTY but PARTIAL directory the empty-guard cannot tell from
+  // a complete one, so a patient past the watermark reads as "no match".
+  //
+  // ⚠ BUT THE FIRST VERSION ALARMED ON `lag > 0`, WHICH IS A HEALTHY STATE. The sync runs hourly and
+  // ~6,000 charge lines land per day, so lag is non-zero for most of every hour — and nearly all of
+  // those lines belong to patients already indexed. That warning would have appeared under almost
+  // every search. This pins the corrected trigger so it cannot regress to the noisy one.
   const body = serverSrc.slice(serverSrc.indexOf('export const CMD_NAME_SEARCH_MEMBER_CAP'));
-  assert.match(body, /indexLagRows: number;/);
-  assert.match(body, /buildPatientDirectoryLagQuery\(\)/);
+  assert.match(body, /indexStaleMinutes: number;/);
+  assert.match(body, /buildPatientDirectoryFreshnessQuery\(\)/);
   // A failed freshness probe reports 0 (= believed current), never a fabricated warning.
-  assert.match(body, /indexLagRows = 0;/);
-  assert.match(explorerSrc, /r\.indexLagRows > 0/);
-  assert.match(explorerSrc, /charge lines behind/);
+  assert.match(body, /indexStaleMinutes = 0;/);
+  assert.match(explorerSrc, /r\.indexStaleMinutes > STALE_INDEX_MINUTES/);
+  assert.doesNotMatch(explorerSrc, /r\.indexLagRows > 0/, 'lag alone must not be the trigger');
+  assert.match(explorerSrc, /const STALE_INDEX_MINUTES = 180;/);
+});
+
+test('a tenant switch clears the search UI, not just the filter', () => {
+  // ⚠ THE TOKEN GUARD ALONE LEFT A PHANTOM SEARCH: the filter correctly stopped applying, while the
+  // term stayed in the input and the match count stayed under it describing nothing. Both mechanisms
+  // are required — the guard is synchronous and correct for the render before this effect flushes.
+  assert.match(explorerSrc, /useEffect\(\(\) => \{\s*setNameMatch\(null\);\s*setNameQuery\(''\);\s*setNameNotice\(null\);\s*\}, \[view\]\);/);
 });
 
 // -- 4. The client ------------------------------------------------------------------------------
