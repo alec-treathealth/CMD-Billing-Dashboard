@@ -140,7 +140,7 @@ export function buildPatientDirectoryReadQuery(
 ): { sql: string; params: unknown[] } {
   return {
     sql:
-      'select member_id_bidx, name_fp, patient_name from collections.cmd_patient_directory ' +
+      'select business_entity_id, member_id_bidx, name_fp, patient_name from collections.cmd_patient_directory ' +
       'where business_entity_id = any($1::uuid[])',
     params: [entityIds],
   };
@@ -286,6 +286,10 @@ export async function syncPatientDirectory(
       deps.decrypt,
       fingerprint,
     );
+    // Do not advance the watermark past rows that could not be decrypted; retry them on a later run.
+    if (decryptFailures > 0) {
+      throw new Error(`patient directory batch has ${decryptFailures} undecryptable row(s)`);
+    }
     stats.rows_scanned += rows.length;
     stats.keys_seen += entries.length;
     stats.skipped_no_member += skippedNoMember;

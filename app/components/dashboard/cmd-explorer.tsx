@@ -525,7 +525,7 @@ export function CmdCollectionsExplorer({
   const [nameSearching, setNameSearching] = useState(false);
   /** null = no name filter applied. [] = searched and matched NOTHING (an empty grid is correct,
    *  and is deliberately distinguished from "no filter" so it cannot silently widen to every row). */
-  const [nameMatchTokens, setNameMatchTokens] = useState<string[] | null>(null);
+  const [nameMatchTokens, setNameMatchTokens] = useState<Array<{ business_entity_id: string; member_id_bidx: string }> | null>(null);
   const [nameNotice, setNameNotice] = useState<string | null>(null);
   // Picked employers, as CANONICAL KEYS ('TESLA'), expanded to their raw spellings at filter time.
   const [employerSelection, setEmployerSelection] = useState<string[]>([]);
@@ -1135,7 +1135,7 @@ export function CmdCollectionsExplorer({
     // year only matters when a specific month is chosen (see original rationale); facilityKey is the
     // stable proxy for facilitySelection's contents (payerKey likewise).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup, nameMatchTokens]);
 
   const loadPage = useCallback(
     async (

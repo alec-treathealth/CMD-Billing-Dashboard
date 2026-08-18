@@ -3614,7 +3614,7 @@ export type CmdNameSearchResult =
   | {
       ok: true;
       /** Keyed-HMAC member tokens for the grid predicate. Non-PHI, one-way. */
-      memberTokens: string[];
+      memberTokens: Array<{ business_entity_id: string; member_id_bidx: string }>;
       /** Distinct NAMES matched. Differs from memberTokens.length when a policy carries dependents. */
       matchedPatients: number;
       /** Directory rows decrypted — the whole tenant slice, so this is the book's patient count. */
@@ -3712,7 +3712,7 @@ export async function searchCmdExplorerPatientName(
   // Applied BEFORE the decrypt loop: an unbuilt index must not be reported as an absent patient.
   if (rows.length === 0) return { ok: false, reason: 'directory_empty' };
 
-  const memberTokens = new Set<string>();
+  const memberTokens = new Map<string, { business_entity_id: string; member_id_bidx: string }>();
   const nameHits = new Set<string>();
   for (const r of rows) {
     // One undecryptable row must not deny the whole search. Skipped silently — the error carries
@@ -3724,7 +3724,10 @@ export async function searchCmdExplorerPatientName(
       continue;
     }
     if (name.toLowerCase().includes(needle)) {
-      memberTokens.add(r.member_id_bidx);
+      memberTokens.set(`${r.business_entity_id}:${r.member_id_bidx}`, {
+        business_entity_id: r.business_entity_id,
+        member_id_bidx: r.member_id_bidx,
+      });
       nameHits.add(r.name_fp);
     }
   }

@@ -127,7 +127,7 @@ export interface CmdExplorerFilter {
    * Empty/absent omits the condition; present-but-empty means "matched nothing" and must select
    * NOTHING, exactly like row_ids.
    */
-  patient_member_bidx?: string[] | null;
+  patient_member_bidx?: Array<{ business_entity_id: string; member_id_bidx: string }> | null;
   /**
    * The employer SEGMENT toggle: 'all' (default) · 'employer' · 'individual'.
    *
@@ -304,7 +304,7 @@ export function cmdExplorerBaseConds(
   // malformed value can only fail to match. There is no 22003 cast hazard to defend against.
   if (Array.isArray(filter.patient_member_bidx)) {
     if (filter.patient_member_bidx.length > 0) {
-      conds.push(`member_id_bidx = any(${add(filter.patient_member_bidx)}::text[])`);
+      conds.push(`exists (select 1 from jsonb_to_recordset(${add(filter.patient_member_bidx)}::jsonb) as p(business_entity_id uuid, member_id_bidx text) where p.business_entity_id = cmd_explorer_rows.business_entity_id and p.member_id_bidx = cmd_explorer_rows.member_id_bidx)`);
     } else {
       // Present but empty = "the search matched nobody". Omitting the condition would widen the
       // grid to every row and present it as a name result, which is the row_ids trap in a new
