@@ -175,10 +175,6 @@ const COLUMNS: readonly { key: ColKey; label: string; phi: boolean; numeric: boo
  * per-keystroke employer search, which shares the constant.)
  */
 const MIN_SEARCH_LEN = 3;
-/** Mirrors CMD_NAME_SEARCH_ROW_CAP in app/lib/server.ts (ratified by Alec 2026-08-17). Used ONLY for
- *  the helper text — the server enforces the real ceiling and returns the authoritative number, so
- *  a drift here misleads the reader but cannot widen the decrypt. */
-const NAME_SEARCH_CAP = 2000;
 
 /**
  * Indigo's facility codes, for deciding what a BLANK employer cell means on a per-ROW basis.
@@ -529,7 +525,7 @@ export function CmdCollectionsExplorer({
   const [nameSearching, setNameSearching] = useState(false);
   /** null = no name filter applied. [] = searched and matched NOTHING (an empty grid is correct,
    *  and is deliberately distinguished from "no filter" so it cannot silently widen to every row). */
-  const [nameMatchIds, setNameMatchIds] = useState<string[] | null>(null);
+  const [nameMatchTokens, setNameMatchTokens] = useState<string[] | null>(null);
   const [nameNotice, setNameNotice] = useState<string | null>(null);
   // Picked employers, as CANONICAL KEYS ('TESLA'), expanded to their raw spellings at filter time.
   const [employerSelection, setEmployerSelection] = useState<string[]>([]);
@@ -679,21 +675,17 @@ export function CmdCollectionsExplorer({
     payerSelection.length > 0 ||
     hasPhiSearch;
 
-  // Patient-name search is allowed only once something ELSE narrows the rows. Mirrors the
-  // server-side `narrowed` check in searchCmdExplorerPatientName — the server is the real gate (a
-  // client that skipped this must not be able to trigger an unbounded decrypt); this exists so the
-  // UI can explain WHY the field is inert instead of just disabling it.
+  // Patient-name search needs nothing but the PHI entitlement now.
   //
-  // A month/recency window counts: it is what most users narrow with first, and it bounds the set
-  // just as effectively as a facility does.
-  const nameSearchAllowed =
-    canRevealPhi &&
-    (facilitySelection.length > 0 ||
-      payerSelection.length > 0 ||
-      employerSelection.length > 0 ||
-      recencyDays > 0 ||
-      month > 0 ||
-      hasPhiSearch);
+  // ⚠ THE NARROWING GATE IS GONE (0105), AND ITS REMOVAL IS NOT A RELAXATION OF A PHI CONTROL.
+  // It required a facility / payer / employer / date / member filter before a name could be
+  // searched, and it existed for exactly one reason: the search decrypted CANDIDATE ROWS, so the
+  // work was proportional to how many rows were in view and had to be capped at 2,000 of 686,503.
+  // 0105 makes the candidate set the ~11k distinct (tenant, member, name) triples instead, which
+  // is bounded by the PATIENT ROSTER rather than by the filters — so there is no longer anything
+  // for a narrowing requirement to protect. The PHI gate that does matter, `canRevealPhi`, is
+  // unchanged and is still re-checked server-side.
+  const nameSearchAllowed = canRevealPhi;
 
   /** Curated key → its raw CMD spellings. The picker merges; the FILTER still matches raw text. */
   const facilityGroups = useMemo(() => facilityGroupsFrom(facilityOptions), [facilityOptions]);
@@ -701,9 +693,13 @@ export function CmdCollectionsExplorer({
   /**
    * Run the patient-name search.
    *
-   * The term is PHI: it is sent ONCE, in a Server Action body, and what comes back is row IDS. It
-   * is never written to the URL, a grid view, or storage. The server re-checks narrowing and the
-   * row cap — this is a UX gate, not the security one.
+   * The term is PHI: it is sent ONCE, in a Server Action body, and what comes back is one-way HMAC
+   * MEMBER TOKENS. It is never written to the URL, a grid view, or storage.
+   *
+   * ⚠ IT SENDS NO FILTER (0105). The search covers the caller's whole tenant scope, so a patient is
+   * found wherever they are in the book; the grid's own filters then intersect the result. That
+   * means the match count can EXCEED what the grid shows when another filter is also active, and
+   * the notice below says so rather than quietly reconciling the two.
    */
   const runNameSearch = useCallback(async () => {
     const term = nameQuery.trim();
@@ -711,56 +707,37 @@ export function CmdCollectionsExplorer({
     setNameSearching(true);
     setNameNotice(null);
     try {
-      // Same narrowing fields the grid sends, so the count the user is told matches the rows they
-      // are looking at. row_ids is deliberately ABSENT — searching within a prior name result would
-      // compound filters and make "no matches" unexplainable.
-      const f: Parameters<typeof searchCollectionsPatientName>[1] = {};
-      if (recencyDays > 0) f.recencyDays = recencyDays;
-      else if (month > 0) { f.year = year; f.month = month; }
-      if (facilitySelection.length > 0) f.facility = expandFacilityKeys(facilitySelection, facilityGroups);
-      if (payerSelection.length > 0) f.primary_payers = payerSelection;
-      applyEmployerFilter(f, employerSelection, employerVocabulary);
-      if (hasPhiSearch) {
-        f.phiSearch = {
-          ...(dMember !== '' ? { memberId: dMember } : {}),
-          ...(dAlpha !== '' ? { alphaPrefix: dAlpha } : {}),
-          ...(dGroup !== '' ? { groupNumber: dGroup } : {}),
-        };
-      }
-      const res = await searchCollectionsPatientName(term, f, view);
+      const res = await searchCollectionsPatientName(term, view);
       if (!res.ok) { setNameNotice(res.error); return; }
       const r = res.result;
       if (!r.ok) {
         setNameNotice(
           r.reason === 'too_broad'
-            ? `Too many rows to search by name — ${r.count.toLocaleString()} in view, limit ${r.cap.toLocaleString()}. Narrow further.`
-            : `Pick a facility, payer, date range, employer or member ID first.`,
+            ? `That matched ${r.count.toLocaleString()} patient policies — more than the ${r.cap.toLocaleString()} limit. Use more of the name.`
+            : r.reason === 'term_too_short'
+              ? `Type at least ${r.min} characters of a name.`
+              : r.reason === 'directory_empty'
+                ? 'The patient name index has not been built yet, so name search cannot answer. This is not "no matches".'
+                : 'Patient name search is unavailable on this deployment (the name index is missing).',
         );
         return;
       }
-      // [] is kept, not discarded: it means "searched, matched nothing", and the grid must show
+      // [] is kept, not discarded: it means "searched, matched nobody", and the grid must show
       // empty rather than silently reverting to every row.
-      setNameMatchIds(r.rowIds);
+      setNameMatchTokens(r.memberTokens);
       setNameNotice(
-        r.matched === 0
-          ? `No patient name matched in the ${r.scanned.toLocaleString()} rows searched.`
-          : `${r.matched.toLocaleString()} of ${r.scanned.toLocaleString()} rows matched.`,
+        r.matchedPatients === 0
+          ? `No patient name matched across all ${r.scanned.toLocaleString()} patients.`
+          : `${r.matchedPatients.toLocaleString()} of ${r.scanned.toLocaleString()} patients matched` +
+            `${hasAnySearch ? ' — the grid also applies your other filters.' : '.'}`,
       );
     } catch {
       setNameNotice('The name search could not be completed right now.');
     } finally {
       setNameSearching(false);
     }
-  }, [nameQuery, nameSearchAllowed, recencyDays, month, year, facilitySelection, payerSelection,
-      employerSelection, hasPhiSearch, dMember, dAlpha, dGroup, view,
-      // ⚠ THE TWO EXPANSION MAPS ARE DEPENDENCIES, and leaving them out was a real bug.
-      // This callback expands curated facility keys and canonical employer keys into the RAW values
-      // the filter matches on. Both maps are reloaded when the tenant view changes, so without them
-      // here the closure kept the PREVIOUS view's maps: the grid would refetch with the new
-      // expansions while the name search still sent the old ones — or sent an unexpanded key that
-      // matches nothing — and the user would be told their patient has no rows. Silent, and only
-      // reachable after a view switch with a facility or employer already selected.
-      facilityGroups, employerVocabulary]);
+  }, [nameQuery, nameSearchAllowed, view, hasAnySearch]);
+
   // Stable dep keys for the selection sets (array identity changes on every toggle otherwise).
   const payerKey = payerSelection.join('\n');
   /**
@@ -1109,7 +1086,7 @@ export function CmdCollectionsExplorer({
         cpt_code?: string;
       revenue_code?: string;
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
-      row_ids?: string[];
+      patient_member_bidx?: string[];
     } = {};
     // Recency wins over Month/Year (they're mutually exclusive in the UI, but be explicit).
     if (recencyDays > 0) {
@@ -1125,7 +1102,7 @@ export function CmdCollectionsExplorer({
     // Patient-name search result. `[]` is MEANINGFUL: it means "searched, matched nothing", and must
     // still be sent so the grid shows an empty result instead of silently dropping the filter and
     // widening back to every row. The name ITSELF is never sent here — only the ids it resolved to.
-    if (nameMatchIds !== null) f.row_ids = nameMatchIds;
+    if (nameMatchTokens !== null) f.patient_member_bidx = nameMatchTokens;
     // Facility multi-select is a top-level scope; a facility drill-down chip narrows to that ONE
     // facility (overriding the dropdown). Payer/CPT chips stay exact single-value refinements.
     if (facilitySelection.length > 0) f.facility = expandFacilityKeys(facilitySelection, facilityGroups);
@@ -1249,7 +1226,7 @@ export function CmdCollectionsExplorer({
       primary_payers?: string[];
       employer_names?: string[];
         phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
-      row_ids?: string[];
+      patient_member_bidx?: string[];
     } = {};
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
     // Employer segment (0101). 'all' emits NOTHING — the server treats absent as unrestricted, and
@@ -1258,7 +1235,7 @@ export function CmdCollectionsExplorer({
     // Patient-name search result. `[]` is MEANINGFUL: it means "searched, matched nothing", and must
     // still be sent so the grid shows an empty result instead of silently dropping the filter and
     // widening back to every row. The name ITSELF is never sent here — only the ids it resolved to.
-    if (nameMatchIds !== null) f.row_ids = nameMatchIds;
+    if (nameMatchTokens !== null) f.patient_member_bidx = nameMatchTokens;
     // Top-level scope (date window + facility set) applies to the summary too — so the drill lists
     // describe the SAME population the grid shows. The chip refinement does NOT (it's a within-
     // results drill; the chips stay a stable facet navigator while drilling).
@@ -1735,10 +1712,13 @@ export function CmdCollectionsExplorer({
             </div>
 
             {/* PATIENT NAME — deliberately SEPARATE from the exact-match fields above, because it
-                behaves differently: partial match, and only over an already-narrowed set. Names are
-                unique, but searching the whole book would mean decrypting it, so the input is inert
-                until something else narrows the rows. RULED BY ALEC 2026-08-17: the reason is stated
-                to the user rather than left as a dead input. */}
+                behaves differently: it is a PARTIAL match, over the whole book.
+
+                It used to be inert until something else narrowed the rows, because the search
+                decrypted candidate ROWS and had to be capped at 2,000 of 686,503. Migration 0105
+                made the candidate set the ~11k distinct patients instead, so the gate had nothing
+                left to protect and is gone. What has NOT changed is the entitlement: the entire
+                block is behind canRevealPhi, and the server re-checks it. */}
             <div className="mt-2 border-t border-line pt-2">
               <div className="flex flex-wrap items-end gap-2">
                 <div className="flex flex-col gap-1">
@@ -1750,12 +1730,11 @@ export function CmdCollectionsExplorer({
                     type="text"
                     value={nameQuery}
                     maxLength={120}
-                    disabled={!nameSearchAllowed}
                     onChange={(e) => setNameQuery(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter' && nameSearchAllowed) runNameSearch();
+                      if (e.key === 'Enter') runNameSearch();
                     }}
-                    placeholder={nameSearchAllowed ? 'full or partial name' : 'narrow first'}
+                    placeholder="full or partial name"
                     // autoComplete off: this value is PHI and must not be stored by the browser.
                     autoComplete="off"
                     className="w-56 rounded-md border border-line bg-canvas px-2 py-1 text-sm text-ink900 placeholder:text-ink400 disabled:cursor-not-allowed disabled:opacity-50"
@@ -1765,27 +1744,27 @@ export function CmdCollectionsExplorer({
                 <button
                   type="button"
                   onClick={runNameSearch}
-                  disabled={!nameSearchAllowed || nameQuery.trim() === '' || nameSearching}
+                  disabled={nameQuery.trim() === '' || nameSearching}
                   className="rounded-md border border-line bg-surface px-3 py-1 text-sm font-medium text-ink900 transition-colors hover:bg-[var(--brand-soft)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {nameSearching ? 'Searching…' : 'Search'}
                 </button>
-                {nameMatchIds !== null && (
+                {nameMatchTokens !== null && (
                   <button
                     type="button"
-                    onClick={() => { setNameMatchIds(null); setNameQuery(''); setNameNotice(null); }}
+                    onClick={() => { setNameMatchTokens(null); setNameQuery(''); setNameNotice(null); }}
                     className="rounded-md px-2 py-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
                   >
                     Clear name filter
                   </button>
                 )}
               </div>
-              {/* The WHY, always visible — never a silently disabled box. */}
+              {/* The WHAT, always visible. It used to explain a restriction; now it sets the one
+                  expectation that is still worth setting — the search spans the whole book, so the
+                  grid may show fewer rows than the match count when other filters are active. */}
               <p id="phi-patient-name-help" className="mt-1 text-[11px] text-muted-foreground">
                 {nameNotice ??
-                  (nameSearchAllowed
-                    ? `Matches part of a name, over up to ${NAME_SEARCH_CAP.toLocaleString()} rows — names are encrypted, so each candidate row must be decrypted to compare. Narrow further if a name is missing.`
-                    : `Pick a facility, payer, date range, employer or member ID first — name search decrypts each candidate row, so it runs over at most ${NAME_SEARCH_CAP.toLocaleString()} narrowed rows.`)}
+                  'Matches part of a name across every patient in this view — no need to narrow first. Your other filters still apply to the rows shown.'}
               </p>
             </div>
           </div>
