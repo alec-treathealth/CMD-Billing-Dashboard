@@ -15,6 +15,9 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { ALL_VIEWS, clampView, resolveView, viewOptions, type DashboardView } from '../lib/views';
 
 /** The exact derivation TenantTabs runs, exercised without React's router hooks. */
@@ -75,4 +78,24 @@ test('the tab labels are the SAME source the rest of the app names tenants from'
     ['Consolidated', 'BXR Consulting', 'Indigo Billing'],
   );
   assert.deepEqual(viewOptions.map((o) => o.value), [...ALL_VIEWS], 'order matches ALL_VIEWS');
+});
+
+// ── The 2px stroke (Alec, 2026-08-18 — a reversal of the original "borderless" ask) ──────────────
+
+test('every tab carries a 2px border, and the ACTIVE one takes the brand accent', () => {
+  // The first ask was borderless, it shipped that way, and the tabs did not read as CONTROLS —
+  // nothing said "clickable" until you hovered one. This pins the reversal so a future tidy-up that
+  // strips the stroke has to be a decision rather than a drive-by.
+  //
+  // SOURCE-LEVEL, matching this file's own rule that the look is browser-verified: TenantTabs is a
+  // client component built on router hooks, so it cannot be rendered here. What is asserted is the
+  // class contract, which is the part that would silently regress.
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../components/dashboard/tenant-tabs.tsx'), 'utf8');
+  assert.match(src, /rounded-lg border-2 px-4 py-2/, 'the stroke is on the shared base classes');
+  assert.match(src, /border-\[var\(--brand-accent\)\] bg-\[var\(--brand-soft\)\]/, 'active owns the accent');
+  assert.match(src, /'border-line font-medium/, 'inactive tabs are stroked too, in the neutral line colour');
+  // Selection must not rest on colour alone (WCAG 1.4.1) — weight still carries it.
+  assert.match(src, /border-\[var\(--brand-accent\)\] bg-\[var\(--brand-soft\)\] font-semibold/);
+  // Two 2px strokes 4px apart read as one divided box; the gap widened with the border.
+  assert.match(src, /role="tablist"[\s\S]{0,120}gap-2"/);
 });

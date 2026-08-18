@@ -75,7 +75,7 @@ export function TenantTabs({ allowedViews }: { allowedViews?: DashboardView[] })
   }
 
   return (
-    <div role="tablist" aria-label="Tenant" className="flex flex-wrap items-center gap-1">
+    <div role="tablist" aria-label="Tenant" className="flex flex-wrap items-center gap-2">
       {options.map((o, i) => {
         const active = o.value === view;
         return (
@@ -93,13 +93,21 @@ export function TenantTabs({ allowedViews }: { allowedViews?: DashboardView[] })
             onClick={() => navigate(o.value)}
             onKeyDown={(e) => onKeyDown(e, i)}
             className={[
-              // BORDERLESS by request: the active tab is carried by weight, ink and a soft tint —
-              // no outline, no pill stroke, no container chrome.
-              'relative inline-flex items-center gap-2 rounded-lg px-4 py-2 text-[15px] transition-colors',
+              // ⚠ THESE WERE BORDERLESS BY REQUEST, AND THAT WAS REVERSED (Alec, 2026-08-18):
+              // "put 2pt borders around Consolidated / BXR Consulting / Indigo Billing to make them
+              // more visible". The original ask was for borderless sub-tabs; carrying the active
+              // state on weight, ink and a soft tint alone turned out not to read as a CONTROL —
+              // nothing said "these are clickable" until you hovered one. So every tab now has a
+              // 2px stroke and the active one takes the brand accent, which keeps selection legible
+              // without going back to a pill-vs-plain-text distinction.
+              //
+              // The container gap went 1 -> 2 at the same time: at gap-1 two adjacent 2px strokes
+              // sit 4px apart and read as one divided box rather than two tabs.
+              'relative inline-flex items-center gap-2 rounded-lg border-2 px-4 py-2 text-[15px] transition-colors',
               'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)]/50',
               active
-                ? 'bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)]'
-                : 'font-medium text-muted-foreground hover:bg-[var(--brand-soft)]/60 hover:text-ink900',
+                ? 'border-[var(--brand-accent)] bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)]'
+                : 'border-line font-medium text-muted-foreground hover:border-[var(--brand-accent)]/50 hover:bg-[var(--brand-soft)]/60 hover:text-ink900',
             ].join(' ')}
           >
             {/* Per-tenant swatch: `data-view` makes globals.css resolve THIS element's
