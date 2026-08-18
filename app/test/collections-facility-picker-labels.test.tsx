@@ -1,14 +1,17 @@
 /**
- * THE COLLECTIONS FACILITY PICKER'S LABELS (2026-08-10).
- *
- * Two raw CMD spellings of one facility resolve to the same curated name and the same IP badge, so
- * the dropdown rendered the same row twice while the two options scoped to 4,195 and 81 charge
- * lines. `facilityPickerOptionsFrom` appends the raw text to exactly the labels that collide.
+ * THE COLLECTIONS FACILITY PICKER — one option per real facility.
  *
  * ⚠ THE FIXTURE IS REAL. `LONESTAR MENTAL HEALTH` / `LONESTAR MENTAL HEALTH LLC` → LSMH / IP is live
  * production data, reproducible from the picker's own query. Do not "simplify" it to FOO/BAR — the
  * bug was invisible precisely because the two labels were plausible, and a synthetic fixture would
  * not have caught that the curated name is byte-identical to ONE of the raw spellings.
+ *
+ * ⚠ THIS FILE REVERSED DIRECTION ON 2026-08-18. It previously asserted that the two LONESTAR options
+ * stayed TWO options and were merely labelled apart — the 2026-08-10 ruling ("Collections is a
+ * raw-grain payment search, not a facility rollup"). Two label-only fixes shipped under that ruling
+ * and both failed the same user: the first was clipped by CSS `truncate`, the second was legible and
+ * still rejected in a browser pass ("it should be merged into one facility"). The ruling is reversed
+ * and these tests now pin the MERGE. See facilityPickerOptions.ts before restoring anything.
  *
  * ⚠️ Must be .tsx — app/package.json collects `test/*.test.tsx` only; a .ts file here would "pass"
  * by never running.
@@ -16,8 +19,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  expandFacilityKeys,
+  facilityGroupsFrom,
   facilityPickerOptionsFrom,
-  FACILITY_DISAMBIGUATOR,
   type FacilityLabelSource,
 } from '../lib/collections/facilityPickerOptions';
 // THE REAL FILTER the picker runs — not a reimplementation. See the type-ahead test below.
@@ -31,116 +35,84 @@ const LIVE: FacilityLabelSource[] = [
   { facility: 'No Facility', facility_name: null, care_setting: null },
 ];
 
-const byValue = (opts: ReturnType<typeof facilityPickerOptionsFrom>, v: string) => {
-  const o = opts.find((x) => x.value === v);
-  assert.ok(o, `no option for ${v}`);
-  return o;
-};
-
-// ── 1. The collision is legible ─────────────────────────────────────────────────────────────────
-test('the two Lonestar options no longer render identically', () => {
+// ── 1. THE MERGE ────────────────────────────────────────────────────────────────────────────────
+test('the two Lonestar spellings become ONE option', () => {
   const opts = facilityPickerOptionsFrom(LIVE);
-  const bare = byValue(opts, 'LONESTAR MENTAL HEALTH');
-  const llc = byValue(opts, 'LONESTAR MENTAL HEALTH LLC');
-  assert.notEqual(bare.display, llc.display, 'the whole defect: same text, different data');
-  assert.equal(bare.display, `LONESTAR MENTAL HEALTH LLC${FACILITY_DISAMBIGUATOR}LONESTAR MENTAL HEALTH`);
-  assert.equal(llc.display, `LONESTAR MENTAL HEALTH LLC${FACILITY_DISAMBIGUATOR}LONESTAR MENTAL HEALTH LLC`);
+  assert.equal(opts.length, 3, 'four raw spellings, three real facilities');
+  const lonestar = opts.filter((o) => o.display.startsWith('LONESTAR'));
+  assert.equal(lonestar.length, 1, 'the whole defect: one place, one row');
+  assert.equal(lonestar[0]!.value, 'LONESTAR MENTAL HEALTH LLC', 'the curated name is the key');
+  assert.equal(lonestar[0]!.detail, '2 CMD spellings', 'the merge is stated, not hidden');
 });
 
-// ── 2. THE BEHAVIOUR THE DIFF CHANGES THAT "displays differ" WOULD NOT CATCH ────────────────────
-//
-// `display` is also the type-ahead's haystack. If the separator or the appended text broke the
-// substring match, the fix would trade a confusing dropdown for a facility nobody can find — a
-// strictly worse outcome, and one every assertion above would still pass through.
-test('typing "Lonestar" still matches BOTH options through the real pickerMatches', () => {
-  const opts = facilityPickerOptionsFrom(LIVE);
-  const hits = opts.filter((o) => pickerMatches(o, 'Lonestar'));
-  assert.equal(hits.length, 2, 'both spellings must remain findable');
+test('THE FILTER STILL MATCHES RAW TEXT — the merge is display-only', () => {
+  // The predicate is `facility = any(...)` over raw CMD text. If a curated key reached it unexpanded
+  // the grid would return ZERO rows for every merged facility — worse than the bug being fixed.
+  const groups = facilityGroupsFrom(LIVE);
   assert.deepEqual(
-    hits.map((h) => h.value).sort(),
+    expandFacilityKeys(['LONESTAR MENTAL HEALTH LLC'], groups),
     ['LONESTAR MENTAL HEALTH', 'LONESTAR MENTAL HEALTH LLC'],
+    'picking the merged row asks for BOTH spellings — 10,044 + 162 charge lines, not 162',
   );
 });
 
-test('the queries an operator actually types still match', () => {
+test('every raw spelling is reachable through exactly one option', () => {
+  // A spelling under no option is invisible data; a spelling under two would over-select.
+  const groups = facilityGroupsFrom(LIVE);
+  const all = groups.flatMap((g) => g.variants);
+  assert.equal(all.length, new Set(all).size, 'no spelling appears twice');
+  assert.deepEqual([...all].sort(), LIVE.map((s) => s.facility).sort());
+  // Selecting every option reproduces the entire vocabulary — "all facilities" is expressible.
+  assert.deepEqual(expandFacilityKeys(groups.map((g) => g.key), groups).sort(), all.sort());
+});
+
+// ── 2. THE TYPE-AHEAD ───────────────────────────────────────────────────────────────────────────
+test('the raw CMD spellings stay findable through the REAL pickerMatches', () => {
+  // `display` is now the CURATED name, so without searchText someone typing what CMD actually calls
+  // the facility would get "No matches" for a facility that is right there.
   const opts = facilityPickerOptionsFrom(LIVE);
   const count = (q: string) => opts.filter((o) => pickerMatches(o, q)).length;
-  assert.equal(count('mental'), 2, 'the query from the original report');
-  assert.equal(count('LONESTAR MENTAL HEALTH'), 2, 'the full curated name still matches both');
-  assert.equal(count('lonestar mental health llc'), 2, 'case-insensitive, and the LLC row is not lost');
-  // The appended text is what makes the narrower query selective — this is the point of the change.
-  assert.equal(count('HEALTH LLC · LONESTAR MENTAL HEALTH LLC'), 1, 'the raw text disambiguates');
+  assert.equal(count('Lonestar'), 1, 'one row, not two');
+  assert.equal(count('mental'), 1, 'the query from the original report');
+  assert.equal(count('LONESTAR MENTAL HEALTH LLC'), 1, 'the raw spelling that is not the label');
   assert.equal(count('nashville'), 1);
   assert.equal(count('zzz'), 0);
 });
 
 // ── 3. Nothing else moves ───────────────────────────────────────────────────────────────────────
-test('an unambiguous facility keeps its curated label byte-for-byte', () => {
+test('an unmerged facility keeps its curated label and gains no detail line', () => {
   const opts = facilityPickerOptionsFrom(LIVE);
-  const nash = byValue(opts, 'NASHVILLE TREATMENT');
-  // Its curated name differs from its raw text — live, 11 of 48 options are like this — and it must
-  // NOT pick up the suffix. Only collisions do.
+  const nash = opts.find((o) => o.value === 'NASHVILLE TREATMENT CENTER');
+  assert.ok(nash);
   assert.equal(nash.display, 'NASHVILLE TREATMENT CENTER');
-  assert.doesNotMatch(nash.display, /·/);
+  assert.equal(nash.detail, undefined, 'no "N CMD spellings" when there is only one');
 });
 
-test('a null facility_name can never produce "X · X"', () => {
-  // Display falls back to the raw text, and raw texts are DISTINCT by construction (the query
-  // selects `distinct value`), so an unresolved bucket can never collide with itself.
-  const opts = facilityPickerOptionsFrom(LIVE);
-  const none = byValue(opts, 'No Facility');
-  assert.equal(none.display, 'No Facility');
-  assert.equal(none.badge, null);
-});
-
-// ── 4. THE GRAIN IS UNCHANGED — the ruling this test exists to protect ──────────────────────────
-test('every option still carries ONE raw facility text as its value', () => {
-  // Collapsing to one option per facility_code with an array_agg of variants is QUALIFY's behaviour
-  // and was explicitly ruled out for Collections (Alec, 2026-08-10): this is a raw-grain payment
-  // search, not a facility rollup. If someone later collapses the query, the option count drops and
-  // this fails — which is the intended alarm, not a nuisance.
-  const opts = facilityPickerOptionsFrom(LIVE);
-  assert.equal(opts.length, LIVE.length, 'one option per RAW spelling, still');
-  assert.deepEqual(
-    opts.map((o) => o.value),
-    LIVE.map((s) => s.facility),
-    'value is the raw CMD text, in input order, untouched',
-  );
-  for (const o of opts) {
-    assert.equal(typeof o.value, 'string', 'value is a single string, never an array of variants');
-  }
-});
-
-test('badges pass through untouched', () => {
-  const opts = facilityPickerOptionsFrom(LIVE);
-  assert.deepEqual(opts.map((o) => o.badge), ['IP', 'IP', 'OP', null]);
-});
-
-// ── 5. It generalises without a code change ─────────────────────────────────────────────────────
-test('a third spelling disambiguates itself, and removing the collision reverts the labels', () => {
-  const three = facilityPickerOptionsFrom([
+test('an UNRESOLVED facility can never merge with anything', () => {
+  // facility_name === null groups under its own raw text. That is the safe direction: a missing
+  // crosswalk entry leaves two options rather than silently fusing two different facilities.
+  const opts = facilityPickerOptionsFrom([
     ...LIVE,
-    { facility: 'LONESTAR MH', facility_name: 'LONESTAR MENTAL HEALTH LLC', care_setting: 'IP' },
+    { facility: 'No Facility 2', facility_name: null, care_setting: null },
   ]);
-  const lonestar = three.filter((o) => o.display.startsWith('LONESTAR MENTAL HEALTH LLC'));
-  assert.equal(lonestar.length, 3);
-  assert.equal(new Set(lonestar.map((o) => o.display)).size, 3, 'all three distinct');
-
-  // If an alias change ever leaves one spelling, the suffix disappears on its own.
-  const one = facilityPickerOptionsFrom([LIVE[0]!]);
-  assert.equal(one[0]!.display, 'LONESTAR MENTAL HEALTH LLC', 'clean curated label, no suffix');
+  const unresolved = opts.filter((o) => o.value.startsWith('No Facility'));
+  assert.equal(unresolved.length, 2, 'unresolved rows stay separate');
 });
 
-// ── 6. searchText stays OUT ─────────────────────────────────────────────────────────────────────
-test('no searchText is set — that is a separate, unapproved change', () => {
-  // Making every raw CMD spelling findable is a search-behaviour change, not a display fix
-  // (Alec, 2026-08-10). Pinned so it cannot arrive by accident inside a display edit.
-  for (const o of facilityPickerOptionsFrom(LIVE)) {
-    assert.equal(o.searchText, undefined);
-  }
-  // Consequence, asserted so the gap is visible rather than assumed: an unambiguous facility is
-  // still NOT findable by its raw CMD text when that differs from the curated name.
-  const nash = byValue(facilityPickerOptionsFrom(LIVE), 'NASHVILLE TREATMENT');
-  assert.equal(pickerMatches(nash, 'NASHVILLE TREATMENT CENTER'), true);
-  assert.equal(pickerMatches(nash, 'NASHVILLE TREATMENT'), true, 'substring of the curated name');
+test('badges pass through, and survive a spelling that did not resolve a care setting', () => {
+  const groups = facilityGroupsFrom([
+    { facility: 'LONESTAR MENTAL HEALTH', facility_name: 'LSMH', care_setting: null },
+    { facility: 'LONESTAR MENTAL HEALTH LLC', facility_name: 'LSMH', care_setting: 'IP' },
+  ]);
+  assert.equal(groups[0]!.badge, 'IP', 'first NON-NULL setting wins, not a null from spelling #1');
+  assert.deepEqual(facilityPickerOptionsFrom(LIVE).map((o) => o.badge), ['IP', 'OP', null]);
+});
+
+// ── 4. The expansion cannot silently widen ──────────────────────────────────────────────────────
+test('an unknown key falls back to itself rather than being dropped', () => {
+  // Dropping it would WIDEN the grid: a chip naming a facility while the results ignore it. This
+  // also keeps a summary DRILL chip working — those carry a RAW facility text, not a curated key.
+  const groups = facilityGroupsFrom(LIVE);
+  assert.deepEqual(expandFacilityKeys(['LONESTAR MENTAL HEALTH'], groups), ['LONESTAR MENTAL HEALTH']);
+  assert.deepEqual(expandFacilityKeys([], groups), [], 'no keys, no predicate');
 });

@@ -65,7 +65,7 @@ import {
   buildQualifyFacilityOptionsQuery,
   buildCmdPayerOptionsQuery,
   buildCmdEmployerOptionsQuery,
-  buildCmdCollectionsEmployerOptionsQuery,
+  buildCmdCollectionsEmployerVocabularyQuery,
   buildCmdEmployerCoverageQuery,
   buildCmdExplorerNameCandidateCountQuery,
   buildCmdExplorerNameCandidatesQuery,
@@ -98,6 +98,11 @@ import {
   type CohortDrilldownTable,
   type CohortDrilldownResult,
 } from '../../src/collections/cmdExplorerQuery.js';
+import {
+  groupEmployerNames,
+  type CanonicalEmployer,
+} from '../../src/collections/employerCanonical.js';
+export type { CanonicalEmployer };
 export {
   CMD_EXPLORER_SEARCH_COLUMNS,
   CMD_EXPLORER_SORTABLE_COLUMNS,
@@ -3335,13 +3340,25 @@ export const cmdExplorerPayers = unstable_cache(
  * changes on the PAYMENT cron (a new charge can introduce a new employer), unlike the VOB one
  * which only changes on the VOB sync. Reader-only.
  */
-export const cmdExplorerCollectionsEmployers = unstable_cache(
-  async (entityIds: string[], term: string, limit: number): Promise<string[]> => {
-    const { sql, params } = buildCmdCollectionsEmployerOptionsQuery(entityIds, term, limit);
+/**
+ * The Collections employer vocabulary, CANONICALISED (2026-08-17).
+ *
+ * Loads every distinct raw spelling for the tenant scope (1,073 live, 118 ms index scan) and groups
+ * them into canonical options — `TESLA INC` / `TESLA, INC.` / `TESLA,INC.` become one `TESLA`
+ * carrying all three as `variants`. The client sends the VARIANTS as `employer_names`, so the SQL
+ * predicate stays `employer_name = any(...)` and no migration or expression index is involved.
+ *
+ * Grouping happens HERE rather than in the client so the canonical rule has exactly one home and is
+ * covered by the root hermetic suite (test/employerCanonical.test.ts). Cached like its siblings: the
+ * vocabulary changes on the PAYMENT cron, when a new charge introduces a new employer.
+ */
+export const cmdExplorerCollectionsEmployerVocabulary = unstable_cache(
+  async (entityIds: string[]): Promise<CanonicalEmployer[]> => {
+    const { sql, params } = buildCmdCollectionsEmployerVocabularyQuery(entityIds);
     const { rows } = await readerExecutor().query<{ employer_name: string }>(sql, params);
-    return rows.map((r) => r.employer_name);
+    return groupEmployerNames(rows.map((r) => r.employer_name));
   },
-  ['cmd-explorer-collections-employers'],
+  ['cmd-explorer-collections-employer-vocabulary'],
   { revalidate: 3600, tags: ['cmd-collections-employers'] },
 );
 

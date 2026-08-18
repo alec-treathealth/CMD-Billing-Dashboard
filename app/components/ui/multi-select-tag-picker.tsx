@@ -8,8 +8,10 @@
  *   - CLIENT (default): the parent loads the full option list ONCE (facility ~30, payer ~260) and this
  *     picker filters it instantly client-side as the user types.
  *   - SERVER (pass `onQueryChange`): the parent owns the option list and re-fetches it per (debounced)
- *     keystroke — for the ~11.6k-employer vocabulary that's too large to load whole. The picker then
- *     does NOT filter client-side (options already reflect the query) and reports the raw query up.
+ *     keystroke, for a vocabulary too large to load whole. The picker then does NOT filter
+ *     client-side (options already reflect the query) and reports the raw query up. Payer Intel's
+ *     employer search uses this; COLLECTIONS no longer does — its employer vocabulary turned out to
+ *     be 1,073 values, not the ~11.6k measured on the VOB plane, so it loads whole like the others.
  * Selected values render as removable tags; a filtered list drops below on focus/typing (capped, with
  * a "keep typing" hint past the cap).
  */
@@ -23,6 +25,25 @@ export type PickerOption = {
   value: string;
   display: string;
   badge?: 'IP' | 'OP' | 'BOTH' | null;
+  /**
+   * SECOND LINE under `display` — shown, and matched by the type-ahead.
+   *
+   * Carries a short qualifier about the option, not a second name. Both Collections pickers use it to
+   * say that an option MERGED several underlying values — "2 CMD spellings" on a facility whose CMD
+   * export carries two spellings of one place, "3 spellings" on a canonicalised employer — so a merge
+   * is visible as a merge instead of looking like the only value there is.
+   *
+   * ⚠ IT IS PART OF THE HAYSTACK. Anything rendered in an option must be matchable, or the user reads
+   * a word on screen, types it, and gets "No matches".
+   *
+   * ⚠ KEEP IT SHORT AND DO NOT PUT A DISTINGUISHING NAME HERE. It exists because an earlier fix put
+   * the distinguishing text in `display` as a SUFFIX and the row renders with `truncate`, so the one
+   * piece of text added to tell two options apart was the piece guaranteed to be clipped — both
+   * LONESTAR options read `LONESTAR MENTAL HEALTH LLC · LO…`. That is now solved upstream by MERGING
+   * the options rather than labelling them apart (facilityPickerOptions.ts), which is why this field
+   * carries a count and not a name.
+   */
+  detail?: string | null;
   /**
    * EXTRA HAYSTACK for the type-ahead — matched in addition to `display`, never shown.
    *
@@ -46,8 +67,10 @@ export type PickerOption = {
  * returned (`employerNarrowFor` needs the full returned set to decide whether a selection is even a
  * narrow).
  *
- * Case-insensitive SUBSTRING, over `display` plus any `searchText`. No token splitting, no fuzzy, no
- * diacritic folding — that is the shipped behaviour and this extraction does not change it.
+ * Case-insensitive SUBSTRING, over `display` plus `detail` plus any `searchText`. No token splitting,
+ * no fuzzy, no diacritic folding — that is the shipped behaviour and this extraction does not change
+ * it. `detail` joined the haystack when it was introduced, to hold the type-ahead byte-identical for
+ * options whose disambiguating text merely MOVED out of `display` (see PickerOption.detail).
  *
  * EXPORTED AND PURE because this component had no direct test coverage at all until 2026-08-08, and
  * "the filter four surfaces depend on" is not something to change without one.
@@ -56,6 +79,7 @@ export function pickerMatches(option: PickerOption, query: string): boolean {
   const q = query.trim().toLowerCase();
   if (q === '') return true;
   if (option.display.toLowerCase().includes(q)) return true;
+  if ((option.detail ?? '').toLowerCase().includes(q)) return true;
   return (option.searchText ?? []).some((t) => t.toLowerCase().includes(q));
 }
 
@@ -119,13 +143,17 @@ export function MultiSelectTagPicker({
   const boxRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+  // value → the label a SELECTED chip shows. `detail` is folded back in here on purpose: the chip is
+  // a single inline row with no second line, so without it two options that differ only in `detail`
+  // (the LONESTAR pair) would produce two byte-identical chips — re-creating, in the selection, the
+  // exact ambiguity `detail` exists to remove from the dropdown.
   const displayOf = useMemo(() => {
     const m = new Map<string, string>(displayOverride ?? []);
-    for (const o of options) m.set(o.value, o.display);
+    for (const o of options) m.set(o.value, o.detail ? `${o.display} · ${o.detail}` : o.display);
     return m;
   }, [options, displayOverride]);
 
-  // Dismiss on outside pointer-down or Escape (same pattern as the Month/Year + view-switcher popovers).
+  // Dismiss on outside pointer-down or Escape (same pattern as the Month/Year popover).
   useEffect(() => {
     if (!open) return;
     function onDown(e: PointerEvent) {
@@ -282,7 +310,14 @@ export function MultiSelectTagPicker({
                       className={['h-3.5 w-3.5 shrink-0 text-[var(--brand-accent)]', on ? '' : 'opacity-0'].join(' ')}
                       aria-hidden
                     />
-                    <span className="truncate text-ink900">{o.display}</span>
+                    <span className="flex min-w-0 flex-col">
+                      <span className="truncate text-ink900">{o.display}</span>
+                      {/* NOT truncated: this line exists to be read in full — it is the only thing
+                          distinguishing two options that share a label. It wraps instead. */}
+                      {o.detail ? (
+                        <span className="break-words text-xs leading-tight text-muted-foreground">{o.detail}</span>
+                      ) : null}
+                    </span>
                   </span>
                   {o.badge !== undefined && (
                     <span

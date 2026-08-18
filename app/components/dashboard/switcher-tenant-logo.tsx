@@ -3,7 +3,7 @@
 /**
  * Super-admin, switcher-side tenant logo. A super-admin's "current tenant" is the `?view=` param
  * (client-only — the root layout is a Server Component and can't read searchParams), so this
- * mirrors ViewSwitcher / BrandTheme: it renders the CURRENT tenant's logo immediately to the LEFT
+ * mirrors TenantTabs / BrandTheme: it renders the CURRENT tenant's logo immediately to the LEFT
  * of the dropdown, and ONLY when there is a single tenant to show —
  *   • on a /dashboard route (there is no view elsewhere),
  *   • for a multi-view principal (super-admin; ≤1 view means no switcher and no tenant choice), and

@@ -48,7 +48,8 @@ import {
   type CollectionsAiInput,
   cmdExplorerFacilities,
   cmdExplorerPayers,
-  cmdExplorerCollectionsEmployers,
+  cmdExplorerCollectionsEmployerVocabulary,
+  type CanonicalEmployer,
   cmdExplorerEmployerCoverage,
   recordAccess,
   revealCmdExplorerRow,
@@ -102,6 +103,7 @@ import {
   removeUpcomingManualRow,
   type ManualForecastRow,
 } from '@/lib/server';
+import { AUTO_GRID_VIEW_NAME, isAutoGridView } from '../../src/collections/gridViewLayout.js';
 import { facilityBelongsToEntity, facilityIsActiveForEntity } from '../../src/collections/cmdCustomers.js';
 // The shared cache tag the collections aggregate reads are wrapped in (src/cacheTags.ts).
 // A manual-deposit write MUST bust it: those reads are unstable_cache'd, so without this
@@ -1291,20 +1293,28 @@ const CMD_EMPLOYER_FILTER_MAX = 200;
 const CMD_ROW_IDS_MAX = 2000; // mirrors CMD_NAME_SEARCH_ROW_CAP — a search cannot match more
 
 /**
- * Copy the employer segment + picked employers into the reader filter, validated.
+ * Copy the picked employers into the reader filter, validated.
  *
- * The mode is checked against the closed set rather than cast: it reaches a SQL branch, and an
- * unknown value must degrade to 'all' (no condition) instead of throwing or, worse, being
- * interpolated. Employer names are values only — they are bound as `$n` — but they are still
+ * ⚠ THE All/Employer/Individual SEGMENT WAS REMOVED 2026-08-18 (Alec) and this function is where its
+ * last teeth were. It used to gate the names on `employerMode === 'employer'` — which meant that
+ * when the picker became always-available, the client happily sent `employer_names` while sitting in
+ * `all` and THIS FUNCTION SILENTLY DROPPED THEM. The filter looked applied (chips on screen) and the
+ * grid ignored it. A client-only fix could never have worked; the gate lived here.
+ *
+ * The segment is gone because it never earned its place: picking a named employer already means "an
+ * employer-sponsored policy", picking nothing means "no restriction", and a row with no employer is
+ * already legible in the Employer cell — so `individual` asked the user to state something they
+ * could read off the grid, and `all` vs `employer` was a distinction without a difference once a
+ * name was picked.
+ *
+ * `employerMode` is deliberately NOT read here any more, so a stale or hand-crafted mode from an old
+ * client cannot reach the SQL branch. Employer names are values only (bound as `$n`) but are still
  * length- and count-bounded because they come from the client.
  */
 function applyEmployerFilter(
   filter: CmdReportFilter,
-  readerFilter: { employer_names?: string[]; employerMode?: 'all' | 'employer' | 'individual' },
+  readerFilter: { employer_names?: string[] },
 ): boolean {
-  const mode = filter.employerMode;
-  if (mode === 'employer' || mode === 'individual') readerFilter.employerMode = mode;
-  // 'all', undefined, or anything unrecognised → no condition at all.
   const names = filter.employer_names;
   if (Array.isArray(names) && names.length > 0) {
     if (names.length > CMD_EMPLOYER_FILTER_MAX) return false;
@@ -1312,9 +1322,7 @@ function applyEmployerFilter(
       .filter((n): n is string => typeof n === 'string')
       .map((n) => n.trim())
       .filter((n) => n !== '' && n.length <= 200);
-    // Picked employers only narrow WITHIN the Employer segment; outside it a stale selection must
-    // not keep filtering (same guard the client applies, enforced again here).
-    if (clean.length > 0 && readerFilter.employerMode === 'employer') readerFilter.employer_names = clean;
+    if (clean.length > 0) readerFilter.employer_names = clean;
   }
   return true;
 }
@@ -2001,39 +2009,37 @@ export async function loadCmdExplorerPayers(view?: DashboardView): Promise<CmdPa
   }
 }
 
-/** Max employer options one type-ahead keystroke may return. Bounds the payload AND the work. */
-const COLLECTIONS_EMPLOYER_OPTIONS_LIMIT = 25;
+export type { CanonicalEmployer };
 
-export type CmdCollectionsEmployersResult = { ok: true; employers: string[] } | { ok: false };
+export type CmdCollectionsEmployersResult =
+  | { ok: true; employers: CanonicalEmployer[] }
+  | { ok: false };
 
 /**
- * COLLECTIONS employer type-ahead (migration 0101) — reads collections.cmd_explorer_rows, NOT the
- * VOB. Ruled 2026-08-15: Collections reads collections data only; CMD is always the most current
- * source for collections, so a VOB-derived employer would both under-cover and disagree with the
- * grid beside it.
+ * THE COLLECTIONS EMPLOYER VOCABULARY, canonicalised (2026-08-17). Reads
+ * collections.cmd_explorer_rows, NOT the VOB — ruled 2026-08-15 and reaffirmed 2026-08-17 ("the VOB
+ * data is not accurate; make the canonical layer from collections").
  *
- * Unlike facility/payer (~260 options each, loaded whole and filtered client-side), the employer
- * vocabulary is large, so this searches SERVER-SIDE per keystroke. The term floor is enforced HERE
- * as well as in the client: a 1–2 character term matches a huge fraction of the book and is the
- * single most expensive query on this surface, so the server must not depend on the client to gate
- * it. Returns [] rather than an error for a short term — a mid-typing request is not a failure.
+ * ⚠ THIS REPLACED A PER-KEYSTROKE SEARCH, and the change is not a micro-optimisation. The old
+ * action searched server-side on every keystroke because the vocabulary was assumed large; it is
+ * 1,073 distinct spellings on this plane (the ~11.6k figure was the VOB side). Loading it whole —
+ * one 118 ms index scan per view, like facility and payer — is what makes canonical grouping
+ * CORRECT: a group's `variants` drive the grid predicate, and a group built from a term-matched
+ * page would carry only the spellings that happened to match, silently under-selecting rows. See
+ * buildCmdCollectionsEmployerVocabularyQuery.
  *
- * RBAC-clamped by `view` through the server-derived entity scope. Non-PHI: an employer is a
- * plan-level attribute in the same class as the payer name.
+ * The per-keystroke path still exists for PAYER INTEL, which wants a term-scoped page. Don't merge.
+ *
+ * RBAC-clamped by `view` through the server-derived entity scope. Non-PHI: an employer is the plan
+ * SPONSOR, in the same class as the payer name (ruled 2026-08-14 — employER, never employEE).
  */
-export async function searchCollectionsEmployers(
-  term: string,
+export async function loadCollectionsEmployerVocabulary(
   view?: DashboardView,
 ): Promise<CmdCollectionsEmployersResult> {
   const entityIds = await viewEntityScope(view);
   if (entityIds === null) return { ok: false };
-  const t = typeof term === 'string' ? term.trim() : '';
-  if (t.length < CMD_SEARCH_TERM_MIN) return { ok: true, employers: [] };
   try {
-    return {
-      ok: true,
-      employers: await cmdExplorerCollectionsEmployers(entityIds, t, COLLECTIONS_EMPLOYER_OPTIONS_LIMIT),
-    };
+    return { ok: true, employers: await cmdExplorerCollectionsEmployerVocabulary(entityIds) };
   } catch {
     return { ok: false };
   }
@@ -2118,6 +2124,12 @@ export async function saveGridView(
   if (trimmed.length < 1 || trimmed.length > GRID_VIEW_NAME_MAX) {
     return { ok: false, error: `View name must be 1–${GRID_VIEW_NAME_MAX} characters.` };
   }
+  // The reserved auto-layout row is written ONLY by saveGridLayout below. Letting a user claim the
+  // name here would let them overwrite their own live layout with a snapshot, and — because the UI
+  // filters that name out of the view list — leave them a view they can neither see nor delete.
+  if (isAutoGridView(trimmed)) {
+    return { ok: false, error: 'That view name is reserved.' };
+  }
   const cols = sanitizeGridColumns(columns);
   if (cols.length === 0) return { ok: false, error: 'A view must include at least one column.' };
   const colSet = new Set<string>(cols);
@@ -2135,6 +2147,40 @@ export async function saveGridView(
 }
 
 /** Make one of the caller's views their default (server fn errors if the name isn't theirs/absent). */
+/**
+ * Persist the caller's LIVE column layout (the reserved auto-saved row) — "sticky columns".
+ *
+ * Separate from `saveGridView` on purpose. That one is user-driven and now REFUSES the reserved
+ * name; this one writes only that row and cannot create a named view. Two entry points means
+ * neither can be used to impersonate the other.
+ *
+ * Never sets `is_default`: precedence between the live layout and a named default view is resolved
+ * at LOAD time, so this write can never steal the default flag from a view the user chose.
+ *
+ * Returns the same shape as its sibling, but the client fires this and ignores the result — a lost
+ * layout save must not surface an error over the grid, and the next change re-saves it.
+ */
+export async function saveGridLayout(
+  columns: string[],
+  hidden: string[] = [],
+): Promise<GridViewMutationResult> {
+  const uid = await currentUserId();
+  if (!uid) return { ok: false, error: 'Sign in to save a layout.' };
+  const cols = sanitizeGridColumns(columns);
+  if (cols.length === 0) return { ok: false, error: 'A layout must include at least one column.' };
+  const colSet = new Set<string>(cols);
+  const hiddenCols = sanitizeGridColumns(hidden).filter((c) => colSet.has(c));
+  if (hiddenCols.length >= cols.length) {
+    return { ok: false, error: 'A layout must keep at least one column visible.' };
+  }
+  try {
+    await saveGridViewRow(uid, AUTO_GRID_VIEW_NAME, cols, hiddenCols, false);
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Could not save the layout.' };
+  }
+}
+
 export async function setDefaultGridView(name: string): Promise<GridViewMutationResult> {
   const uid = await currentUserId();
   if (!uid) return { ok: false, error: 'Sign in to set a default view.' };

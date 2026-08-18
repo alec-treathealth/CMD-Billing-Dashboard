@@ -9,6 +9,7 @@ import {
   buildCmdPayerOptionsQuery,
   buildCmdEmployerOptionsQuery,
   buildCmdCollectionsEmployerOptionsQuery,
+  buildCmdCollectionsEmployerVocabularyQuery,
   CMD_FUNDING_MARKETS,
   buildCohortCurveQueries,
   buildCohortDrilldownQueries,
@@ -975,6 +976,39 @@ test('employer_name is an allowlisted grid column key (saved views may show it)'
   assert.deepEqual(sanitizeGridColumns(['employer_name', 'facility']), ['employer_name', 'facility']);
 });
 
+test('the four rollup TEXT columns are sortable, and the sort binds the physical column', () => {
+  // Added 2026-08-17 ("orderable just like Excel"). All four live on the charge rollup, so the
+  // keyset subquery can drive off them with no schema change.
+  for (const c of ['cpt_code', 'revenue_code', 'primary_payer', 'facility'] as const) {
+    assert.ok(
+      (CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes(c),
+      `${c} must be sortable`,
+    );
+    const { sql } = buildCmdExplorerQuery(null, {}, { column: c, direction: 'asc' }, 50, ENTITY);
+    // INSIDE the keyset subquery, bound to the rollup alias — not the outer post-join order.
+    assert.match(sql, new RegExp(`order by t\\.${c} asc nulls last, t\\.id asc`), `${c} inner sort`);
+  }
+});
+
+test('a text sort still keysets: the cursor compares the same column it orders by', () => {
+  // Text columns page by string comparison. If the boundary compared a different column than the
+  // ORDER BY, paging would skip or repeat rows silently — no error, just missing charge lines.
+  const { sql, params } = buildCmdExplorerQuery(
+    { id: 42, value: 'LONESTAR MENTAL HEALTH' }, {}, { column: 'facility', direction: 'desc' }, 50, ENTITY,
+  );
+  assert.match(sql, /facility < \$\d+ or \(facility = \$\d+ and id < \$\d+\) or facility is null/);
+  assert.ok(params.includes('LONESTAR MENTAL HEALTH'), 'cursor value is BOUND, never interpolated');
+  assert.ok(params.includes(42));
+});
+
+test('the three PHI columns are NOT sortable — the rollup has only blind indexes for them', () => {
+  // Independent of the employer reason below: there is no plaintext to order by, and HMAC order is
+  // not alphabetical order. Sorting one would look broken AND leak an ordering over PHI.
+  for (const c of ['patient_name', 'member_id_raw', 'group_number']) {
+    assert.ok(!(CMD_EXPLORER_SORTABLE_COLUMNS as readonly string[]).includes(c), `${c} must not sort`);
+  }
+});
+
 test('employer_name is NOT sortable — it is not on the rollup the keyset pages', () => {
   // Sorting the grid by employer would require the keyset to drive off a column the paged matview
   // does not have. Adding it to the sortable allowlist without moving it onto the rollup would
@@ -995,6 +1029,25 @@ test('collections employer options: reads the base table, escapes the term, bind
   assert.doesNotMatch(sql, /employer_norm/);
   // LIKE metacharacter escaped, never interpolated
   assert.deepEqual(params, [ENTITY, '%boe\\%ing%', 25]);
+});
+
+test('collections employer VOCABULARY: whole tenant vocabulary, tenant-scoped, no term, no limit', () => {
+  const { sql, params } = buildCmdCollectionsEmployerVocabularyQuery(ENTITY);
+  assert.match(sql, /^select distinct employer_name /, 'one projected column, never SELECT *');
+  assert.match(sql, /from collections\.cmd_explorer_rows/);
+  assert.match(sql, /business_entity_id = any\(\$1::uuid\[\]\)/, 'tenant-scoped');
+  // Blank-but-present employers excluded, matching the employerMode partition exactly. If these
+  // disagree, the segment counts and the picker vocabulary describe different row sets.
+  assert.match(sql, /employer_name is not null and employer_name <> ''/);
+  // ⚠ NO term and NO limit, and that is the correctness requirement rather than an omission:
+  // canonical grouping turns these rows into option `variants` that drive the grid predicate, so a
+  // term-matched or truncated set would silently under-select. See employerCanonical.ts.
+  assert.doesNotMatch(sql, /ilike/);
+  assert.doesNotMatch(sql, /limit/);
+  assert.deepEqual(params, [ENTITY], 'entity ids are the ONLY bound parameter');
+  // NOT the VOB sibling — Collections reads collections data only (ruled 2026-08-15/17).
+  assert.doesNotMatch(sql, /vob\./);
+  assert.doesNotMatch(sql, /employer_norm/);
 });
 
 test('grid: an UNVALIDATED sort column can never reach the SQL text', () => {

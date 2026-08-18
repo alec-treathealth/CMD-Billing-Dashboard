@@ -1,7 +1,6 @@
 import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import { NavLinks } from '@/components/nav-links';
-import { ViewSwitcher } from '@/components/dashboard/view-switcher';
 import { SwitcherTenantLogo } from '@/components/dashboard/switcher-tenant-logo';
 import { TenantLogo } from '@/components/tenant-logo';
 import { UserMenu } from '@/components/user-menu';
@@ -120,21 +119,21 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               <NavLinks role={role} />
             </Suspense>
           )}
-          {/* col 3: view switcher (dashboard routes only) + user avatar.
-              The ViewSwitcher is NON-PHI UI (it just rewrites ?view=) and renders regardless
-              of auth — production gates the app via Vercel Deployment Protection, where there
-              is no Supabase session/email, so gating it on `email` wrongly hid it there. It
-              reads ?view= via useSearchParams, so it must be wrapped in Suspense for the static
-              routes (/, /code-reference) this shared layout also renders, and it self-hides off
-              dashboard routes. The avatar needs a session email, so it stays conditional. */}
+          {/* col 3: current-tenant logo + user avatar.
+              ⚠ THE ViewSwitcher DROPDOWN WAS REMOVED FROM HERE 2026-08-18 (Alec: "No dropdowns").
+              Entity selection now lives ON the page as <TenantTabs>, on Overview and Collections —
+              the two routes that actually have a `?view=` scope. Do not re-add a switcher to the top
+              bar: two controls writing the same URL param would be a state-sync bug waiting to
+              happen, and the whole point of the change was that the choice should be visible at rest
+              rather than collapsed into a label.
+              SwitcherTenantLogo STAYS: it is a read-only indicator of the active tenant (client,
+              ?view=-driven; null on consolidated / off-dashboard), which is still useful in the
+              chrome on every route. It reads ?view= via useSearchParams, so it keeps its Suspense
+              boundary for the static routes (/, /code-reference) this shared layout also renders.
+              The avatar needs a session email, so it stays conditional. */}
           <div className="flex items-center justify-end gap-3">
-            {/* super-admin: current-tenant logo LEFT of the switcher (client, ?view=-driven; null on
-                consolidated / off-dashboard). Single-tenant users render nothing here (≤1 view). */}
             <Suspense fallback={null}>
               <SwitcherTenantLogo allowedViews={allowedViews} />
-            </Suspense>
-            <Suspense fallback={null}>
-              <ViewSwitcher allowedViews={allowedViews} />
             </Suspense>
             {/* single-tenant user: their entity's logo immediately LEFT of the avatar (server-side). */}
             {singleTenantSlug ? <TenantLogo slug={singleTenantSlug} /> : null}

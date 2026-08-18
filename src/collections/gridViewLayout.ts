@@ -44,3 +44,41 @@ export function deriveGridLayout(
 
   return { order, hidden };
 }
+
+/**
+ * The reserved view name that holds a user's LIVE column layout (2026-08-17).
+ *
+ * ── WHY IT EXISTS ──────────────────────────────────────────────────────────────────────────────
+ * Reported: *"We need to make the column setting sticky and savable for the user to save the view
+ * that they want, which doesn't work at the moment."*
+ *
+ * The named-view machinery is NOT broken — verified 2026-08-17 against production: the
+ * `save_grid_view` definer upserts correctly on (app_user_id, view_name), `claims_reader` holds
+ * EXECUTE on all four definers and SELECT (never INSERT) on the table, RLS is on with two policies,
+ * and the load path applies the caller's default view on both the seeded and the fetched mount.
+ *
+ * What was missing is STICKINESS. Reordering or hiding a column changed component state only, so a
+ * reload discarded it unless the user opened the popover, typed a name, ticked "default" and saved.
+ * The production table showed the shape of that failure exactly: ONE view ever saved, with
+ * `created_at = updated_at` — the ritual was performed once and abandoned.
+ *
+ * So the live layout is now auto-saved under this reserved name after every change, and preferred
+ * over the default view on load (it is by definition the most recent thing the user did). Named
+ * views keep working unchanged and become what they should always have been: snapshots to switch
+ * between, not the only way to keep your own columns.
+ *
+ * ── WHY A RESERVED ROW AND NOT BROWSER STORAGE ─────────────────────────────────────────────────
+ * `localStorage` is the obvious implementation and is FORBIDDEN here: "Nothing app-state goes into
+ * localStorage or cookies" (.claude/rules/nextjs-app.md). It would also make the layout per-device
+ * rather than per-user, which is not what "sticky" means to someone using two machines.
+ *
+ * ⚠ HIDE IT FROM THE VIEW LIST. It is a real row in the same table, so any UI listing saved views
+ * must filter it out — otherwise the user sees a view named `__auto__` they never created, and can
+ * rename, delete or set-default it. Use `isAutoGridView`.
+ */
+export const AUTO_GRID_VIEW_NAME = '__auto__';
+
+/** Is this the reserved auto-saved layout rather than a user's named view? */
+export function isAutoGridView(name: string): boolean {
+  return name === AUTO_GRID_VIEW_NAME;
+}

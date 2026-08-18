@@ -73,7 +73,13 @@ import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-s
 // Pure, and deliberately OUTSIDE this file so it can be unit-tested: importing this component pulls
 // in lib/actions.ts → lib/access.ts, which calls React `cache` at module scope and cannot load under
 // the test runner at all.
-import { facilityPickerOptionsFrom } from '@/lib/collections/facilityPickerOptions';
+import {
+  expandFacilityKeys,
+  facilityGroupsFrom,
+  facilityPickerOptionsFrom,
+} from '@/lib/collections/facilityPickerOptions';
+import { applyEmployerFilter } from '@/lib/collections/employerSegment';
+import { expandEmployerKeys } from '../../../src/collections/employerCanonical.js';
 // The AI panel's prompt ASKS for markdown; this renders it as markup instead of printing `**`/`##`.
 import { Markdown } from '@/components/ui/markdown';
 import { PHI_MASK } from '@/lib/phi';
@@ -84,7 +90,8 @@ import {
   loadCmdExplorerFacilities,
   loadCmdExplorerPayers,
   loadCollectionsEmployerCoverage,
-  searchCollectionsEmployers,
+  loadCollectionsEmployerVocabulary,
+  type CanonicalEmployer,
   loadCohortCurve,
   loadCohortDrilldown,
   generateCollectionsAiAnalysis,
@@ -92,6 +99,7 @@ import {
   revealCmdReportRows,
   listGridViews,
   saveGridView,
+  saveGridLayout,
   setDefaultGridView,
   deleteGridView,
   type CmdReportResult,
@@ -110,7 +118,7 @@ import {
   type GridViewRow,
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
-import { deriveGridLayout } from '../../../src/collections/gridViewLayout';
+import { deriveGridLayout, isAutoGridView } from '../../../src/collections/gridViewLayout';
 import { facilityCodesForEntity } from '../../../src/collections/cmdCustomers';
 import { INDIGO_ENTITY_ID } from '../../../src/tenants';
 import {
@@ -157,9 +165,11 @@ const COLUMNS: readonly { key: ColKey; label: string; phi: boolean; numeric: boo
 /**
  * Minimum characters before the employer type-ahead queries the server. MIRRORS
  * CMD_SEARCH_TERM_MIN in src/collections/cmdExplorerQuery.ts — this copy exists only to avoid
- * firing a request the server would reject anyway, and is NOT the boundary: searchCollectionsEmployers
- * enforces the same floor server-side, because a client-side gate is a UX optimisation and never a
- * guarantee. A 1–2 character term matches a large fraction of a 650k-row table.
+ * firing a request the server would reject anyway, and is NOT the boundary: the server enforces the
+ * same floor, because a client-side gate is a UX optimisation and never a guarantee. (As of
+ * 2026-08-17 the Collections employer picker loads its whole 1,073-entry vocabulary once and filters
+ * client-side, so this floor no longer gates a Collections round trip — it still gates Payer Intel's
+ * per-keystroke employer search, which shares the constant.)
  */
 const MIN_SEARCH_LEN = 3;
 /** Mirrors CMD_NAME_SEARCH_ROW_CAP in app/lib/server.ts (ratified by Alec 2026-08-17). Used ONLY for
@@ -188,15 +198,27 @@ const DEFAULT_ORDER: ColKey[] = COLUMNS.map((c) => c.key);
 // Columns hidden by default for users WITHOUT a saved view — data kept, re-showable via the column
 // picker. A user's saved view carries its own explicit visibility (hidden_columns) and still governs.
 const DEFAULT_HIDDEN = new Set<ColKey>(['adjustments']);
-// Columns the grid can sort by (server-side; mirrors CMD_EXPLORER_SORTABLE_COLUMNS): the two date
-// columns + all seven money/ratio columns. allowed_amount / pct_allowed / pct_paid are SORTABLE
-// AGAIN (0059 repoint ③): the rollup materializes allowed_reliable + both pcts, so there is a real
-// column to keyset on — the server maps the allowed_amount sort onto the physical allowed_reliable
-// column (the value this grid actually displays). Everything else (codes, facility, payer, PHI) is
-// unsorted as before.
+// Columns the grid can sort by (server-side; MIRRORS CMD_EXPLORER_SORTABLE_COLUMNS and must stay in
+// lockstep with it — a key here that the server rejects silently falls back to the default sort, so
+// the header would show an arrow the rows do not obey). Two dates + seven money/ratio columns +
+// four text columns.
+//
+// The four text columns (cpt_code, revenue_code, primary_payer, facility) were added 2026-08-17 to
+// make the grid orderable "just like Excel". They live on the rollup, so no schema change; only
+// primary_payer has a supporting btree and the other three were MEASURED against an already-shipped
+// unindexed sort before shipping (facility 155.9 ms vs charge_amount 169.5 ms, same plan shape).
+//
+// ⚠ Employer and the three PHI columns stay OUT, for two different reasons — see
+// CMD_EXPLORER_SORTABLE_COLUMNS. Short version: employer is joined outside the keyset subquery, so
+// sorting it would reorder only the fetched page; PHI exists on the rollup as blind indexes only,
+// and HMAC order is not alphabetical order.
 const SORTABLE_KEYS = new Set<string>([
   'charge_date',
   'payment_received',
+  'cpt_code',
+  'revenue_code',
+  'primary_payer',
+  'facility',
   'charge_amount',
   'allowed_amount',
   'pct_allowed',
@@ -369,7 +391,13 @@ export function CmdCollectionsExplorer({
   const seededFacilities = facilitiesRes && facilitiesRes.ok ? facilitiesRes.facilities : null;
   const viewsRes = initialData?.views;
   const seededViews = viewsRes && viewsRes.ok ? viewsRes.views : null;
-  const seededDefaultView = seededViews?.find((v) => v.isDefault) ?? null;
+  // The LIVE layout wins over the named default view — it is by definition the most recent thing the
+  // user did with their columns. The named default is the starting point for a user who has no live
+  // layout yet (first ever load, or right after a reset). See AUTO_GRID_VIEW_NAME.
+  const seededDefaultView =
+    seededViews?.find((v) => isAutoGridView(v.name)) ??
+    seededViews?.find((v) => v.isDefault) ??
+    null;
 
   const [rows, setRows] = useState<CmdExplorerRow[]>(() => (seededReport ? seededReport.rows : []));
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>(() =>
@@ -414,8 +442,7 @@ export function CmdCollectionsExplorer({
    *  and is deliberately distinguished from "no filter" so it cannot silently widen to every row). */
   const [nameMatchIds, setNameMatchIds] = useState<string[] | null>(null);
   const [nameNotice, setNameNotice] = useState<string | null>(null);
-  const [employerMode, setEmployerMode] = useState<'all' | 'employer' | 'individual'>('all');
-  // Picked employers for the guided type-ahead, meaningful only while employerMode === 'employer'.
+  // Picked employers, as CANONICAL KEYS ('TESLA'), expanded to their raw spellings at filter time.
   const [employerSelection, setEmployerSelection] = useState<string[]>([]);
   // Whether ANY employer value exists in this tenant scope — see the coverage effect below.
   const [hasEmployerData, setHasEmployerData] = useState(false);
@@ -423,13 +450,20 @@ export function CmdCollectionsExplorer({
   // Consolidated, BXR has employers and Indigo structurally does not, so `has` is true (keep the
   // filter available) while `all` is false (a blank must not claim "Individual").
   const [allHaveEmployerData, setAllHaveEmployerData] = useState(false);
-  // Employer type-ahead is SERVER-driven (the vocabulary is far too large to load whole, unlike
-  // the ~260-entry facility/payer lists). The picker reports the typed query; we debounce it and
-  // hand back whatever the server returned, unfiltered — re-filtering client-side would drop rows
-  // the server deliberately matched.
-  const [employerOptions, setEmployerOptions] = useState<string[]>([]);
-  const [employerLoading, setEmployerLoading] = useState(false);
-  const [employerQuery, setEmployerQuery] = useState('');
+  /**
+   * The CANONICAL employer vocabulary, loaded whole per view (2026-08-17).
+   *
+   * ⚠ THIS WAS A SERVER-DRIVEN PER-KEYSTROKE TYPE-AHEAD until 2026-08-17, on the belief that the
+   * vocabulary was "far too large to load whole, unlike the ~260-entry facility/payer lists". That
+   * was measured on the VOB plane. The COLLECTIONS book carries 1,073 distinct spellings — the same
+   * order as facility and payer — so it now loads once per view and filters client-side exactly like
+   * they do. That is what makes the Employer picker behave like its neighbours instead of lagging a
+   * debounce behind every keystroke.
+   *
+   * It is also required for correctness: each option's `variants` become the grid predicate, so a
+   * group assembled from a term-matched page would under-select. See employerCanonical.ts.
+   */
+  const [employerVocabulary, setEmployerVocabulary] = useState<CanonicalEmployer[]>([]);
   const [payerSelection, setPayerSelection] = useState<string[]>([]);
 
   // Searchable PHI (gated to canRevealPhi + audited server-side). These are matched via keyed
@@ -519,6 +553,9 @@ export function CmdCollectionsExplorer({
   // Per-user saved column views (server-side, private). Loaded once on mount; the caller's default
   // view (if one exists) sets the initial layout, else all columns (DEFAULT_ORDER).
   const [views, setViews] = useState<GridViewRow[]>(() => seededViews ?? []);
+  /** Saved views the USER created. The reserved auto-layout row lives in the same table and must
+   *  never appear as something the user can rename, delete or set as default. */
+  const namedViews = views.filter((v) => !isAutoGridView(v.name));
   const [columnsMenuOpen, setColumnsMenuOpen] = useState(false);
   // If views were server-seeded, the default layout is already applied via the order/hidden
   // initializers above — mark it applied so the (skipped) mount effect never re-applies it.
@@ -565,7 +602,6 @@ export function CmdCollectionsExplorer({
     (facilitySelection.length > 0 ||
       payerSelection.length > 0 ||
       employerSelection.length > 0 ||
-      employerMode !== 'all' ||
       recencyDays > 0 ||
       month > 0 ||
       hasPhiSearch);
@@ -589,10 +625,9 @@ export function CmdCollectionsExplorer({
       const f: Parameters<typeof searchCollectionsPatientName>[1] = {};
       if (recencyDays > 0) f.recencyDays = recencyDays;
       else if (month > 0) { f.year = year; f.month = month; }
-      if (facilitySelection.length > 0) f.facility = facilitySelection;
+      if (facilitySelection.length > 0) f.facility = expandFacilityKeys(facilitySelection, facilityGroups);
       if (payerSelection.length > 0) f.primary_payers = payerSelection;
-      if (employerMode !== 'all') f.employerMode = employerMode;
-      if (employerMode === 'employer' && employerSelection.length > 0) f.employer_names = employerSelection;
+      applyEmployerFilter(f, employerSelection, employerVocabulary);
       if (hasPhiSearch) {
         f.phiSearch = {
           ...(dMember !== '' ? { memberId: dMember } : {}),
@@ -625,13 +660,27 @@ export function CmdCollectionsExplorer({
       setNameSearching(false);
     }
   }, [nameQuery, nameSearchAllowed, recencyDays, month, year, facilitySelection, payerSelection,
-      employerMode, employerSelection, hasPhiSearch, dMember, dAlpha, dGroup, view]);
+      employerSelection, hasPhiSearch, dMember, dAlpha, dGroup, view]);
   // Stable dep keys for the selection sets (array identity changes on every toggle otherwise).
   const payerKey = payerSelection.join('\n');
-  // Stable string proxy for employerSelection's CONTENTS, mirroring payerKey. A raw array in a
-  // dependency list is compared by identity, so a new array with identical contents would refetch
-  // every render; the newline join is safe because employer names cannot contain one.
-  const employerKey = employerSelection.join('\n');
+  /**
+   * Stable string proxy for what the employer filter ACTUALLY SENDS, mirroring payerKey. A raw array
+   * in a dependency list is compared by identity, so a new array with identical contents would
+   * refetch every render; the newline join is safe because employer names cannot contain one.
+   *
+   * ⚠ KEYED ON THE EXPANSION, NOT THE SELECTION (2026-08-17). The selection holds canonical keys and
+   * the wire carries their raw spellings, so the expansion is the thing whose change must trigger a
+   * refetch. Keying on the selection alone would miss a vocabulary that arrives AFTER a selection
+   * exists — the grid would keep showing results for an expansion it no longer sends.
+   *
+   * Deliberately '' while nothing is selected, so the vocabulary loading on mount (every page load,
+   * [] → 1,073 options) does NOT invalidate this key and trigger a second grid + summary fetch. That
+   * is why this is a derived key rather than `employerVocabulary` in the dependency arrays.
+   */
+  const employerKey =
+    employerSelection.length > 0
+      ? expandEmployerKeys(employerSelection, employerVocabulary).join('\n')
+      : '';
   const facilityKey = facilitySelection.join(''); // control char can't appear in a facility name
 
   // --- dual-mode yield + AI-analysis input assembly ------------------------
@@ -709,27 +758,31 @@ export function CmdCollectionsExplorer({
     () => facilityPickerOptionsFrom(facilityOptions),
     [facilityOptions],
   );
+  /** Curated key → its raw CMD spellings. The picker merges; the FILTER still matches raw text. */
+  const facilityGroups = useMemo(() => facilityGroupsFrom(facilityOptions), [facilityOptions]);
   const payerPickerOptions = useMemo<PickerOption[]>(
     () => payerOptions.map((p) => ({ value: p, display: p })),
     [payerOptions],
   );
-  const employerPickerOptions = useMemo(
-    () => employerOptions.map((e) => ({ value: e, display: e })),
-    [employerOptions],
+  // One row per CANONICAL employer. `value` is the key, and the second line names how many raw CMD
+  // spellings it covers — so a merged group is visible as a merge rather than looking like the only
+  // spelling there is.
+  const employerPickerOptions = useMemo<PickerOption[]>(
+    () =>
+      employerVocabulary.map((e) => ({
+        value: e.key,
+        display: e.key,
+        ...(e.variantCount > 1 ? { detail: `${e.variantCount} spellings` } : {}),
+        // The raw spellings stay findable: someone who knows the book types "TESLA,INC." and must
+        // still land on TESLA. `display` alone would not match it.
+        searchText: e.variants,
+      })),
+    [employerVocabulary],
   );
   const toggleEmployer = useCallback((v: string) => {
     setEmployerSelection((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]));
   }, []);
   const clearEmployers = useCallback(() => setEmployerSelection([]), []);
-  // Switching segment CLEARS the picked employers. A selection left behind by moving to All or
-  // Individual would be invisible (the picker is unmounted) while still describing the grid the
-  // next time Employer is selected — a filter the user cannot see is a filter they cannot trust.
-  const selectEmployerMode = useCallback((m: 'all' | 'employer' | 'individual') => {
-    setEmployerMode(m);
-    setEmployerSelection([]);
-    setEmployerQuery('');
-    setEmployerOptions([]);
-  }, []);
   // Load the tenant-scoped facility options for the multi-select whenever the view changes.
   useEffect(() => {
     // Server-seeded on first mount → skip the initial fetch (the seed is for this view already).
@@ -790,42 +843,32 @@ export function CmdCollectionsExplorer({
     };
   }, [view]);
 
-  // Debounced employer search. The 250ms wait and the MIN_SEARCH_LEN floor both exist to keep a
-  // per-keystroke server query off a 650k-row table; the SERVER enforces the same floor, so this is
-  // an optimisation, never the security boundary.
-  // Only runs while the Employer segment is active — typing cannot be reached in the other modes,
-  // and firing anyway would search on a stale query after a mode switch.
+  // The employer VOCABULARY, loaded once per view alongside facility and payer.
+  //
+  // ⚠ REPLACED A 250 ms-DEBOUNCED PER-KEYSTROKE SERVER SEARCH (2026-08-17). One 118 ms index scan
+  // per view beats a query per keystroke against a 686k-row table, and it is what lets the canonical
+  // grouping carry COMPLETE variant lists — see employerCanonical.ts for why a term-matched page
+  // would silently under-select.
+  //
+  // Fails CLOSED to an empty vocabulary: the picker then finds nothing, which is visible. Leaving a
+  // stale vocabulary from a previous view would be worse — it would offer employers from a tenant
+  // the caller may not be scoped to.
   useEffect(() => {
-    if (employerMode !== 'employer') return;
-    const q = employerQuery.trim();
-    if (q.length < MIN_SEARCH_LEN) {
-      setEmployerOptions([]);
-      setEmployerLoading(false);
-      return;
-    }
     let live = true;
-    setEmployerLoading(true);
-    const t = setTimeout(() => {
-      searchCollectionsEmployers(q, view)
-        .then((r) => {
-          if (!live) return;
-          setEmployerOptions(r.ok ? r.employers : []);
-          setEmployerLoading(false);
-        })
-        .catch(() => {
-          if (!live) return;
-          setEmployerOptions([]);
-          setEmployerLoading(false);
-        });
-    }, 250);
+    loadCollectionsEmployerVocabulary(view)
+      .then((r) => {
+        if (live) setEmployerVocabulary(r.ok ? r.employers : []);
+      })
+      .catch(() => {
+        if (live) setEmployerVocabulary([]);
+      });
     return () => {
       live = false;
-      clearTimeout(t);
     };
-  }, [employerQuery, employerMode, view]);
+  }, [view]);
 
   // Dismiss the Month/Year popover on outside pointer-down or Escape — the SAME dismiss behavior as
-  // the view-switcher dropdown (D). Listeners attach only while it's open. (The popover holds
+  // the tenant switcher that used to live in the top bar (D). Listeners attach only while it's open. (The popover holds
   // focusable selects, so Escape is a document listener rather than a trigger-local keydown.)
   useEffect(() => {
     if (!monthYearOpen) return;
@@ -842,6 +885,80 @@ export function CmdCollectionsExplorer({
       document.removeEventListener('keydown', onKeyDown);
     };
   }, [monthYearOpen]);
+
+  /**
+   * STICKY COLUMNS — auto-save the live layout after every change (2026-08-17).
+   *
+   * Reported as *"the column setting sticky and savable … doesn't work"*. The named-view machinery
+   * was verified healthy end to end (definer upserts, grants, RLS, and the default view applies on
+   * load); what was missing is that reordering or hiding a column changed component state ONLY, so a
+   * reload discarded it unless the user performed the save-a-named-view ritual. Production showed
+   * that failure precisely: one view ever saved, created_at = updated_at.
+   *
+   * Debounced 800 ms because a drag fires a reorder per pointer move — without it, dragging one
+   * column across the grid would issue a write per frame. The trailing edge is what persists, which
+   * is also the only state the user can see when they stop.
+   *
+   * NOT persisted with `makeDefault`: this row must never steal the `is_default` flag from a real
+   * named view. Precedence is resolved at LOAD time (auto beats default) rather than by mutating
+   * anyone's default.
+   *
+   * ⚠ SKIPS THE FIRST RUN. The effect fires once on mount with the just-applied layout; saving it
+   * would rewrite the row with what we only just read, and — worse — would overwrite a good layout
+   * with DEFAULT_ORDER on any mount where the load failed and left the defaults in place.
+   *
+   * Fire-and-forget with an explicit catch: a failed layout save must never surface an error over
+   * the grid. The cost of losing one is that the columns are not sticky for that one change, which
+   * the next change repairs.
+   */
+  const autoSaveSkipRef = useRef(true);
+  /** A layout save is in flight. Writes are SERIALIZED through this — see the effect below. */
+  const layoutSavingRef = useRef(false);
+  /** The newest layout that has not been written yet, if a save was in flight when it changed. */
+  const layoutPendingRef = useRef<{ order: string[]; hidden: string[] } | null>(null);
+  /** The last save came back !ok. Surfaced on the Columns button — never as an error over the grid. */
+  const [layoutSaveFailed, setLayoutSaveFailed] = useState(false);
+
+  useEffect(() => {
+    if (autoSaveSkipRef.current) {
+      autoSaveSkipRef.current = false;
+      return;
+    }
+    const t = setTimeout(() => {
+      const payload = { order: order as string[], hidden: [...hidden] as string[] };
+      // ⚠ SERIALIZED, NOT FIRE-AND-FORGET (Qodo #2). Independent overlapping requests are upserted by
+      // whichever COMMITS last, so a delayed older request could overwrite a newer layout and the
+      // user would get yesterday's columns back on reload. Debouncing alone does not prevent it —
+      // it only spaces the requests out. At most one write is in flight; anything that changes while
+      // it runs is stashed and written immediately after, so the LAST state the user chose always
+      // wins and no intermediate state is lost.
+      if (layoutSavingRef.current) {
+        layoutPendingRef.current = payload;
+        return;
+      }
+      const run = (p: { order: string[]; hidden: string[] }) => {
+        layoutSavingRef.current = true;
+        void saveGridLayout(p.order, p.hidden)
+          // ⚠ OBSERVE THE RESULT (Qodo #3). saveGridLayout converts a DB exception into {ok:false},
+          // so `.catch()` alone sees only transport failures and an ordinary save failure was
+          // completely silent — the user believed their columns were sticky until a reload proved
+          // otherwise. Recorded in state and shown on the Columns button; deliberately NOT a toast or
+          // a banner, because a failed layout save must not interrupt work over the grid.
+          .then((res) => setLayoutSaveFailed(!res.ok))
+          .catch(() => setLayoutSaveFailed(true))
+          .finally(() => {
+            layoutSavingRef.current = false;
+            const next = layoutPendingRef.current;
+            if (next) {
+              layoutPendingRef.current = null;
+              run(next);
+            }
+          });
+      };
+      run(payload);
+    }, 800);
+    return () => clearTimeout(t);
+  }, [order, hidden]);
 
   const refreshViews = useCallback(async () => {
     const r = await listGridViews();
@@ -864,7 +981,7 @@ export function CmdCollectionsExplorer({
         setViews(r.views);
         if (!defaultViewAppliedRef.current) {
           defaultViewAppliedRef.current = true;
-          const def = r.views.find((v) => v.isDefault);
+          const def = r.views.find((v) => isAutoGridView(v.name)) ?? r.views.find((v) => v.isDefault);
           if (def) {
             const layout = deriveLayout(def);
             setOrder(layout.order);
@@ -891,8 +1008,7 @@ export function CmdCollectionsExplorer({
       primary_payer?: string;
       primary_payers?: string[];
       employer_names?: string[];
-      employerMode?: 'all' | 'employer' | 'individual';
-      cpt_code?: string;
+        cpt_code?: string;
       revenue_code?: string;
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
       row_ids?: string[];
@@ -907,17 +1023,14 @@ export function CmdCollectionsExplorer({
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
     // Employer segment (0101). 'all' emits NOTHING — the server treats absent as unrestricted, and
     // sending an explicit 'all' would only add a no-op branch to every query plan.
-    if (employerMode !== 'all') f.employerMode = employerMode;
-    // Picked employers narrow WITHIN the Employer segment. Guarded on the mode so a stale selection
-    // left behind by toggling back to All or Individual cannot silently keep filtering the grid.
-    if (employerMode === 'employer' && employerSelection.length > 0) f.employer_names = employerSelection;
+    applyEmployerFilter(f, employerSelection, employerVocabulary);
     // Patient-name search result. `[]` is MEANINGFUL: it means "searched, matched nothing", and must
     // still be sent so the grid shows an empty result instead of silently dropping the filter and
     // widening back to every row. The name ITSELF is never sent here — only the ids it resolved to.
     if (nameMatchIds !== null) f.row_ids = nameMatchIds;
     // Facility multi-select is a top-level scope; a facility drill-down chip narrows to that ONE
     // facility (overriding the dropdown). Payer/CPT chips stay exact single-value refinements.
-    if (facilitySelection.length > 0) f.facility = facilitySelection;
+    if (facilitySelection.length > 0) f.facility = expandFacilityKeys(facilitySelection, facilityGroups);
     if (refinement) {
       switch (refinement.kind) {
         case 'facility':
@@ -947,7 +1060,7 @@ export function CmdCollectionsExplorer({
     // year only matters when a specific month is chosen (see original rationale); facilityKey is the
     // stable proxy for facilitySelection's contents (payerKey likewise).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, employerMode, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
   const loadPage = useCallback(
     async (
@@ -1029,17 +1142,13 @@ export function CmdCollectionsExplorer({
       facility?: string[];
       primary_payers?: string[];
       employer_names?: string[];
-      employerMode?: 'all' | 'employer' | 'individual';
-      phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
+        phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
       row_ids?: string[];
     } = {};
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
     // Employer segment (0101). 'all' emits NOTHING — the server treats absent as unrestricted, and
     // sending an explicit 'all' would only add a no-op branch to every query plan.
-    if (employerMode !== 'all') f.employerMode = employerMode;
-    // Picked employers narrow WITHIN the Employer segment. Guarded on the mode so a stale selection
-    // left behind by toggling back to All or Individual cannot silently keep filtering the grid.
-    if (employerMode === 'employer' && employerSelection.length > 0) f.employer_names = employerSelection;
+    applyEmployerFilter(f, employerSelection, employerVocabulary);
     // Patient-name search result. `[]` is MEANINGFUL: it means "searched, matched nothing", and must
     // still be sent so the grid shows an empty result instead of silently dropping the filter and
     // widening back to every row. The name ITSELF is never sent here — only the ids it resolved to.
@@ -1053,7 +1162,7 @@ export function CmdCollectionsExplorer({
       f.year = year;
       f.month = month;
     }
-    if (facilitySelection.length > 0) f.facility = facilitySelection;
+    if (facilitySelection.length > 0) f.facility = expandFacilityKeys(facilitySelection, facilityGroups);
     if (hasPhiSearch) {
       f.phiSearch = {
         ...(dMember !== '' ? { memberId: dMember } : {}),
@@ -1073,7 +1182,7 @@ export function CmdCollectionsExplorer({
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, employerMode, view]);
+  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, view]);
 
   // Fetch the alpha-prefix cohort curve when a ≥3-char alpha-prefix search is active (PHI-gated).
   // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
@@ -1369,54 +1478,23 @@ export function CmdCollectionsExplorer({
             onToggle={togglePayer}
             onClear={clearPayers}
           />
-          {/* Employer segment (migration 0101): [All][Employer][Individual].
-              RENDERED ONLY WHEN THE TENANT ACTUALLY HAS EMPLOYER DATA. Before the CMD reports carry
-              the column and the one-shot backfill lands, every row's employer is NULL — so an
-              "Individual" segment would silently select the entire book while claiming a meaning
-              the data cannot yet support. Hiding it is the honest degradation; it appears by itself
-              once coverage exists (loadCollectionsEmployerCoverage). */}
+          {/* ⚠ ALWAYS MOUNTED as of 2026-08-17 — it used to be gated on `employerMode === 'employer'`.
+              THE MOUNT ITSELF WAS THE BUG. Every picker in this row is `min-w-[15rem] flex-1`, so
+              adding a third one makes flexbox re-divide the free space: Facility and Payer visibly
+              SHRANK when Employer appeared and grew back when it vanished. Toggling the segment slid
+              the whole bar left and right, which is what "the filter back and forth sets the bar to
+              the left or the right" describes. Conditional mounting inside a flex row cannot be
+              styled out of that — the element has to stay.
+
+              Employer is now searchable in All as well, which is the other half of the request: the
+              segment is a partition (has a sponsor / has none), and narrowing BY NAME is a different
+              question that should not require picking a partition first.
+
+              Individual is the one place it stays inert: that segment means "no plan sponsor", so a
+              named employer there could only ever return zero rows. Disabled — NOT unmounted —
+              because unmounting is the reflow we just removed. serverDriven: onQueryChange feeds the
+              debounced search and the returned set is passed through unfiltered (server-matched). */}
           {hasEmployerData && (
-            <div
-              className="inline-flex items-center gap-0.5 rounded-lg border border-line bg-surface p-0.5"
-              role="group"
-              aria-label="Employer segment"
-            >
-              {([
-                ['all', 'All'],
-                ['employer', 'Employer'],
-                ['individual', 'Individual'],
-              ] as const).map(([mode, text]) => {
-                const active = employerMode === mode;
-                return (
-                  <button
-                    key={mode}
-                    type="button"
-                    aria-pressed={active}
-                    title={
-                      mode === 'individual'
-                        ? 'Policies with no plan sponsor on the claim'
-                        : mode === 'employer'
-                          ? 'Policies sponsored by an employer'
-                          : 'No employer restriction'
-                    }
-                    onClick={() => selectEmployerMode(mode)}
-                    className={[
-                      'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
-                      active
-                        ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]'
-                        : 'text-muted-foreground hover:bg-[var(--brand-soft)]',
-                    ].join(' ')}
-                  >
-                    {text}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {/* The employer picker narrows WITHIN the Employer segment, so it only exists there.
-              serverDriven: onQueryChange feeds the debounced search and the returned set is passed
-              through unfiltered (the server already matched it). */}
-          {hasEmployerData && employerMode === 'employer' && (
             <MultiSelectTagPicker
               label="Employer"
               placeholder="Type to find employers…"
@@ -1425,9 +1503,6 @@ export function CmdCollectionsExplorer({
               selected={employerSelection}
               onToggle={toggleEmployer}
               onClear={clearEmployers}
-              onQueryChange={setEmployerQuery}
-              loading={employerLoading}
-              minChars={MIN_SEARCH_LEN}
             />
           )}
           {/* Unified time window (A): ONE segmented control — [7d][14d][30d][90d][Month/Year ▾].
@@ -1586,8 +1661,8 @@ export function CmdCollectionsExplorer({
               <p id="phi-patient-name-help" className="mt-1 text-[11px] text-muted-foreground">
                 {nameNotice ??
                   (nameSearchAllowed
-                    ? `Searches up to ${NAME_SEARCH_CAP.toLocaleString()} rows in the current view. Matches part of a name.`
-                    : `Pick a facility, payer, date range, employer or member ID first — name search runs over at most ${NAME_SEARCH_CAP.toLocaleString()} narrowed rows.`)}
+                    ? `Matches part of a name, over up to ${NAME_SEARCH_CAP.toLocaleString()} rows — names are encrypted, so each candidate row must be decrypted to compare. Narrow further if a name is missing.`
+                    : `Pick a facility, payer, date range, employer or member ID first — name search decrypts each candidate row, so it runs over at most ${NAME_SEARCH_CAP.toLocaleString()} narrowed rows.`)}
               </p>
             </div>
           </div>
@@ -1695,6 +1770,17 @@ export function CmdCollectionsExplorer({
                 <span className="ml-1 rounded-full bg-[var(--brand-soft)] px-1.5 text-[11px] font-semibold text-[var(--brand-ink)]">
                   {visibleOrder.length}/{COLUMNS.length}
                 </span>
+                {/* The layout auto-saves; when that FAILS the user must not be left believing their
+                    columns are sticky. Quiet by design — a failed layout save is not worth a banner
+                    over the grid, but silence is what made it a bug (Qodo #3). */}
+                {layoutSaveFailed && (
+                  <span
+                    className="ml-1 rounded-full bg-amber-100 px-1.5 text-[11px] font-semibold text-amber-800"
+                    title="Your column layout could not be saved, so it will not persist on reload."
+                  >
+                    not saved
+                  </span>
+                )}
                 <ChevronDown className="h-3.5 w-3.5 opacity-60" aria-hidden />
               </Button>
               {columnsMenuOpen && (
@@ -1703,7 +1789,7 @@ export function CmdCollectionsExplorer({
                   hidden={hidden}
                   sensors={sensors}
                   onReorder={reorderColumns}
-                  views={views}
+                  views={namedViews}
                   onToggleColumn={toggleColumnVisible}
                   onReset={resetColumns}
                   onLoadView={applyView}
@@ -1880,24 +1966,45 @@ function SortableHeadCell({
           <GripVertical className="h-3 w-3" aria-hidden />
         </button>
         {sortable ? (
+          /* VISIBLY sortable (2026-08-17). The capability shipped long ago; the affordance was a
+             12px chevron pair at opacity-40 with no hover/underline, so "the columns should be
+             orderable … making it VISIBLE to the user" was a discoverability report, not a missing
+             feature. Three changes, all resting-state:
+               · the idle icon goes 40% → 70% opacity and to full opacity on hover,
+               · the header underlines on hover, the standard "this is clickable" cue,
+               · the ACTIVE column gets a tinted icon chip so the sorted column is findable in one
+                 glance across a 16-column grid instead of by hunting a small grey arrow.
+             `title` states the next action rather than the current state — a tooltip reading
+             "Sorted descending" tells the user what they can already see. */
           <button
             type="button"
             onClick={onToggleSort}
             aria-label={`Sort by ${label}`}
-            className="inline-flex cursor-pointer items-center gap-1 hover:text-[var(--brand-ink)]"
+            title={
+              isSorted
+                ? `Sorted ${direction === 'asc' ? 'ascending' : 'descending'} — click to reverse`
+                : `Click to sort by ${label}`
+            }
+            className="group inline-flex cursor-pointer items-center gap-1 hover:text-[var(--brand-ink)] hover:underline hover:underline-offset-2"
           >
             {label}
             {isSorted ? (
-              direction === 'asc' ? (
-                <ArrowUp className="h-3 w-3" aria-hidden />
-              ) : (
-                <ArrowDown className="h-3 w-3" aria-hidden />
-              )
+              <span className="inline-flex shrink-0 items-center rounded bg-[var(--brand-soft)] p-0.5 text-[var(--brand-ink)]">
+                {direction === 'asc' ? (
+                  <ArrowUp className="h-3 w-3" aria-hidden />
+                ) : (
+                  <ArrowDown className="h-3 w-3" aria-hidden />
+                )}
+              </span>
             ) : (
-              <ArrowUpDown className="h-3 w-3 opacity-40" aria-hidden />
+              <ArrowUpDown className="h-3 w-3 shrink-0 opacity-70 group-hover:opacity-100" aria-hidden />
             )}
           </button>
         ) : (
+          /* Not sortable — see SORTABLE_KEYS for the two distinct reasons (employer is joined
+             outside the keyset; PHI exists only as blind indexes). Rendered as plain text with NO
+             icon, deliberately: a greyed-out sort icon would advertise a control that can never
+             work, which is worse than no affordance at all. */
           label
         )}
       </span>
