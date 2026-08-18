@@ -661,6 +661,13 @@ export function buildCmdCollectionsEmployerVocabularyQuery(
   const sql =
     'select distinct employer_name ' +
     'from collections.cmd_explorer_rows ' +
+    // ⚠ INTENTIONAL MULTI-TENANT READ. `any($1::uuid[])` is plural BY DESIGN: the caller passes the
+    // scope `viewEntityScope` derived for the signed-in principal, which is BOTH entities for the
+    // Consolidated view (a super_admin-only view) and exactly one for every entity-scoped role. The
+    // array is bound, never interpolated, and this function cannot widen it — an empty or malformed
+    // scope is refused upstream by assertEntityScope rather than defaulting to "all tenants".
+    // Stated inline because a plural predicate is otherwise indistinguishable from accidental scope
+    // widening (compliance rule 2456355; same justification shape as the sibling builders above).
     'where business_entity_id = any($1::uuid[]) ' +
     // The `<> ''` half is not redundant with `is not null`: mapRow coerces a blank CMD cell to null,
     // but the 622k CSV-backfilled rows predate that path, so '' is a reachable state. It also has to

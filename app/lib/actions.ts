@@ -1293,20 +1293,28 @@ const CMD_EMPLOYER_FILTER_MAX = 200;
 const CMD_ROW_IDS_MAX = 2000; // mirrors CMD_NAME_SEARCH_ROW_CAP — a search cannot match more
 
 /**
- * Copy the employer segment + picked employers into the reader filter, validated.
+ * Copy the picked employers into the reader filter, validated.
  *
- * The mode is checked against the closed set rather than cast: it reaches a SQL branch, and an
- * unknown value must degrade to 'all' (no condition) instead of throwing or, worse, being
- * interpolated. Employer names are values only — they are bound as `$n` — but they are still
+ * ⚠ THE All/Employer/Individual SEGMENT WAS REMOVED 2026-08-18 (Alec) and this function is where its
+ * last teeth were. It used to gate the names on `employerMode === 'employer'` — which meant that
+ * when the picker became always-available, the client happily sent `employer_names` while sitting in
+ * `all` and THIS FUNCTION SILENTLY DROPPED THEM. The filter looked applied (chips on screen) and the
+ * grid ignored it. A client-only fix could never have worked; the gate lived here.
+ *
+ * The segment is gone because it never earned its place: picking a named employer already means "an
+ * employer-sponsored policy", picking nothing means "no restriction", and a row with no employer is
+ * already legible in the Employer cell — so `individual` asked the user to state something they
+ * could read off the grid, and `all` vs `employer` was a distinction without a difference once a
+ * name was picked.
+ *
+ * `employerMode` is deliberately NOT read here any more, so a stale or hand-crafted mode from an old
+ * client cannot reach the SQL branch. Employer names are values only (bound as `$n`) but are still
  * length- and count-bounded because they come from the client.
  */
 function applyEmployerFilter(
   filter: CmdReportFilter,
-  readerFilter: { employer_names?: string[]; employerMode?: 'all' | 'employer' | 'individual' },
+  readerFilter: { employer_names?: string[] },
 ): boolean {
-  const mode = filter.employerMode;
-  if (mode === 'employer' || mode === 'individual') readerFilter.employerMode = mode;
-  // 'all', undefined, or anything unrecognised → no condition at all.
   const names = filter.employer_names;
   if (Array.isArray(names) && names.length > 0) {
     if (names.length > CMD_EMPLOYER_FILTER_MAX) return false;
@@ -1314,9 +1322,7 @@ function applyEmployerFilter(
       .filter((n): n is string => typeof n === 'string')
       .map((n) => n.trim())
       .filter((n) => n !== '' && n.length <= 200);
-    // Picked employers only narrow WITHIN the Employer segment; outside it a stale selection must
-    // not keep filtering (same guard the client applies, enforced again here).
-    if (clean.length > 0 && readerFilter.employerMode === 'employer') readerFilter.employer_names = clean;
+    if (clean.length > 0) readerFilter.employer_names = clean;
   }
   return true;
 }

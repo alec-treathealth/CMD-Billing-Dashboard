@@ -73,13 +73,12 @@ import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-s
 // Pure, and deliberately OUTSIDE this file so it can be unit-tested: importing this component pulls
 // in lib/actions.ts → lib/access.ts, which calls React `cache` at module scope and cannot load under
 // the test runner at all.
-import { facilityPickerOptionsFrom } from '@/lib/collections/facilityPickerOptions';
 import {
-  applyEmployerFilter,
-  clearsEmployerSelection,
-  employerPickerDisabled,
-  modeAfterEmployerPick,
-} from '@/lib/collections/employerSegment';
+  expandFacilityKeys,
+  facilityGroupsFrom,
+  facilityPickerOptionsFrom,
+} from '@/lib/collections/facilityPickerOptions';
+import { applyEmployerFilter } from '@/lib/collections/employerSegment';
 import { expandEmployerKeys } from '../../../src/collections/employerCanonical.js';
 // The AI panel's prompt ASKS for markdown; this renders it as markup instead of printing `**`/`##`.
 import { Markdown } from '@/components/ui/markdown';
@@ -443,7 +442,6 @@ export function CmdCollectionsExplorer({
    *  and is deliberately distinguished from "no filter" so it cannot silently widen to every row). */
   const [nameMatchIds, setNameMatchIds] = useState<string[] | null>(null);
   const [nameNotice, setNameNotice] = useState<string | null>(null);
-  const [employerMode, setEmployerMode] = useState<'all' | 'employer' | 'individual'>('all');
   // Picked employers, as CANONICAL KEYS ('TESLA'), expanded to their raw spellings at filter time.
   const [employerSelection, setEmployerSelection] = useState<string[]>([]);
   // Whether ANY employer value exists in this tenant scope — see the coverage effect below.
@@ -604,7 +602,6 @@ export function CmdCollectionsExplorer({
     (facilitySelection.length > 0 ||
       payerSelection.length > 0 ||
       employerSelection.length > 0 ||
-      employerMode !== 'all' ||
       recencyDays > 0 ||
       month > 0 ||
       hasPhiSearch);
@@ -628,9 +625,9 @@ export function CmdCollectionsExplorer({
       const f: Parameters<typeof searchCollectionsPatientName>[1] = {};
       if (recencyDays > 0) f.recencyDays = recencyDays;
       else if (month > 0) { f.year = year; f.month = month; }
-      if (facilitySelection.length > 0) f.facility = facilitySelection;
+      if (facilitySelection.length > 0) f.facility = expandFacilityKeys(facilitySelection, facilityGroups);
       if (payerSelection.length > 0) f.primary_payers = payerSelection;
-      applyEmployerFilter(f, employerMode, employerSelection, employerVocabulary);
+      applyEmployerFilter(f, employerSelection, employerVocabulary);
       if (hasPhiSearch) {
         f.phiSearch = {
           ...(dMember !== '' ? { memberId: dMember } : {}),
@@ -663,7 +660,7 @@ export function CmdCollectionsExplorer({
       setNameSearching(false);
     }
   }, [nameQuery, nameSearchAllowed, recencyDays, month, year, facilitySelection, payerSelection,
-      employerMode, employerSelection, hasPhiSearch, dMember, dAlpha, dGroup, view]);
+      employerSelection, hasPhiSearch, dMember, dAlpha, dGroup, view]);
   // Stable dep keys for the selection sets (array identity changes on every toggle otherwise).
   const payerKey = payerSelection.join('\n');
   /**
@@ -761,6 +758,8 @@ export function CmdCollectionsExplorer({
     () => facilityPickerOptionsFrom(facilityOptions),
     [facilityOptions],
   );
+  /** Curated key → its raw CMD spellings. The picker merges; the FILTER still matches raw text. */
+  const facilityGroups = useMemo(() => facilityGroupsFrom(facilityOptions), [facilityOptions]);
   const payerPickerOptions = useMemo<PickerOption[]>(
     () => payerOptions.map((p) => ({ value: p, display: p })),
     [payerOptions],
@@ -782,29 +781,8 @@ export function CmdCollectionsExplorer({
   );
   const toggleEmployer = useCallback((v: string) => {
     setEmployerSelection((prev) => (prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v]));
-    // Picking a named employer while sitting in Individual would guarantee an empty grid (Individual
-    // is exactly "no plan sponsor"). Rather than let the user stare at zero rows, move the segment to
-    // the one that makes their pick mean something — visibly, since the segment re-renders.
-    setEmployerMode(modeAfterEmployerPick);
   }, []);
   const clearEmployers = useCallback(() => setEmployerSelection([]), []);
-  /**
-   * Switching segment clears the picked employers ONLY when moving to Individual.
-   *
-   * ⚠ IT USED TO CLEAR ON EVERY SWITCH, and that was right at the time: the picker was mounted only
-   * in the Employer segment, so a selection surviving a move to All/Individual was a filter the user
-   * could not see. As of 2026-08-17 the picker is ALWAYS mounted (see the JSX), so the selection is
-   * always visible and clearing it on an All⇄Employer toggle would now destroy work the user can see
-   * they still have.
-   *
-   * Individual still clears, because it is the one genuinely contradictory state: Individual means
-   * "no plan sponsor on the claim" and a named employer is a plan sponsor, so the two together can
-   * only ever return zero rows.
-   */
-  const selectEmployerMode = useCallback((m: 'all' | 'employer' | 'individual') => {
-    setEmployerMode(m);
-    if (clearsEmployerSelection(m)) setEmployerSelection([]);
-  }, []);
   // Load the tenant-scoped facility options for the multi-select whenever the view changes.
   useEffect(() => {
     // Server-seeded on first mount → skip the initial fetch (the seed is for this view already).
@@ -890,7 +868,7 @@ export function CmdCollectionsExplorer({
   }, [view]);
 
   // Dismiss the Month/Year popover on outside pointer-down or Escape — the SAME dismiss behavior as
-  // the view-switcher dropdown (D). Listeners attach only while it's open. (The popover holds
+  // the tenant switcher that used to live in the top bar (D). Listeners attach only while it's open. (The popover holds
   // focusable selects, so Escape is a document listener rather than a trigger-local keydown.)
   useEffect(() => {
     if (!monthYearOpen) return;
@@ -934,13 +912,50 @@ export function CmdCollectionsExplorer({
    * the next change repairs.
    */
   const autoSaveSkipRef = useRef(true);
+  /** A layout save is in flight. Writes are SERIALIZED through this — see the effect below. */
+  const layoutSavingRef = useRef(false);
+  /** The newest layout that has not been written yet, if a save was in flight when it changed. */
+  const layoutPendingRef = useRef<{ order: string[]; hidden: string[] } | null>(null);
+  /** The last save came back !ok. Surfaced on the Columns button — never as an error over the grid. */
+  const [layoutSaveFailed, setLayoutSaveFailed] = useState(false);
+
   useEffect(() => {
     if (autoSaveSkipRef.current) {
       autoSaveSkipRef.current = false;
       return;
     }
     const t = setTimeout(() => {
-      void saveGridLayout(order as string[], [...hidden] as string[]).catch(() => {});
+      const payload = { order: order as string[], hidden: [...hidden] as string[] };
+      // ⚠ SERIALIZED, NOT FIRE-AND-FORGET (Qodo #2). Independent overlapping requests are upserted by
+      // whichever COMMITS last, so a delayed older request could overwrite a newer layout and the
+      // user would get yesterday's columns back on reload. Debouncing alone does not prevent it —
+      // it only spaces the requests out. At most one write is in flight; anything that changes while
+      // it runs is stashed and written immediately after, so the LAST state the user chose always
+      // wins and no intermediate state is lost.
+      if (layoutSavingRef.current) {
+        layoutPendingRef.current = payload;
+        return;
+      }
+      const run = (p: { order: string[]; hidden: string[] }) => {
+        layoutSavingRef.current = true;
+        void saveGridLayout(p.order, p.hidden)
+          // ⚠ OBSERVE THE RESULT (Qodo #3). saveGridLayout converts a DB exception into {ok:false},
+          // so `.catch()` alone sees only transport failures and an ordinary save failure was
+          // completely silent — the user believed their columns were sticky until a reload proved
+          // otherwise. Recorded in state and shown on the Columns button; deliberately NOT a toast or
+          // a banner, because a failed layout save must not interrupt work over the grid.
+          .then((res) => setLayoutSaveFailed(!res.ok))
+          .catch(() => setLayoutSaveFailed(true))
+          .finally(() => {
+            layoutSavingRef.current = false;
+            const next = layoutPendingRef.current;
+            if (next) {
+              layoutPendingRef.current = null;
+              run(next);
+            }
+          });
+      };
+      run(payload);
     }, 800);
     return () => clearTimeout(t);
   }, [order, hidden]);
@@ -993,8 +1008,7 @@ export function CmdCollectionsExplorer({
       primary_payer?: string;
       primary_payers?: string[];
       employer_names?: string[];
-      employerMode?: 'all' | 'employer' | 'individual';
-      cpt_code?: string;
+        cpt_code?: string;
       revenue_code?: string;
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
       row_ids?: string[];
@@ -1009,14 +1023,14 @@ export function CmdCollectionsExplorer({
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
     // Employer segment (0101). 'all' emits NOTHING — the server treats absent as unrestricted, and
     // sending an explicit 'all' would only add a no-op branch to every query plan.
-    applyEmployerFilter(f, employerMode, employerSelection, employerVocabulary);
+    applyEmployerFilter(f, employerSelection, employerVocabulary);
     // Patient-name search result. `[]` is MEANINGFUL: it means "searched, matched nothing", and must
     // still be sent so the grid shows an empty result instead of silently dropping the filter and
     // widening back to every row. The name ITSELF is never sent here — only the ids it resolved to.
     if (nameMatchIds !== null) f.row_ids = nameMatchIds;
     // Facility multi-select is a top-level scope; a facility drill-down chip narrows to that ONE
     // facility (overriding the dropdown). Payer/CPT chips stay exact single-value refinements.
-    if (facilitySelection.length > 0) f.facility = facilitySelection;
+    if (facilitySelection.length > 0) f.facility = expandFacilityKeys(facilitySelection, facilityGroups);
     if (refinement) {
       switch (refinement.kind) {
         case 'facility':
@@ -1046,7 +1060,7 @@ export function CmdCollectionsExplorer({
     // year only matters when a specific month is chosen (see original rationale); facilityKey is the
     // stable proxy for facilitySelection's contents (payerKey likewise).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, employerMode, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
   const loadPage = useCallback(
     async (
@@ -1128,14 +1142,13 @@ export function CmdCollectionsExplorer({
       facility?: string[];
       primary_payers?: string[];
       employer_names?: string[];
-      employerMode?: 'all' | 'employer' | 'individual';
-      phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
+        phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
       row_ids?: string[];
     } = {};
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
     // Employer segment (0101). 'all' emits NOTHING — the server treats absent as unrestricted, and
     // sending an explicit 'all' would only add a no-op branch to every query plan.
-    applyEmployerFilter(f, employerMode, employerSelection, employerVocabulary);
+    applyEmployerFilter(f, employerSelection, employerVocabulary);
     // Patient-name search result. `[]` is MEANINGFUL: it means "searched, matched nothing", and must
     // still be sent so the grid shows an empty result instead of silently dropping the filter and
     // widening back to every row. The name ITSELF is never sent here — only the ids it resolved to.
@@ -1149,7 +1162,7 @@ export function CmdCollectionsExplorer({
       f.year = year;
       f.month = month;
     }
-    if (facilitySelection.length > 0) f.facility = facilitySelection;
+    if (facilitySelection.length > 0) f.facility = expandFacilityKeys(facilitySelection, facilityGroups);
     if (hasPhiSearch) {
       f.phiSearch = {
         ...(dMember !== '' ? { memberId: dMember } : {}),
@@ -1169,7 +1182,7 @@ export function CmdCollectionsExplorer({
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, employerMode, view]);
+  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, view]);
 
   // Fetch the alpha-prefix cohort curve when a ≥3-char alpha-prefix search is active (PHI-gated).
   // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
@@ -1465,50 +1478,6 @@ export function CmdCollectionsExplorer({
             onToggle={togglePayer}
             onClear={clearPayers}
           />
-          {/* Employer segment (migration 0101): [All][Employer][Individual].
-              RENDERED ONLY WHEN THE TENANT ACTUALLY HAS EMPLOYER DATA. Before the CMD reports carry
-              the column and the one-shot backfill lands, every row's employer is NULL — so an
-              "Individual" segment would silently select the entire book while claiming a meaning
-              the data cannot yet support. Hiding it is the honest degradation; it appears by itself
-              once coverage exists (loadCollectionsEmployerCoverage). */}
-          {hasEmployerData && (
-            <div
-              className="inline-flex items-center gap-0.5 rounded-lg border border-line bg-surface p-0.5"
-              role="group"
-              aria-label="Employer segment"
-            >
-              {([
-                ['all', 'All'],
-                ['employer', 'Employer'],
-                ['individual', 'Individual'],
-              ] as const).map(([mode, text]) => {
-                const active = employerMode === mode;
-                return (
-                  <button
-                    key={mode}
-                    type="button"
-                    aria-pressed={active}
-                    title={
-                      mode === 'individual'
-                        ? 'Policies with no plan sponsor on the claim'
-                        : mode === 'employer'
-                          ? 'Policies sponsored by an employer'
-                          : 'No employer restriction'
-                    }
-                    onClick={() => selectEmployerMode(mode)}
-                    className={[
-                      'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
-                      active
-                        ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]'
-                        : 'text-muted-foreground hover:bg-[var(--brand-soft)]',
-                    ].join(' ')}
-                  >
-                    {text}
-                  </button>
-                );
-              })}
-            </div>
-          )}
           {/* ⚠ ALWAYS MOUNTED as of 2026-08-17 — it used to be gated on `employerMode === 'employer'`.
               THE MOUNT ITSELF WAS THE BUG. Every picker in this row is `min-w-[15rem] flex-1`, so
               adding a third one makes flexbox re-divide the free space: Facility and Payer visibly
@@ -1528,15 +1497,12 @@ export function CmdCollectionsExplorer({
           {hasEmployerData && (
             <MultiSelectTagPicker
               label="Employer"
-              placeholder={
-                employerPickerDisabled(employerMode) ? 'Not applicable to Individual' : 'Type to find employers…'
-              }
+              placeholder="Type to find employers…"
               icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
               options={employerPickerOptions}
               selected={employerSelection}
               onToggle={toggleEmployer}
               onClear={clearEmployers}
-              disabled={employerPickerDisabled(employerMode)}
             />
           )}
           {/* Unified time window (A): ONE segmented control — [7d][14d][30d][90d][Month/Year ▾].
@@ -1804,6 +1770,17 @@ export function CmdCollectionsExplorer({
                 <span className="ml-1 rounded-full bg-[var(--brand-soft)] px-1.5 text-[11px] font-semibold text-[var(--brand-ink)]">
                   {visibleOrder.length}/{COLUMNS.length}
                 </span>
+                {/* The layout auto-saves; when that FAILS the user must not be left believing their
+                    columns are sticky. Quiet by design — a failed layout save is not worth a banner
+                    over the grid, but silence is what made it a bug (Qodo #3). */}
+                {layoutSaveFailed && (
+                  <span
+                    className="ml-1 rounded-full bg-amber-100 px-1.5 text-[11px] font-semibold text-amber-800"
+                    title="Your column layout could not be saved, so it will not persist on reload."
+                  >
+                    not saved
+                  </span>
+                )}
                 <ChevronDown className="h-3.5 w-3.5 opacity-60" aria-hidden />
               </Button>
               {columnsMenuOpen && (

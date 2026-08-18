@@ -8,8 +8,10 @@
  *   - CLIENT (default): the parent loads the full option list ONCE (facility ~30, payer ~260) and this
  *     picker filters it instantly client-side as the user types.
  *   - SERVER (pass `onQueryChange`): the parent owns the option list and re-fetches it per (debounced)
- *     keystroke — for the ~11.6k-employer vocabulary that's too large to load whole. The picker then
- *     does NOT filter client-side (options already reflect the query) and reports the raw query up.
+ *     keystroke, for a vocabulary too large to load whole. The picker then does NOT filter
+ *     client-side (options already reflect the query) and reports the raw query up. Payer Intel's
+ *     employer search uses this; COLLECTIONS no longer does — its employer vocabulary turned out to
+ *     be 1,073 values, not the ~11.6k measured on the VOB plane, so it loads whole like the others.
  * Selected values render as removable tags; a filtered list drops below on focus/typing (capped, with
  * a "keep typing" hint past the cap).
  */
@@ -26,21 +28,20 @@ export type PickerOption = {
   /**
    * SECOND LINE under `display` — shown, and matched by the type-ahead.
    *
-   * Added 2026-08-17 for the Collections facility picker. The 2026-08-10 disambiguation appended the
-   * raw CMD text to `display` as a SUFFIX (`LONESTAR MENTAL HEALTH LLC · LONESTAR MENTAL HEALTH`),
-   * and this row renders with `truncate` — so the one piece of text added specifically to tell two
-   * options apart was the piece guaranteed to be clipped. Both LONESTAR options read
-   * `LONESTAR MENTAL HEALTH LLC · LO…` on screen and picking the wrong one scoped the search to 162
-   * charge lines instead of 10,044.
+   * Carries a short qualifier about the option, not a second name. Both Collections pickers use it to
+   * say that an option MERGED several underlying values — "2 CMD spellings" on a facility whose CMD
+   * export carries two spellings of one place, "3 spellings" on a canonicalised employer — so a merge
+   * is visible as a merge instead of looking like the only value there is.
    *
-   * A second line fixes it because the distinguishing text starts at x=0 with the full row width to
-   * itself, instead of starting ~27 characters in behind an identical prefix.
+   * ⚠ IT IS PART OF THE HAYSTACK. Anything rendered in an option must be matchable, or the user reads
+   * a word on screen, types it, and gets "No matches".
    *
-   * ⚠ IT IS PART OF THE HAYSTACK, and that is required rather than a nicety: the suffix it replaces
-   * lived in `display`, which `pickerMatches` searches, so leaving `detail` out would silently make
-   * text that used to be findable unfindable. That is NOT the same as the `searchText` question ruled
-   * on 2026-08-10 (making EVERY raw spelling findable) — this only preserves what colliding options
-   * already had.
+   * ⚠ KEEP IT SHORT AND DO NOT PUT A DISTINGUISHING NAME HERE. It exists because an earlier fix put
+   * the distinguishing text in `display` as a SUFFIX and the row renders with `truncate`, so the one
+   * piece of text added to tell two options apart was the piece guaranteed to be clipped — both
+   * LONESTAR options read `LONESTAR MENTAL HEALTH LLC · LO…`. That is now solved upstream by MERGING
+   * the options rather than labelling them apart (facilityPickerOptions.ts), which is why this field
+   * carries a count and not a name.
    */
   detail?: string | null;
   /**
@@ -97,7 +98,6 @@ export function MultiSelectTagPicker({
   displayOverride,
   tone,
   derivedValues,
-  disabled = false,
 }: {
   label: string;
   /** Optional state readout rendered INSIDE the label row, between the label and `Clear N`.
@@ -129,18 +129,6 @@ export function MultiSelectTagPicker({
    *  teal200 control border); 'list' = employer/funding (plain zone, line border). Both use teal chips
    *  + teal focus. UNSET (Collections + everywhere else) = the tenant `--brand-*` styling, unchanged. */
   tone?: 'score' | 'list';
-  /**
-   * INERT BUT STILL LAID OUT. Added 2026-08-17 for Collections' Employer picker in the Individual
-   * segment, where a named employer is contradictory (Individual = no plan sponsor).
-   *
-   * ⚠ THE POINT IS THAT IT IS NOT UNMOUNTING. Every picker in that row is `min-w-[15rem] flex-1`, so
-   * removing one makes flexbox re-divide the free space and the neighbouring inputs visibly resize —
-   * the exact "the bar jumps left and right" defect this prop exists to avoid. A disabled picker
-   * occupies identical space, so the row never moves.
-   *
-   * Defaults false, so every other call site is byte-identical.
-   */
-  disabled?: boolean;
   /** CHIP PROVENANCE: values that were added by a Heating-Up ticker-card click rather than hand-picked.
    *  Those chips render dashed with a small ↳ prefix — behaviourally identical (removable the same way),
    *  only visually marked. Omitted everywhere except the Qualify console. */
@@ -165,7 +153,7 @@ export function MultiSelectTagPicker({
     return m;
   }, [options, displayOverride]);
 
-  // Dismiss on outside pointer-down or Escape (same pattern as the Month/Year + view-switcher popovers).
+  // Dismiss on outside pointer-down or Escape (same pattern as the Month/Year popover).
   useEffect(() => {
     if (!open) return;
     function onDown(e: PointerEvent) {
@@ -227,15 +215,11 @@ export function MultiSelectTagPicker({
       </div>
       <div
         onClick={() => {
-          if (disabled) return;
           setOpen(true);
           inputRef.current?.focus();
         }}
-        aria-disabled={disabled || undefined}
         className={[
           'flex min-h-10 w-full flex-wrap items-center gap-1 rounded-lg border bg-surface px-2 py-1.5 text-sm transition-colors',
-          // Muted, not hidden: the row must keep its exact footprint (see the `disabled` prop note).
-          disabled ? 'cursor-not-allowed opacity-55' : '',
           open
             ? tealTone
               ? 'border-teal700 ring-2 ring-teal500/25'
@@ -291,19 +275,13 @@ export function MultiSelectTagPicker({
             setOpen(true);
             onQueryChange?.(e.target.value);
           }}
-          onFocus={() => {
-            if (!disabled) setOpen(true);
-          }}
-          disabled={disabled}
-          placeholder={selected.length === 0 || disabled ? placeholder : 'Add more…'}
+          onFocus={() => setOpen(true)}
+          placeholder={selected.length === 0 ? placeholder : 'Add more…'}
           aria-label={label}
-          className="h-6 min-w-[6rem] flex-1 bg-transparent text-sm text-ink900 outline-none placeholder:text-ink400 disabled:cursor-not-allowed"
+          className="h-6 min-w-[6rem] flex-1 bg-transparent text-sm text-ink900 outline-none placeholder:text-ink400"
         />
       </div>
-      {/* `!disabled` closes an already-open dropdown the instant the picker goes inert — without it,
-          switching to Individual with the list open would leave a live, clickable option list over a
-          control that no longer accepts input. */}
-      {open && !disabled && (
+      {open && (
         <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border border-line bg-surface p-1 shadow-ths animate-ths-reveal">
           {belowMinChars ? (
             <p className="px-2 py-2 text-xs text-ink400">Type at least {minChars} characters to search.</p>

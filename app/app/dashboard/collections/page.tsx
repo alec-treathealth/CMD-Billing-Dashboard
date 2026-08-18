@@ -1,8 +1,8 @@
 /**
  * Collections route — the CMD charge-line detail (cmd_explorer_rows) via <CollectionsView />.
  * Filterable by Facility/Month; patient identifiers are masked by default and revealed in
- * bulk on an explicit, audited "Reveal all" click. Entity scope comes from the top-bar view
- * switcher (?view=), resolved here and passed down through the viewToEntityIds seam.
+ * bulk on an explicit, audited "Reveal all" click. Entity scope comes from the on-page tenant
+ * tabs (?view=), resolved here and passed down through the viewToEntityIds seam.
  *
  * RBAC: gated + view-clamped like the overview. `canRevealPhi` (admins + super-admins) is passed
  * down so a plain `user` role never sees the "Reveal all" control (and the reveal action is gated
@@ -12,6 +12,7 @@ import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { CollectionsView } from '@/components/dashboard';
 import { DataFreshness } from '@/components/dashboard/data-freshness';
+import { TenantTabs } from '@/components/dashboard/tenant-tabs';
 import { PayerIntelPointerBanner } from '@/components/payer-intel/pointer-banner';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
@@ -58,6 +59,8 @@ export default async function CollectionsPage({
 
   return (
     <main className="mx-auto max-w-[1800px] space-y-6 p-6 sm:p-10">
+      {/* Same control, same placement as Overview — see the note there. */}
+      <TenantTabs allowedViews={access.access.allowedViews} />
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Collections</h1>
         <p className="mt-1 text-sm text-muted-foreground">
