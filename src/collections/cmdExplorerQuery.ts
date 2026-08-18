@@ -110,6 +110,33 @@ export interface CmdExplorerFilter {
    */
   row_ids?: string[] | null;
   /**
+   * (tenant, member) PAIRS the FULL-BOOK patient-name search resolved to (migration 0105).
+   *
+   * Keyed-HMAC `member_id_bidx` values, not PHI: the token is one-way and the searched NAME never
+   * reaches SQL. Replaces `row_ids` for name search, and the reason is capacity, not taste — a row
+   * list has to be capped (it was capped at 2,000) because it grows with CHARGE LINES, while a
+   * member list grows with PATIENTS. The whole book holds 686,503 charge lines and 10,941 members,
+   * so the same predicate that could only ever describe 0.3% of the book now describes all of it.
+   *
+   * Matched at MEMBER grain, which is a deliberate and visible imprecision: 0.44% of members carry
+   * more than one patient name (dependents on one subscriber policy), so matching such a name
+   * returns that whole policy's charge lines. That is an OVER-return, never a miss — the directory
+   * keys on the name, so every distinct name is findable. Precise name-grain filtering needs
+   * cmd_explorer_rows.patient_name_bidx backfilled (7.18% populated today); see 0105's header.
+   *
+   * ⚠ IT IS A PAIR, NOT A TOKEN, AND THAT COST A REVIEW ROUND. The first version carried bare
+   * `member_id_bidx` values. A member blind index is a keyed HMAC of the member id and NOTHING else,
+   * so it is TENANT-AGNOSTIC — the same member id in both tenants hashes to the same token. Measured
+   * live 2026-08-18: 240 of 10,701 member tokens exist in BOTH tenants. With bare tokens, a name
+   * matched in one tenant selected the OTHER tenant's rows for all 240, in Consolidated view where
+   * both are legitimately visible and the mix is therefore invisible. Same defect class as the
+   * grouped-rows tenancy hole (#246) one layer up.
+   *
+   * Empty/absent omits the condition; present-but-empty means "matched nothing" and must select
+   * NOTHING, exactly like row_ids.
+   */
+  patient_members?: Array<{ entity: string; member: string }> | null;
+  /**
    * The employer SEGMENT toggle: 'all' (default) · 'employer' · 'individual'.
    *
    * 'individual' means "this policy has no plan sponsor" — a self-funded individual policy rather
@@ -274,6 +301,33 @@ export function cmdExplorerBaseConds(
       // Every id was unusable, but the caller DID ask for a set. Omitting the condition here would
       // widen the grid back to every row — the opposite of the request, and the same trap the empty
       // `row_ids: []` case documents. Emit an impossible predicate instead so the result is empty.
+      conds.push('false');
+    }
+  }
+  // FULL-BOOK patient-name search result (0105). A direct predicate on the rollup itself — both
+  // business_entity_id and member_id_bidx are projected by the 0050 matview and covered by 0092's
+  // indexes, so this needs neither a join nor a subquery.
+  //
+  // PAIRWISE, via two parallel bound arrays zipped by unnest. `member_id_bidx = any(tokens)` would
+  // be wrong: the token is tenant-agnostic, so in a multi-entity view it selects every tenant that
+  // happens to share a member id (240 of 10,701 do). Zipping keeps each match bound to the tenant it
+  // was matched IN. The two arrays are built from one array of pairs immediately below, so they
+  // cannot drift out of alignment.
+  //
+  // NO RANGE FILTER is needed here, unlike row_ids: these are text/uuid values compared as such, so
+  // a malformed value can only fail to match. There is no 22003 cast hazard to defend against.
+  if (Array.isArray(filter.patient_members)) {
+    if (filter.patient_members.length > 0) {
+      const entities = filter.patient_members.map((p) => p.entity);
+      const members = filter.patient_members.map((p) => p.member);
+      conds.push(
+        `(business_entity_id, member_id_bidx) in ` +
+          `(select e, m from unnest(${add(entities)}::uuid[], ${add(members)}::text[]) as t(e, m))`,
+      );
+    } else {
+      // Present but empty = "the search matched nobody". Omitting the condition would widen the
+      // grid to every row and present it as a name result, which is the row_ids trap in a new
+      // costume. Emit an impossible predicate so the grid is honestly empty.
       conds.push('false');
     }
   }
@@ -918,72 +972,6 @@ export const CMD_EXPLORER_SELECT =
  * row.allowed_amount IS allowed_reliable). `entityIds` is the server-derived RBAC tenant scope,
  * applied as a mandatory WHERE so a page never crosses tenants.
  */
-/**
- * PATIENT-NAME SEARCH, part 1 of 2: how many rows the current filters narrow to.
- *
- * Name matching CANNOT happen in SQL — patient_name is libsodium ciphertext, so the only way to
- * compare it is to decrypt each candidate in-process. That makes the work strictly proportional to
- * the candidate count, which is why the feature is GATED on narrowing rather than offered over the
- * whole book (669,942 rows as of 2026-08-17).
- *
- * RULED BY ALEC 2026-08-17: do NOT use patient_name_bidx for this. Nothing reads that column on
- * cmd_explorer_rows (its only consumers are in src/billingAudit/, a different table), it is NULL on
- * ~95% of rows because it postdates most of the ingest, and a blind index answers only EQUALITY on
- * a whole normalized name — it cannot do the substring match this search needs. Decrypting a
- * bounded candidate set is both simpler and complete, and it works on every row regardless of
- * whether the index was ever populated.
- *
- * Counts against the ROLLUP (charge grain) so the number the user is told matches the number of
- * rows the grid would show them.
- */
-export function buildCmdExplorerNameCandidateCountQuery(
-  filter: CmdExplorerFilter,
-  entityIds: string[],
-): { sql: string; params: unknown[] } {
-  const params: unknown[] = [];
-  const add: ParamAdder = (v) => {
-    params.push(v);
-    return `$${params.length}`;
-  };
-  const conds = cmdExplorerBaseConds(filter, entityIds, add);
-  const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
-  return { sql: `select count(*)::int as n from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where}`, params };
-}
-
-/**
- * PATIENT-NAME SEARCH, part 2 of 2: the ciphertext for the narrowed candidates.
- *
- * Projects ONLY `id` and the encrypted name — never a money column, never another identifier. The
- * caller decrypts in-process, matches, and returns row ids; the plaintext never leaves the server
- * and never reaches a log, a URL, or the response.
- *
- * `limit` is a HARD ceiling applied in SQL, not a suggestion to the caller: even if the count guard
- * were bypassed, this cannot pull an unbounded number of ciphertexts into memory.
- */
-export function buildCmdExplorerNameCandidatesQuery(
-  filter: CmdExplorerFilter,
-  entityIds: string[],
-  limit: number,
-): { sql: string; params: unknown[] } {
-  const params: unknown[] = [];
-  const add: ParamAdder = (v) => {
-    params.push(v);
-    return `$${params.length}`;
-  };
-  const conds = cmdExplorerBaseConds(filter, entityIds, add);
-  const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
-  // The rollup's `id` IS the latest snapshot's real row id, so joining the base table on it gets
-  // the ciphertext for exactly the row the grid displays.
-  return {
-    sql:
-      `select p.id, e.patient_name from (` +
-      `select t.id from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} limit ${add(limit)}` +
-      `) p join collections.cmd_explorer_rows e on e.id = p.id ` +
-      `where e.patient_name is not null`,
-    params,
-  };
-}
-
 export function buildCmdExplorerQuery(
   cursor: CmdExplorerCursor | null,
   filter: CmdExplorerFilter,

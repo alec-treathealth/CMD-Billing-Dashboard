@@ -31,8 +31,6 @@ import {
   type CmdExplorerFilter,
   type CmdExplorerSort,
   buildCmdEmployerCoverageQuery,
-  buildCmdExplorerNameCandidateCountQuery,
-  buildCmdExplorerNameCandidatesQuery,
 } from '../src/collections/cmdExplorerQuery.js';
 
 const ENTITY = ['af504ab6-3dcd-4aa4-a93c-27bc58de4088'];
@@ -1103,27 +1101,41 @@ test('row_ids: an EMPTY list must not silently widen the grid to every row', () 
   assert.doesNotMatch(empty.sql, /bigint\[\]/, 'empty array emits no id condition');
 });
 
-test('name candidate COUNT query is tenant-scoped and counts the ROLLUP, not the base table', () => {
-  const q = buildCmdExplorerNameCandidateCountQuery({ facility: ['CAMH'] }, ENTITY);
-  assert.match(q.sql, /^select count\(\*\)::int as n from /);
-  assert.match(q.sql, /cmd_explorer_charge_rollup/);
-  // The number shown to the user must be the number of rows the GRID would show, and the grid
-  // reads the rollup — counting the base table would over-state it by the snapshot fan-out (~2.15x).
-  assert.doesNotMatch(q.sql, /from collections\.cmd_explorer_rows/);
-  assert.ok(q.params.some((p) => Array.isArray(p) && (p as string[]).includes(ENTITY[0]!)));
+test('patient_members emits a PAIRWISE predicate, so a token cannot cross tenants', () => {
+  // ⚠ THE REGRESSION THIS PINS IS REAL AND WAS SHIPPED IN THE FIRST DRAFT. member_id_bidx is a keyed
+  // HMAC of the member id and nothing else, so it is tenant-agnostic: 240 of 10,701 live member
+  // tokens exist in BOTH tenants. `member_id_bidx = any(tokens)` therefore returns the other
+  // tenant's rows for those 240 in Consolidated view. Zipping the entity alongside is the fix.
+  const E1 = 'a1b2c3d4-0000-0000-0000-000000000001';
+  const E2 = 'a1b2c3d4-0000-0000-0000-000000000002';
+  const q = buildCmdExplorerQuery(
+    null,
+    { patient_members: [{ entity: E1, member: 'a'.repeat(64) }, { entity: E2, member: 'a'.repeat(64) }] },
+    CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY,
+  );
+  assert.match(q.sql, /\(business_entity_id, member_id_bidx\) in \(select e, m from unnest\(\$\d+::uuid\[\], \$\d+::text\[\]\) as t\(e, m\)\)/);
+  // The bare form must NOT come back — it is what made the same token match both tenants.
+  assert.doesNotMatch(q.sql, /member_id_bidx = any/);
+  // Two parallel arrays, same length, both bound.
+  const arrays = q.params.filter((p) => Array.isArray(p) && (p as unknown[]).length === 2) as string[][];
+  assert.ok(arrays.length >= 2, 'entities and members are both bound arrays');
+  assert.doesNotMatch(q.sql, /a{64}/, 'tokens are parameters, never interpolated');
 });
 
-test('name CANDIDATES query projects ONLY id + ciphertext, and caps in SQL', () => {
-  const q = buildCmdExplorerNameCandidatesQuery({ facility: ['CAMH'] }, ENTITY, 2000);
-  // No money, no other identifier — a name search must not become a bulk PHI export.
-  assert.match(q.sql, /select p\.id, e\.patient_name from/);
-  for (const leaked of ['member_id', 'group_number', 'charge_amount', 'insurance_payments', 'employer_name']) {
-    assert.doesNotMatch(q.sql, new RegExp(`e\\.${leaked}`), `must not project ${leaked}`);
-  }
-  // The cap is enforced in SQL as a bound param, not left to the caller.
-  assert.match(q.sql, /limit \$\d+/);
-  assert.ok(q.params.includes(2000), 'cap is a BOUND parameter');
-  assert.match(q.sql, /e\.patient_name is not null/);
+test('patient_members: an EMPTY list means "matched nobody" and must select NOTHING', () => {
+  // ⚠ THE OPPOSITE HANDLING TO row_ids, DELIBERATELY. row_ids treats [] as absent and leaves the
+  // empty-means-nothing rule to the action layer, which is why payerIntelSearch has to re-implement
+  // that half in three places. This one enforces it HERE, so every consumer of the shared builder —
+  // grid, summary, cohort, Payer Intel — inherits it and none of them can forget.
+  const q = buildCmdExplorerQuery(null, { patient_members: [] }, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+  assert.match(q.sql, /\bfalse\b/, 'an impossible predicate, not a widened grid');
+  assert.doesNotMatch(q.sql, /unnest\(/);
+});
+
+test('patient_members absent emits no condition at all', () => {
+  const q = buildCmdExplorerQuery(null, {}, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+  assert.doesNotMatch(q.sql, /unnest\(/);
+  assert.doesNotMatch(q.sql, /\bfalse\b/, 'no search is not the same as a search that found nobody');
 });
 
 test('employer coverage returns TWO booleans — "any tenant" gates the filter, "every tenant" gates the label', () => {

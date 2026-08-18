@@ -1284,15 +1284,29 @@ export interface CmdReportFilter {
    */
   employer_names?: string[];
   employerMode?: 'all' | 'employer' | 'individual';
-  /** Row ids resolved by the PATIENT-NAME search. Non-PHI (bigserial keys); the name itself never
-   *  travels in a filter. `[]` means "searched, matched nothing" and MUST be preserved. */
+  /** Row ids. Non-PHI (bigserial keys). ⚠ NO LONGER PRODUCED BY THE PATIENT-NAME SEARCH — it moved
+   *  to `patient_member_bidx` in 0105 because a row list grows with CHARGE LINES and so had to be
+   *  capped, which is what made the search partial. Kept because the query layer and Payer Intel
+   *  both still harden on it; retiring it end-to-end is a follow-up, not this change. */
   row_ids?: string[];
+  /** (tenant, member) pairs resolved by the PATIENT-NAME search (0105). The member value is a keyed
+   *  one-way HMAC, not PHI — the name itself never travels in a filter. The ENTITY travels with it
+   *  because the token alone is tenant-agnostic (240 of 10,701 live tokens exist in both tenants).
+   *  `[]` means "searched, matched nobody" and MUST be preserved: dropping it would widen the grid
+   *  back to the whole book. */
+  patient_members?: Array<{ entity: string; member: string }>;
 }
 
 /** Max employers one filter may name, and max row ids one name-search may pin. Bounded input:
  *  both arrive from the client and both become `= any($n)` arrays. */
 const CMD_EMPLOYER_FILTER_MAX = 200;
-const CMD_ROW_IDS_MAX = 2000; // mirrors CMD_NAME_SEARCH_ROW_CAP — a search cannot match more
+const CMD_ROW_IDS_MAX = 2000; // legacy id-pinning bound; the name search no longer produces ids
+/** Max member policies one name search may pin. Mirrors CMD_NAME_SEARCH_MEMBER_CAP in server.ts. */
+const CMD_PATIENT_MEMBER_MAX = 2000;
+/** A member blind-index token: HMAC-SHA256 as lowercase hex (src/collections/blindIndex.ts). */
+const BIDX_TOKEN_RE = /^[0-9a-f]{64}$/;
+/** A business_entity_id: canonical lowercase UUID. */
+const ENTITY_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Copy the picked employers into the reader filter, validated.
@@ -1368,6 +1382,41 @@ function applyRowIds(
   if (ids.length > CMD_ROW_IDS_MAX) return false;
   if (!ids.every(isPgBigintString)) return false;
   readerFilter.row_ids = ids;
+  return true;
+}
+
+/**
+ * Copy the PATIENT-NAME search's member tokens into the reader filter, validated.
+ *
+ * ⚠ AN EMPTY ARRAY IS MEANINGFUL, exactly as it is for row ids: it means the search ran and matched
+ * nobody. `undefined` (no search) is the only thing that omits the condition. The shared query
+ * builder emits a literal `false` for the empty case, so a matched-nothing search shows an empty
+ * grid rather than the whole book.
+ *
+ * SHAPE-VALIDATED even though a forged token is harmless. It cannot leak anything — every read is
+ * still bounded by the server-derived `entityIds`, so a made-up token can only fail to match — but
+ * the rule here is bounded, typed input at the boundary, and rejecting 64-hex early also stops a
+ * caller pushing a megabyte of junk into a `= any($n)` array.
+ */
+function applyPatientMembers(
+  filter: CmdReportFilter,
+  readerFilter: { patient_members?: Array<{ entity: string; member: string }> },
+): boolean {
+  const pairs = filter.patient_members;
+  if (pairs === undefined) return true;
+  if (!Array.isArray(pairs)) return false;
+  if (pairs.length > CMD_PATIENT_MEMBER_MAX) return false;
+  const clean: Array<{ entity: string; member: string }> = [];
+  for (const p of pairs) {
+    if (typeof p !== 'object' || p === null) return false;
+    const { entity, member } = p as { entity?: unknown; member?: unknown };
+    if (typeof entity !== 'string' || !ENTITY_UUID_RE.test(entity)) return false;
+    if (typeof member !== 'string' || !BIDX_TOKEN_RE.test(member)) return false;
+    // ⚠ REBUILT, NOT PASSED THROUGH. Copying only the two validated fields means an extra property
+    // on the client's object cannot ride along into the query builder.
+    clean.push({ entity, member });
+  }
+  readerFilter.patient_members = clean;
   return true;
 }
 
@@ -1593,6 +1642,7 @@ export async function loadCmdReport(
     employer_names?: string[];
     employerMode?: 'all' | 'employer' | 'individual';
     row_ids?: string[];
+    patient_members?: Array<{ entity: string; member: string }>;
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
@@ -1604,6 +1654,9 @@ export async function loadCmdReport(
   if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
   // Patient-name search result ids. `[]` is preserved on purpose (searched, matched nothing).
   if (!applyRowIds(filter, readerFilter)) return { ok: false, error: 'Invalid name-search result.' };
+  if (!applyPatientMembers(filter, readerFilter)) {
+    return { ok: false, error: 'Invalid name-search result.' };
+  }
   // PHI search (gated + audited here — this is the actual row-returning PHI access).
   const phi = await resolvePhiSearch(filter.phiSearch, view, true);
   if (!phi.ok) return { ok: false, error: phi.error };
@@ -1664,6 +1717,7 @@ export async function loadCmdReportGrouped(
     phiIndex?: PhiIndexTokens;
     employer_names?: string[];
     row_ids?: string[];
+    patient_members?: Array<{ entity: string; member: string }>;
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
@@ -1671,6 +1725,9 @@ export async function loadCmdReportGrouped(
   if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
   if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
   if (!applyRowIds(filter, readerFilter)) return { ok: false, error: 'Invalid name-search result.' };
+  if (!applyPatientMembers(filter, readerFilter)) {
+    return { ok: false, error: 'Invalid name-search result.' };
+  }
   const phi = await resolvePhiSearch(filter.phiSearch, view, true);
   if (!phi.ok) return { ok: false, error: phi.error };
   if (phi.phiIndex) readerFilter.phiIndex = phi.phiIndex;
@@ -1910,6 +1967,7 @@ export async function loadCmdSearchSummary(
     employer_names?: string[];
     employerMode?: 'all' | 'employer' | 'individual';
     row_ids?: string[];
+    patient_members?: Array<{ entity: string; member: string }>;
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
@@ -1919,6 +1977,9 @@ export async function loadCmdSearchSummary(
   if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
   // Patient-name search result ids. `[]` is preserved on purpose (searched, matched nothing).
   if (!applyRowIds(filter, readerFilter)) return { ok: false, error: 'Invalid name-search result.' };
+  if (!applyPatientMembers(filter, readerFilter)) {
+    return { ok: false, error: 'Invalid name-search result.' };
+  }
   // PHI search: gate (canRevealPhi) + resolve tokens; audit happens in loadCmdReport (the
   // row-returning access) so a single search isn't double-logged by the summary + the grid.
   const phi = await resolvePhiSearch(filter.phiSearch, view, false);
@@ -2296,15 +2357,22 @@ export type RevealCmdRowsResult =
  * ⚠ THE SEARCH TERM IS PHI. It arrives in this Server Action's BODY and must never be put in the
  * URL, browser storage, a log line, or the audit `detail`. It is passed straight to the server
  * helper, compared against decrypted names in-process, and discarded. What comes BACK is only
- * bigserial row ids, which are non-PHI — that is what lets the caller re-query the grid without a
- * name ever crossing the wire a second time.
+ * one-way HMAC member tokens, which are non-PHI — that is what lets the caller re-query the grid
+ * without a name ever crossing the wire a second time.
  *
- * Narrowing and the row cap are enforced in searchCmdExplorerPatientName (server-side), NOT here —
- * a client that skipped the check must not be able to trigger an unbounded decrypt.
+ * ⚠ THIS NO LONGER TAKES A FILTER (0105). It used to re-validate and re-apply the whole grid filter
+ * so the candidate set it decrypted matched what the grid was showing. There is no candidate set
+ * any more: the search reads the patient directory for the caller's ENTIRE tenant scope, so a
+ * patient is found wherever they are in the book and the grid's own filters intersect the result
+ * afterwards. Dropping the parameter is the point, not a shortcut — nothing the client sends can
+ * now influence WHICH rows are searched, only which of the matches are then displayed.
+ *
+ * The consequence to keep honest in the UI: the match count is BOOK-WIDE within the tenant, so it
+ * can exceed what the grid shows when another filter is also active. Say so rather than quietly
+ * reconciling the two (the Qualify scope-notice lesson).
  */
 export async function searchCollectionsPatientName(
   term: string,
-  filter: CmdReportFilter = {},
   view?: DashboardView,
 ): Promise<
   | { ok: true; result: CmdNameSearchResult }
@@ -2321,41 +2389,15 @@ export async function searchCollectionsPatientName(
   const gate = await requirePhiPrincipal();
   if (!gate.ok) return { ok: false, error: gate.error };
   // Intersect the caller's FULL PHI entitlement with the view they are looking at, so the search
-  // can never reach outside either bound.
+  // can never reach outside either bound. This is now the ONLY scope the search takes, and it is
+  // entirely server-derived — nothing about which rows are searched comes from the client.
   const viewIds = await viewEntityScope(view);
   if (viewIds === null) return { ok: false, error: 'Sign in to search patient names.' };
   const entityIds = gate.entityIds.filter((id) => viewIds.includes(id));
   if (entityIds.length === 0) return { ok: false, error: 'Your role does not permit this view.' };
 
-  // Re-validate + translate the client filter exactly as loadCmdReport does, so the candidate set
-  // this counts is the SAME set the grid is showing. Diverging here would mean telling the user
-  // "1,900 rows" while the grid holds a different number.
-  const readerFilter: {
-    facility?: string[];
-    from?: string;
-    to?: string;
-    q?: string;
-    searchColumns?: CmdExplorerSearchColumn[];
-    cpt_code?: string;
-    revenue_code?: string;
-    primary_payer?: string;
-    primary_payers?: string[];
-    phiIndex?: PhiIndexTokens;
-    employer_names?: string[];
-    employerMode?: 'all' | 'employer' | 'individual';
-  } = {};
-  if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
-  if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
-  if (!applySearchFilter(filter, readerFilter)) return { ok: false, error: 'Invalid search.' };
-  if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
-  if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
-  // `false` here = the caller passed PHI terms it is not entitled to resolve; already audited.
-  const phi = await resolvePhiSearch(filter.phiSearch, view, true);
-  if (!phi.ok) return { ok: false, error: phi.error };
-  if (phi.phiIndex) readerFilter.phiIndex = phi.phiIndex;
-
   try {
-    const result = await searchCmdExplorerPatientName(term, readerFilter, gate.actor, entityIds);
+    const result = await searchCmdExplorerPatientName(term, gate.actor, entityIds);
     return { ok: true, result };
   } catch {
     // Generic to the client; the real error may carry ciphertext context.

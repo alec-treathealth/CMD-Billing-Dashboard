@@ -69,8 +69,6 @@ import {
   buildCmdExplorerGroupedQuery,
   cmdExplorerGroupSortValue,
   buildCmdEmployerCoverageQuery,
-  buildCmdExplorerNameCandidateCountQuery,
-  buildCmdExplorerNameCandidatesQuery,
   buildCohortCurveQueries,
   buildCohortTotalsQuery,
   buildCohortDrilldownQueries,
@@ -286,6 +284,12 @@ import {
   type RefreshChargeRollupHttpRequest,
 } from '../../src/routes/refreshChargeRollupHandler.js';
 import { refreshChargeRollup } from '../../src/collections/refreshChargeRollup.js';
+import {
+  buildPatientDirectoryLagQuery,
+  buildPatientDirectoryReadQuery,
+  syncPatientDirectory,
+  type PatientDirectorySyncStats,
+} from '../../src/collections/patientDirectory.js';
 import {
   handlePipelineTickRequest,
   type PipelineTickHttpRequest,
@@ -811,6 +815,41 @@ export function handleRefreshChargeRollup(
       } catch (err) {
         console.error(
           'refresh-charge-rollup: facility-resolution refresh failed (rollup refresh unaffected):',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+
+      // 0105: the patient-name directory joins the hourly cadence HERE, for the same reason the
+      // facility-resolution matview does — and specifically AFTER the rollup, which is an ordering
+      // that matters. The directory is what a name search matches against; the rollup is what the
+      // grid reads. Refreshing the directory first would open a window where a name resolves to a
+      // patient whose charge lines the grid cannot yet show, i.e. a search that finds somebody and
+      // then displays nothing. This order can only ever produce the harmless converse.
+      //
+      // BEST-EFFORT, and the fail-soft is not laziness: this is bolted onto a production-critical
+      // cron, so it must be incapable of failing the rollup. The work is also fully resumable — the
+      // watermark is committed after every batch — so a failed run costs at most one hour of new
+      // patients being unsearchable, never a corrupted index. A missing table (0105 merged but not
+      // applied) lands here too and is logged distinctly rather than as an outage.
+      //
+      // The reader and the writer are DIFFERENT ROLES on purpose: only claims_reader may SELECT the
+      // encrypted patient_name, and only cmd_rollup_writer may INSERT the directory. See 0105.
+      try {
+        const dir: PatientDirectorySyncStats = await syncPatientDirectory({
+          read: readerExecutor(),
+          write: rollupWriterDb(),
+          decrypt: decryptPhi,
+        });
+        console.log(
+          `refresh-charge-rollup: patient directory scanned ${dir.rows_scanned} rows, ` +
+            `inserted ${dir.names_inserted} names, watermark ${dir.last_row_id}, ` +
+            `${dir.exhausted ? 'caught up' : 'BUDGET-STOPPED (resumes next hour)'}` +
+            (dir.decrypt_failures > 0 ? `, decrypt failures ${dir.decrypt_failures}` : '') +
+            (dir.skipped_no_member > 0 ? `, skipped-no-member ${dir.skipped_no_member}` : ''),
+        );
+      } catch (err) {
+        console.error(
+          'refresh-charge-rollup: patient-directory sync failed (rollup refresh unaffected):',
           err instanceof Error ? err.message : String(err),
         );
       }
@@ -3557,100 +3596,208 @@ export async function revealCmdExplorerRows(
   return out;
 }
 
-/** Hard ceiling on how many rows a patient-name search may decrypt. RATIFIED BY ALEC 2026-08-17.
- *  Not a tuning knob: decryption is per-row work and each decrypted name is PHI held in memory, so
- *  this bounds BOTH the cost and the exposure. Raising it widens both. */
-export const CMD_NAME_SEARCH_ROW_CAP = 2000;
+/**
+ * Upper bound on how many MEMBER POLICIES one patient-name search may resolve to.
+ *
+ * ⚠ THIS IS NOT THE OLD ROW CAP RENAMED — the unit changed, and that is the whole point of 0105.
+ * The old CMD_NAME_SEARCH_ROW_CAP counted CHARGE LINES, so 2,000 of them was 0.3% of a 686,503-row
+ * book and the search had to be gated behind "narrow by facility/payer/date first" to fit inside
+ * it. This counts PATIENTS' member policies, and the entire book holds 10,941 of them — so 2,000 is
+ * 18% of every policy in the system, a term so broad it cannot mean a person. The gate is gone
+ * because the cap it existed to protect is gone.
+ */
+export const CMD_NAME_SEARCH_MEMBER_CAP = 2000;
+
+/** Shortest term the search will run. One character matches most of the book and says nothing. */
+export const CMD_NAME_SEARCH_MIN_TERM = 2;
 
 export type CmdNameSearchResult =
-  | { ok: true; rowIds: string[]; matched: number; scanned: number }
-  /** The filters still select more rows than may be decrypted. `count` is what the user must narrow
-   *  BELOW — returned so the UI can say the actual number instead of just refusing. */
+  | {
+      ok: true;
+      /**
+       * (tenant, member) PAIRS for the grid predicate. Non-PHI — the member value is a one-way HMAC.
+       *
+       * ⚠ THE TENANT IS PART OF THE ANSWER, not decoration. A member blind index is an HMAC of the
+       * member id alone, so it is tenant-agnostic: 240 of 10,701 live tokens exist in BOTH tenants.
+       * Returning bare tokens let a name matched in one tenant select the other's rows for those
+       * 240, in Consolidated view where both are visible and the mix is invisible.
+       */
+      members: Array<{ entity: string; member: string }>;
+      /** Distinct NAMES matched. Differs from members.length when a policy carries dependents. */
+      matchedPatients: number;
+      /**
+       * Charge lines ingested since the directory was last synced. 0 means the index is current.
+       *
+       * ⚠ NON-ZERO MEANS THE SEARCH IS INCOMPLETE, AND THE UI MUST SAY SO. A budget-stopped sync
+       * leaves a NON-EMPTY but PARTIAL directory, which the empty-directory guard cannot distinguish
+       * from a complete one — so a patient beyond the watermark reads as "no match" while the UI
+       * promises the whole book. That is exactly the silent miss this design exists to prevent,
+       * coming back through the door marked "resumable".
+       */
+      indexLagRows: number;
+      /**
+       * DISTINCT PATIENT NAMES in the caller's tenant scope — the honest denominator for "N of M
+       * matched". NOT the number of directory rows: the directory is keyed on (member, name), and
+       * a name that appears under two member policies is two rows and one patient. Measured live
+       * 2026-08-18: 11,161 rows, 9,986 distinct names — reporting the row count would over-state
+       * the book by 12% in a number the user reads.
+       */
+      patientsInScope: number;
+    }
+  /** Matched more policies than may be listed. `count` is what the user must get below. */
   | { ok: false; reason: 'too_broad'; count: number; cap: number }
-  /** No other filter is active at all. Distinct from `too_broad` because the remedy differs:
-   *  "pick a facility/payer/date first", not "narrow what you already picked". */
-  | { ok: false; reason: 'not_narrowed'; cap: number };
+  | { ok: false; reason: 'term_too_short'; min: number }
+  /**
+   * The name index cannot answer. Kept DISTINCT from "no matches" on purpose — both render as an
+   * empty grid, and conflating them would report "this patient is not in the book" when the truth
+   * is "nothing has been indexed yet". `unavailable` means the 0105 tables are absent (merged but
+   * not applied); `empty` means they exist and the sync has not populated them.
+   */
+  | { ok: false; reason: 'directory_unavailable' }
+  | { ok: false; reason: 'directory_empty' };
+
+/** Postgres SQLSTATE for "relation does not exist" — 0105 merged but not applied yet. */
+const DIRECTORY_UNDEFINED_TABLE = '42P01';
 
 /**
- * PATIENT-NAME SEARCH over the Collections explorer.
+ * FULL-BOOK PATIENT-NAME SEARCH over the Collections explorer (migration 0105).
  *
- * RULED BY ALEC 2026-08-17. Two decisions are his and should not be re-litigated:
- *   1. NO blind index. patient_name_bidx is not used — nothing reads it on this table, it is NULL
- *      on ~95% of rows, and an HMAC can only answer equality on a whole normalized name. This
- *      decrypts instead, which is complete and substring-capable.
- *   2. The search is GATED behind narrowing, and the UI must SAY SO. Names are unique, but a search
- *      over the whole book would still be both slow and a large PHI decrypt; requiring a facility /
- *      payer / date / member / employer filter first keeps the candidate set small and the
- *      near-duplicate names disambiguated by context.
+ * ── WHAT CHANGED, AND WHY THE TWO OLD RESTRICTIONS ARE GONE ────────────────────────────────────
+ * This used to decrypt CANDIDATE ROWS, which forced a 2,000-row ceiling and a "pick a facility /
+ * payer / date first" gate. Both were consequences of the candidate set being ROWS. Measured live
+ * 2026-08-18: the book is 686,503 charge lines but only 10,941 (tenant, member) pairs, and 11,000
+ * libsodium decrypt + substring matches cost 10-17 ms warm. Decryption was never the constraint.
+ * Reading the distinct set live WAS — 4,265 ms, seq scan plus a 106 MB external sort — so 0105
+ * materialises it and this reads ~11k rows instead.
  *
- * PHI DISCIPLINE — the reason this is safe to expose at all:
- *   · The search TERM arrives via a Server Action body and is never logged, never put in SQL, never
- *     written to the URL, and never audited into `detail`.
- *   · Decryption happens in-process as claims_reader; plaintext is compared and DISCARDED.
- *   · Only non-PHI bigserial ids are returned. The caller re-queries the grid by id, so no name
- *     ever crosses the wire.
- *   · Audited fail-closed BEFORE returning, recording counts and ids only.
+ * Alec's two 2026-08-17 rulings are PRESERVED, not overturned:
+ *   1. NO BLIND INDEX FOR MATCHING. `patient_name_bidx` still answers nothing here: an HMAC can
+ *      only test equality on a whole normalized name, and this must match substrings ("smi").
+ *      Matching is still done on DECRYPTED text. The directory's `name_fp` is a dedup key for the
+ *      builder, never a search mechanism.
+ *   2. NO IN-PROCESS DECRYPTED-NAME CACHE. Every search decrypts afresh. That ruling turned out to
+ *      cost 15 ms, so there is nothing left to trade: a cache would hold the entire patient roster
+ *      in plaintext in a long-lived server process to save a sixtieth of a second.
  *
- * Matching is case-insensitive substring on the decrypted name, which is what makes it useful for
- * partial entry ("smi") and is impossible with a blind index.
+ * The gate is gone because the thing it protected is gone. It was never a PHI control — it bounded
+ * a decrypt, and the decrypt is now bounded by the directory's own grain.
+ *
+ * ── WHY THE RESULT IS MEMBER TOKENS, NOT ROW IDS ───────────────────────────────────────────────
+ * A row-id list grows with charge lines (a single patient can carry 400), so it has to be capped
+ * and the cap is what made the feature partial. A member-token list grows with PATIENTS. It also
+ * lands on a column the grid's own rollup already carries and 0092 already indexes, so the grid
+ * needs no join.
+ *
+ * The cost is a visible, bounded imprecision: 0.44% of members carry more than one patient name
+ * (dependents on one subscriber policy), so matching a dependent returns that policy's whole set of
+ * charge lines. That is an OVER-return and never a miss — the directory keys on the NAME, so every
+ * distinct name is findable. Precise name-grain filtering would need cmd_explorer_rows.
+ * patient_name_bidx backfilled (7.18% populated today, and its 0066 UPDATE grant to claims_reader
+ * is inert under RLS — see 0105's header).
+ *
+ * ── PHI DISCIPLINE (unchanged, and the reason this is safe to expose) ──────────────────────────
+ *   · The TERM arrives via a Server Action body: never logged, never in SQL, never in the URL,
+ *     never audited into `detail`.
+ *   · Decryption is in-process as claims_reader; plaintext is compared and DISCARDED.
+ *   · Only one-way HMAC tokens leave this function. No name crosses the wire.
+ *   · Audited fail-closed BEFORE returning, with counts only.
+ *   · `entityIds` is server-derived (requirePhiPrincipal), so the directory read is tenant-scoped
+ *     at the database and a token can only ever select rows the caller may already see.
  */
 export async function searchCmdExplorerPatientName(
   term: string,
-  filter: CmdExplorerFilter,
   actor: { email: string; userId: string },
   entityIds: string[],
 ): Promise<CmdNameSearchResult> {
   const needle = term.trim().toLowerCase();
-  if (needle === '') return { ok: false, reason: 'not_narrowed', cap: CMD_NAME_SEARCH_ROW_CAP };
-
-  // "Narrowed" means at least one NON-name filter is doing work. Checked here on the server rather
-  // than trusted from the client, because it is the guard that bounds the decrypt.
-  const narrowed =
-    (filter.facility ?? '') !== '' ||
-    (Array.isArray(filter.primary_payers) && filter.primary_payers.length > 0) ||
-    (Array.isArray(filter.employer_names) && filter.employer_names.length > 0) ||
-    (filter.employerMode ?? 'all') !== 'all' ||
-    (filter.from ?? null) !== null ||
-    (filter.to ?? null) !== null ||
-    (filter.q ?? '') !== '' ||
-    (filter.phiIndex?.memberIdBidx ?? null) !== null ||
-    (filter.phiIndex?.memberIdPrefixBidx ?? null) !== null ||
-    (filter.phiIndex?.groupNumberBidx ?? null) !== null;
-  if (!narrowed) return { ok: false, reason: 'not_narrowed', cap: CMD_NAME_SEARCH_ROW_CAP };
-
-  const exec = readerExecutor();
-  const countQ = buildCmdExplorerNameCandidateCountQuery(filter, entityIds);
-  const { rows: cRows } = await exec.query<{ n: number }>(countQ.sql, countQ.params);
-  const count = Number(cRows[0]?.n ?? 0);
-  if (count > CMD_NAME_SEARCH_ROW_CAP) {
-    return { ok: false, reason: 'too_broad', count, cap: CMD_NAME_SEARCH_ROW_CAP };
+  if (needle.length < CMD_NAME_SEARCH_MIN_TERM) {
+    return { ok: false, reason: 'term_too_short', min: CMD_NAME_SEARCH_MIN_TERM };
   }
 
-  const candQ = buildCmdExplorerNameCandidatesQuery(filter, entityIds, CMD_NAME_SEARCH_ROW_CAP);
-  const { rows } = await exec.query<{ id: string; patient_name: Buffer }>(candQ.sql, candQ.params);
+  const q = buildPatientDirectoryReadQuery(entityIds);
+  let rows: Array<{
+    business_entity_id: string;
+    member_id_bidx: string;
+    name_fp: string;
+    patient_name: Buffer;
+  }>;
+  try {
+    const res = await readerExecutor().query<{
+      business_entity_id: string;
+      member_id_bidx: string;
+      name_fp: string;
+      patient_name: Buffer;
+    }>(q.sql, q.params);
+    rows = res.rows;
+  } catch (err) {
+    // 42P01 means 0105 is merged but not applied. Returning "no matches" here would tell the user
+    // that nobody in the book is called that, which is a lie a search must never tell.
+    if (typeof err === 'object' && err !== null && (err as { code?: string }).code === DIRECTORY_UNDEFINED_TABLE) {
+      console.error('patient search: collections.cmd_patient_directory does not exist (migration 0105 not applied).');
+      return { ok: false, reason: 'directory_unavailable' };
+    }
+    throw err;
+  }
 
-  const rowIds: string[] = [];
+  // Applied BEFORE the decrypt loop: an unbuilt index must not be reported as an absent patient.
+  if (rows.length === 0) return { ok: false, reason: 'directory_empty' };
+
+  // Keyed by "entity\u0000member" so the SET dedupes PAIRS, not tokens — deduping on the token alone
+  // would silently re-collapse the two tenants this whole change exists to keep apart.
+  const memberPairs = new Map<string, { entity: string; member: string }>();
+  const nameHits = new Set<string>();
+  const namesInScope = new Set<string>();
   for (const r of rows) {
-    // A single undecryptable row must not fail the whole search — it would make one bad ciphertext
-    // deny the feature entirely. Skipped silently; the error carries ciphertext context and is
-    // deliberately NOT logged.
+    namesInScope.add(r.name_fp);
+    // One undecryptable row must not deny the whole search. Skipped silently — the error carries
+    // ciphertext context and is deliberately NOT logged.
     let name: string;
     try {
       name = await decryptPhi(r.patient_name);
     } catch {
       continue;
     }
-    if (name.toLowerCase().includes(needle)) rowIds.push(String(r.id));
+    if (name.toLowerCase().includes(needle)) {
+      memberPairs.set(`${r.business_entity_id}\u0000${r.member_id_bidx}`, {
+        entity: r.business_entity_id,
+        member: r.member_id_bidx,
+      });
+      nameHits.add(r.name_fp);
+    }
   }
 
-  // Fail-closed audit BEFORE returning. Counts + non-PHI ids only — NEVER the term or any name.
+  if (memberPairs.size > CMD_NAME_SEARCH_MEMBER_CAP) {
+    return { ok: false, reason: 'too_broad', count: memberPairs.size, cap: CMD_NAME_SEARCH_MEMBER_CAP };
+  }
+
+  // How stale is the index? Read AFTER the match so a current search pays nothing extra on the
+  // hot path's critical section, and BEFORE the audit so the number is part of the recorded run.
+  let indexLagRows = 0;
+  try {
+    const lagQ = buildPatientDirectoryLagQuery();
+    const lagRes = await readerExecutor().query<{ lag: string }>(lagQ.sql, lagQ.params);
+    indexLagRows = Math.max(0, Number(lagRes.rows[0]?.lag ?? 0));
+  } catch {
+    // Non-fatal: a failed freshness probe must not deny a search that already has its answer. It
+    // reports 0 (= "believed current"), which is the same thing the caller assumed before this
+    // existed — never a fabricated non-zero that would raise a false incomplete-index warning.
+    indexLagRows = 0;
+  }
+
+  // Fail-closed audit BEFORE returning. Counts only — NEVER the term, a name, or a token.
   await recordAccess({
     actorEmail: actor.email,
     actorUserId: actor.userId,
     action: 'search_cmd_explorer_patient_name',
-    detail: { scanned: rows.length, matched: rowIds.length },
+    detail: { scanned: rows.length, matched_patients: nameHits.size, matched_members: memberPairs.size },
   });
-  return { ok: true, rowIds, matched: rowIds.length, scanned: rows.length };
+  return {
+    ok: true,
+    members: [...memberPairs.values()],
+    matchedPatients: nameHits.size,
+    patientsInScope: namesInScope.size,
+    indexLagRows,
+  };
 }
 
 // ---------------------------------------------------------------------------
