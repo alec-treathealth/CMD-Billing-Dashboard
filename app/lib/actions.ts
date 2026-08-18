@@ -49,6 +49,8 @@ import {
   cmdExplorerFacilities,
   cmdExplorerPayers,
   cmdExplorerCollectionsEmployerVocabulary,
+  loadCmdExplorerGroupedNonPhi,
+  type CmdExplorerGroupRow,
   type CanonicalEmployer,
   cmdExplorerEmployerCoverage,
   recordAccess,
@@ -1614,6 +1616,72 @@ export async function loadCmdReport(
   }
 }
 
+export type CmdGroupedResult =
+  | { ok: true; rows: CmdExplorerGroupRow[]; nextCursor: CmdExplorerCursor | null }
+  | { ok: false; error: string };
+
+/**
+ * GROUPED explorer page — one row per (patient x payment date x facility x payer).
+ *
+ * Requested as *"condense the charge lines into a grouping"* when several charge lines across
+ * several service dates arrive on one payment. Measured live: 497,337 rollup rows collapse to
+ * 101,158 groups — 4.92 lines per group.
+ *
+ * ⚠ IT SHARES loadCmdReport's ENTIRE VALIDATION PATH, deliberately: same viewEntityScope gate, same
+ * filter validators in the same order, same PHI-search resolution. Grouping changes the SHAPE of the
+ * result, never who may see it or what may be filtered on — so a second, parallel validation path
+ * would be a second place for the tenancy gate to rot. If a filter is ever added to one, it must be
+ * added to the other; that is the cost of this design and it is cheaper than the alternative.
+ *
+ * `direction` is the only sort control in v1 (the order is always payment_received) — see
+ * buildCmdExplorerGroupedQuery for why ordering groups by an aggregate is deferred rather than
+ * unsupported.
+ */
+export async function loadCmdReportGrouped(
+  cursor: CmdExplorerCursor | null = null,
+  filter: CmdReportFilter = {},
+  direction: 'asc' | 'desc' = 'desc',
+  view?: DashboardView,
+): Promise<CmdGroupedResult> {
+  const entityIds = await viewEntityScope(view);
+  if (entityIds === null) {
+    return { ok: false, error: 'The collections report could not be loaded right now.' };
+  }
+  const safeCursor = resolveCmdExplorerCursor(cursor);
+  // Not cast: it reaches an ORDER BY, so anything unrecognised degrades to the default rather than
+  // being interpolated. (The column is a fixed literal in the builder; only the direction varies.)
+  const safeDirection: 'asc' | 'desc' = direction === 'asc' ? 'asc' : 'desc';
+  const readerFilter: {
+    facility?: string[];
+    from?: string;
+    to?: string;
+    q?: string;
+    searchColumns?: CmdExplorerSearchColumn[];
+    cpt_code?: string;
+    revenue_code?: string;
+    primary_payer?: string;
+    primary_payers?: string[];
+    phiIndex?: PhiIndexTokens;
+    employer_names?: string[];
+    row_ids?: string[];
+  } = {};
+  if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
+  if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
+  if (!applySearchFilter(filter, readerFilter)) return { ok: false, error: 'Invalid search.' };
+  if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
+  if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
+  if (!applyRowIds(filter, readerFilter)) return { ok: false, error: 'Invalid name-search result.' };
+  const phi = await resolvePhiSearch(filter.phiSearch, view, true);
+  if (!phi.ok) return { ok: false, error: phi.error };
+  if (phi.phiIndex) readerFilter.phiIndex = phi.phiIndex;
+  try {
+    const page = await loadCmdExplorerGroupedNonPhi(safeCursor, readerFilter, safeDirection, entityIds);
+    return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
+  } catch {
+    return { ok: false, error: 'The collections report could not be loaded right now.' };
+  }
+}
+
 // --- Billing Audit work-table actions ---------------------------------------
 
 export type { AuditCursor, AuditFilter, AuditSort, AuditGridRow, AuditFacilityOption, AuditPayerOption };
@@ -2009,7 +2077,7 @@ export async function loadCmdExplorerPayers(view?: DashboardView): Promise<CmdPa
   }
 }
 
-export type { CanonicalEmployer };
+export type { CanonicalEmployer, CmdExplorerGroupRow };
 
 export type CmdCollectionsEmployersResult =
   | { ok: true; employers: CanonicalEmployer[] }

@@ -91,6 +91,9 @@ import {
   loadCmdExplorerPayers,
   loadCollectionsEmployerCoverage,
   loadCollectionsEmployerVocabulary,
+  loadCmdReportGrouped,
+  type CmdGroupedResult,
+  type CmdExplorerGroupRow,
   type CanonicalEmployer,
   loadCohortCurve,
   loadCohortDrilldown,
@@ -231,6 +234,52 @@ const SORTABLE_KEYS = new Set<string>([
 // (right-aligned) — this set only overrides how cellText formats them.
 const IS_PERCENT = new Set<string>(['pct_allowed', 'pct_paid']);
 
+
+/**
+ * A grid row. Identical to the server row in ungrouped mode; in GROUPED mode it also carries how
+ * many charge lines were condensed and where the service-date span ends.
+ *
+ * Both extras are `__`-prefixed because they are PRESENTATION-ONLY and must never be mistaken for
+ * columns: they are absent from `ColKey`, so the column picker cannot show them, a saved view cannot
+ * reference them, and `sanitizeGridColumns` would drop them if one ever tried.
+ */
+type GridRow = CmdExplorerRow & { __lines?: number; __chargeDateEnd?: string | null };
+
+/**
+ * Map one grouped row onto the grid shape.
+ *
+ * The grouped row is deliberately made to LOOK like an ordinary row so the table, the column picker,
+ * saved views, drag-reorder and the PHI reveal all keep working with no branch. That is legitimate
+ * rather than a trick because `id` is a REAL row id — the group's representative (latest) rollup id —
+ * so revealing it decrypts exactly one row belonging to exactly one patient, which is what the group
+ * is. `member_id_bidx` is the group key, so a group is never more than one patient.
+ *
+ * `cpt_code` / `revenue_code` arrive null when the group genuinely spans several values; that is
+ * rendered as "Multiple" rather than an em dash, because "—" would read as "no CPT" when the truth
+ * is "several". `ingested_at` has no meaning for a group and is left empty.
+ */
+function toGridRow(g: CmdExplorerGroupRow): GridRow {
+  return {
+    id: g.id,
+    charge_date: g.charge_date,
+    payment_received: g.payment_received,
+    cpt_code: g.cpt_code,
+    revenue_code: g.revenue_code,
+    facility: g.facility,
+    charge_amount: g.charge_amount,
+    allowed_amount: g.allowed_amount,
+    insurance_payments: g.insurance_payments,
+    adjustments: g.adjustments,
+    patient_balance_due: g.patient_balance_due,
+    primary_payer: g.primary_payer,
+    pct_allowed: g.pct_allowed,
+    pct_paid: g.pct_paid,
+    employer_name: g.employer_name,
+    ingested_at: '',
+    __lines: g.line_count,
+    __chargeDateEnd: g.charge_date_end,
+  } as GridRow;
+}
 
 /**
  * Reconstruct a saved view into this component's { order, hidden } layout. Thin typed wrapper over the
@@ -399,7 +448,21 @@ export function CmdCollectionsExplorer({
     seededViews?.find((v) => v.isDefault) ??
     null;
 
-  const [rows, setRows] = useState<CmdExplorerRow[]>(() => (seededReport ? seededReport.rows : []));
+  /**
+   * A grid row. In GROUPED mode a row is several charge lines condensed into the payment they
+   * arrived on, so it carries two extras the ungrouped shape has no place for. They are prefixed
+   * because they are presentation-only and must never be mistaken for columns that exist on the
+   * server row (a saved view can never reference them — they are not in the ColKey allowlist).
+   */
+  const [rows, setRows] = useState<GridRow[]>(() => (seededReport ? seededReport.rows : []));
+  /**
+   * GROUPED MODE — one row per (patient x payment date x facility x payer).
+   *
+   * DEFAULT OFF, and that is a considered default rather than caution: most work on this tab is
+   * charge-line work, and a grouped row cannot answer "which CPT on which date". Grouping is what
+   * you turn on to read a payment; the raw grain is what you leave on to audit one.
+   */
+  const [grouped, setGrouped] = useState(false);
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>(() =>
     seededReport ? 'ready' : 'loading',
   );
@@ -1068,6 +1131,7 @@ export function CmdCollectionsExplorer({
       cursor: CmdExplorerCursor | null,
       filter: typeof filterArg,
       sortArg: CmdExplorerSort,
+      isGrouped: boolean,
     ) => {
       const myReq = ++reqRef.current;
       setStatus('loading');
@@ -1076,13 +1140,20 @@ export function CmdCollectionsExplorer({
       setRevealing(false);
       setRevealError(null);
       try {
-        const res: CmdReportResult = await loadCmdReport(cursor, filter, sortArg, view);
+        // Grouped mode has its own action (and its own SQL); the two share every validation step
+        // server-side, so the only thing that differs here is the row SHAPE. Grouped rows are mapped
+        // into the grid shape so the table, the column picker, saved views and the PHI reveal all
+        // keep working untouched — the representative id is a real row id, which is what makes the
+        // reveal legitimate rather than a re-implementation.
+        const res: CmdReportResult | CmdGroupedResult = isGrouped
+          ? await loadCmdReportGrouped(cursor, filter, sortArg.direction, view)
+          : await loadCmdReport(cursor, filter, sortArg, view);
         if (myReq !== reqRef.current) return; // a newer navigation superseded this load
         if (!res.ok) {
           setStatus('error');
           return;
         }
-        setRows(res.rows);
+        setRows(isGrouped ? (res.rows as CmdExplorerGroupRow[]).map(toGridRow) : (res.rows as CmdExplorerRow[]));
         setHasNext(res.nextCursor !== null);
         setCursors((prev) => {
           const next = [...prev];
@@ -1112,9 +1183,9 @@ export function CmdCollectionsExplorer({
     }
     setCursors([null]);
     startTransition(() => {
-      void loadPage(0, null, filterArg, sort);
+      void loadPage(0, null, filterArg, sort, grouped);
     });
-  }, [filterArg, sort, loadPage]);
+  }, [filterArg, sort, grouped, loadPage]);
 
   // Fetch the aggregate search summary whenever the (debounced) term / columns / window change.
   // Skipped entirely when there's no active search. The summary reflects the SEARCH level (term +
@@ -1398,14 +1469,27 @@ export function CmdCollectionsExplorer({
     }
   }, [revealAll, revealed, revealing, rows, status, canRevealPhi, revealCurrentPage]);
 
-  function cellText(key: ColKey, row: CmdExplorerRow): string {
+  function cellText(key: ColKey, row: GridRow): string {
+    // GROUPED MODE, two columns only.
+    //
+    // Charge From Date becomes the SPAN the group covers — the "multiple days ... all on a payment
+    // that came in on a single day" the grouping was asked for. A single-day group prints one date,
+    // so the arrow only appears when it is actually saying something.
+    if (grouped && key === 'charge_date' && row.__chargeDateEnd && row.__chargeDateEnd !== row.charge_date) {
+      return `${row.charge_date ?? '—'} → ${row.__chargeDateEnd}`;
+    }
+    // A null code in grouped mode means the group SPANS several values, which is not the same as
+    // having none. An em dash would read as "no CPT" and understate what is in the row.
+    if (grouped && (key === 'cpt_code' || key === 'revenue_code') && row[key] === null) {
+      return 'Multiple';
+    }
     if (IS_PHI.has(key)) {
       if (!revealed) return PHI_MASK;
       const p = phi.get(row.id);
       const v = p ? p[key as keyof CmdExplorerPhi] : null;
       return v ?? '—';
     }
-    const v = row[key as keyof CmdExplorerRow] as string | null;
+    const v = row[key as keyof GridRow] as string | null;
     if (IS_PERCENT.has(key)) return formatPercent(v);
     if (IS_NUMERIC.has(key)) return formatMoney(v);
     // Employer: a null means "this policy has no plan sponsor" — an individual policy — but ONLY
@@ -1753,6 +1837,32 @@ export function CmdCollectionsExplorer({
             {/* Column layout + saved views — a GRID control (lives on the grid toolbar, not the search
                 hero). Shown columns are both what the grid displays and what the search term matches. */}
             <div className="relative">
+              {/* GROUP BY PAYMENT — condense the charge lines that arrived on one payment.
+                  Measured live: 497,337 rollup rows collapse to 101,158 groups (4.92 lines each), so
+                  a 50-row page carries ~246 lines' worth of content.
+
+                  DEFAULT OFF on purpose: a grouped row cannot answer "which CPT on which date", and
+                  that is most of what this tab is used for. `aria-pressed` (not a checkbox) because
+                  it toggles how the SAME data is shaped, rather than selecting a thing. */}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                aria-pressed={grouped}
+                onClick={() => setGrouped((g) => !g)}
+                title={
+                  grouped
+                    ? 'Showing one row per payment. Turn off to see every charge line.'
+                    : 'Condense the charge lines that arrived on the same payment into one row.'
+                }
+                className={[
+                  'gap-1.5',
+                  grouped ? 'bg-[var(--brand-soft)] ring-1 ring-[var(--brand-accent)]/40' : '',
+                ].join(' ')}
+              >
+                <Layers className="h-4 w-4" aria-hidden />
+                Group by payment
+              </Button>
               <Button
                 type="button"
                 variant="outline"
@@ -1865,7 +1975,12 @@ export function CmdCollectionsExplorer({
                         <SortableHeadCell
                           key={c}
                           colKey={c}
-                          sortable={SORTABLE_KEYS.has(c)}
+                          // GROUPED MODE sorts by payment_received only (v1). Ordering groups by an
+                          // aggregate is possible but needs its own cursor path per column, and a
+                          // half-tested keyset does not fail loudly — it skips or repeats rows while
+                          // looking right. The other headers render as plain text rather than as a
+                          // control that would silently do nothing.
+                          sortable={grouped ? c === 'payment_received' : SORTABLE_KEYS.has(c)}
                           isSorted={sort.column === c}
                           direction={sort.direction}
                           onToggleSort={() => toggleSort(c as CmdExplorerSort['column'])}
@@ -1906,10 +2021,10 @@ export function CmdCollectionsExplorer({
           hasNext={hasNext}
           disabled={busy}
           onPrev={() => {
-            if (page > 0) startTransition(() => void loadPage(page - 1, cursors[page - 1] ?? null, filterArg, sort));
+            if (page > 0) startTransition(() => void loadPage(page - 1, cursors[page - 1] ?? null, filterArg, sort, grouped));
           }}
           onNext={() => {
-            if (hasNext) startTransition(() => void loadPage(page + 1, cursors[page + 1] ?? null, filterArg, sort));
+            if (hasNext) startTransition(() => void loadPage(page + 1, cursors[page + 1] ?? null, filterArg, sort, grouped));
           }}
         />
       </div>

@@ -66,6 +66,8 @@ import {
   buildCmdPayerOptionsQuery,
   buildCmdEmployerOptionsQuery,
   buildCmdCollectionsEmployerVocabularyQuery,
+  buildCmdExplorerGroupedQuery,
+  cmdExplorerGroupSortValue,
   buildCmdEmployerCoverageQuery,
   buildCmdExplorerNameCandidateCountQuery,
   buildCmdExplorerNameCandidatesQuery,
@@ -97,12 +99,15 @@ import {
   type CohortDrilldownAggregate,
   type CohortDrilldownTable,
   type CohortDrilldownResult,
+  type CmdExplorerGroupPage,
+  type CmdExplorerGroupRow,
 } from '../../src/collections/cmdExplorerQuery.js';
 import {
   groupEmployerNames,
   type CanonicalEmployer,
 } from '../../src/collections/employerCanonical.js';
 export type { CanonicalEmployer };
+export type { CmdExplorerGroupPage, CmdExplorerGroupRow };
 export {
   CMD_EXPLORER_SEARCH_COLUMNS,
   CMD_EXPLORER_SORTABLE_COLUMNS,
@@ -2740,6 +2745,54 @@ async function loadCmdExplorerPage(
     hasMore && last ? { id: last.id, value: cmdExplorerSortValue(last, sort.column) } : null;
   return { rows: page, nextCursor };
 }
+
+/**
+ * GROUPED explorer page — one row per (patient x payment date x facility x payer).
+ *
+ * Mirrors loadCmdExplorerPage exactly, including the over-fetch-by-one that detects a next page
+ * without a count(*). The cursor is the SAME {id, value} shape: `id` is the group's representative
+ * (max) rollup id and `value` is its payment date, which together are a total order.
+ *
+ * Sort is fixed to payment_received in v1 — see the builder for why ordering groups by an aggregate
+ * is deferred rather than unsupported.
+ */
+async function loadCmdExplorerGroupedPage(
+  cursor: CmdExplorerCursor | null,
+  filter: CmdExplorerFilter,
+  direction: 'asc' | 'desc',
+  entityIds: string[],
+): Promise<CmdExplorerGroupPage> {
+  const limit = CMD_EXPLORER_PAGE_SIZE + 1;
+  const { sql, params } = buildCmdExplorerGroupedQuery(cursor, filter, direction, limit, entityIds);
+  const { rows } = await readerExecutor().query<CmdExplorerGroupRow & { id: string }>(sql, params);
+  const hasMore = rows.length > CMD_EXPLORER_PAGE_SIZE;
+  const page = (hasMore ? rows.slice(0, CMD_EXPLORER_PAGE_SIZE) : rows).map((r) => ({
+    ...r,
+    // pg returns bigint as a STRING even though the row type says number — Number() it once here so
+    // no caller compares a string id (the cursor tiebreak depends on it being numeric).
+    id: Number(r.id),
+  }));
+  const last = page[page.length - 1];
+  const nextCursor: CmdExplorerCursor | null =
+    hasMore && last ? { id: last.id, value: cmdExplorerGroupSortValue(last) } : null;
+  return { rows: page, nextCursor };
+}
+
+/**
+ * Cached grouped page. Same posture as loadCmdExplorerNonPhi: NO PHI is projected (the group key
+ * uses member_id_bidx, an HMAC token, and it is never returned), entityIds is part of the cache key
+ * so a BXR page can never be served to an Indigo request, and the cron busts the shared tag.
+ */
+export const loadCmdExplorerGroupedNonPhi = unstable_cache(
+  (
+    cursor: CmdExplorerCursor | null,
+    filter: CmdExplorerFilter,
+    direction: 'asc' | 'desc',
+    entityIds: string[],
+  ): Promise<CmdExplorerGroupPage> => loadCmdExplorerGroupedPage(cursor, filter, direction, entityIds),
+  ['cmd-explorer-grouped'],
+  { revalidate: 900, tags: ['cmd-explorer'] },
+);
 
 /**
  * NON-PHI explorer page, cached 15 min PER (cursor, filter, sort, entityIds) key (no PHI at
