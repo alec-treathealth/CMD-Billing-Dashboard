@@ -526,6 +526,7 @@ export function CmdCollectionsExplorer({
   // component is the term (once, in a Server Action body) and what comes back is row IDS only.
   const [nameQuery, setNameQuery] = useState('');
   const [nameSearching, setNameSearching] = useState(false);
+    const nameSearchGenerationRef = useRef(0);
   /** null = no name filter applied. [] = searched and matched NOTHING (an empty grid is correct,
    *  and is deliberately distinguished from "no filter" so it cannot silently widen to every row). */
   // ⚠ THE RESOLVING VIEW IS STORED WITH THE RESULT, not just the result. A member token is a keyed
@@ -713,7 +714,8 @@ export function CmdCollectionsExplorer({
    * VISIBLE state agree. A reset effect alone would leave one render with the stale filter applied.
    */
   useEffect(() => {
-    setNameMatch(null);
+    nameSearchGenerationRef.current += 1;
+      setNameMatch(null);
     setNameQuery('');
     setNameNotice(null);
   }, [view]);
@@ -735,12 +737,16 @@ export function CmdCollectionsExplorer({
   const runNameSearch = useCallback(async () => {
     const term = nameQuery.trim();
     if (term === '' || !nameSearchAllowed) return;
-    setNameSearching(true);
+    const searchView = view;
+     const searchGeneration = ++nameSearchGenerationRef.current;
+     const current = () => searchGeneration === nameSearchGenerationRef.current && view === searchView;
+     setNameSearching(true);
     setNameNotice(null);
     try {
-      const res = await searchCollectionsPatientName(term, view);
+      const res = await searchCollectionsPatientName(term, searchView);
       if (!res.ok) { setNameNotice(res.error); return; }
-      const r = res.result;
+      if (!current()) return;
+     const r = res.result;
       if (!r.ok) {
         setNameNotice(
           r.reason === 'too_broad'
@@ -776,7 +782,7 @@ export function CmdCollectionsExplorer({
     } catch {
       setNameNotice('The name search could not be completed right now.');
     } finally {
-      setNameSearching(false);
+      if (current()) setNameSearching(false);
     }
   }, [nameQuery, nameSearchAllowed, view, hasAnySearch]);
 
@@ -1807,7 +1813,8 @@ export function CmdCollectionsExplorer({
                 {nameMatchTokens !== null && (
                   <button
                     type="button"
-                    onClick={() => { setNameMatch(null); setNameQuery(''); setNameNotice(null); }}
+                    onClick={() => { nameSearchGenerationRef.current += 1;
+      setNameMatch(null); setNameQuery(''); setNameNotice(null); }}
                     className="rounded-md px-2 py-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
                   >
                     Clear name filter
