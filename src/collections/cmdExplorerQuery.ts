@@ -1686,7 +1686,22 @@ export function buildCohortDrilldownQueries(
  * **4.92 charge lines per group**, so a 50-row page carries ~246 lines' worth of content.
  *
  * ── THE GROUP KEY, AND THE RULE THAT CHOSE IT ──────────────────────────────────────────────────
- * `(member_id_bidx, payment_received, facility, primary_payer)`.
+ * `(business_entity_id, member_id_bidx, payment_received, facility, primary_payer)`.
+ *
+ * ⚠ `business_entity_id` LEADS THE KEY AND IS NOT OPTIONAL. Without it, Consolidated (the only view
+ * that spans tenants) could merge BXR and Indigo money into one row: `member_id_bidx` is an HMAC
+ * under ONE key, so the same member id at both tenants produces the same token. Measured 2026-08-18
+ * this merged nothing — 0 cross-tenant groups — but only because the two tenants' facilities differ,
+ * and "no tenant currently collides" is a property of today's data, not a guarantee. Tenancy on
+ * this surface is structural everywhere else; it is structural here too.
+ *
+ * ⚠ A NULL `member_id_bidx` KEYS ON THE ROW ID INSTEAD (`coalesce(member_id_bidx, 'id:' || id)`).
+ * SQL GROUP BY treats NULLs as EQUAL, so without this every member-less row sharing a payment date,
+ * facility and payer would collapse into a single row purporting to be one patient — with a summed
+ * total, a line count, and a representative PHI-reveal id that belong to no one. Keying on the id
+ * makes each such row its own group, which is the honest answer: we cannot prove they are the same
+ * person, so we do not merge them. Measured 2026-08-18: 0 such rows exist (ingest rejects a charge
+ * with no member id), so this is insurance against a column that is nullable rather than a live fix.
  *
  * The rule: **any column displayed UN-AGGREGATED must be in the group key**, or the cell shows one
  * of several values arbitrarily and the row quietly lies. `member_id_bidx + payment_received` alone
@@ -1722,8 +1737,10 @@ export function buildCohortDrilldownQueries(
  * NOT ADDITIVE, so they become facts about the group instead of a value:
  *   · charge_date  → the min..max span (`charge_date` + `charge_date_end`), which is precisely the
  *     "multiple days" the request describes;
- *   · cpt_code / revenue_code → the code when the group is UNIFORM, else null ("Multiple"). A group
- *     spanning several CPTs cannot honestly show one of them.
+ *   · cpt_code / revenue_code → the code only when EVERY line has one and they agree, plus a
+ *     `*_mixed` flag. Three states must be distinguishable — one code, several/partial, or none at
+ *     all — because a group spanning several CPTs cannot honestly show one of them, and a group
+ *     with no CPT at all is not the same thing as one with several.
  *   · line_count   → how many charge lines were condensed, so the collapse is never invisible.
  *
  * ⚠ `sum()` SKIPS NULLS, and `allowed_reliable` is null on 3,939 of 497,337 rows (0.8%) where the
@@ -1741,11 +1758,15 @@ export interface CmdExplorerGroupRow {
   payment_received: string | null;
   /** How many charge lines this row condenses. Always >= 1. */
   line_count: number;
-  /** The CPT when every line in the group shares one; null when the group genuinely spans several
-   *  (rendered as "Multiple"). NOT a count — see the builder for why count(distinct) was dropped. */
+  /** The CPT when EVERY line in the group has one and they agree; null otherwise. Read together
+   *  with `cpt_mixed`, which separates "several/some missing" from "no line has a CPT". */
   cpt_code: string | null;
+  /** True when the group's lines do not all carry the same CPT (including some-missing). */
+  cpt_mixed: boolean;
   /** Same contract as `cpt_code`. */
   revenue_code: string | null;
+  /** Same contract as `cpt_mixed`. */
+  revenue_mixed: boolean;
   facility: string | null;
   primary_payer: string | null;
   employer_name: string | null;
@@ -1839,14 +1860,24 @@ export function buildCmdExplorerGroupedQuery(
     `to_char(max(t.charge_date), 'YYYY-MM-DD') as charge_date_end, ` +
     `to_char(t.payment_received, 'YYYY-MM-DD') as payment_received, ` +
     `count(*)::int as line_count, ` +
-    // ⚠ min/max EQUALITY, NOT count(distinct) — a measured 2.6x on the whole query. Two
-    // `count(distinct)` calls cost 1.2s of a 2.1s page (they sort within every group); min and max
-    // are streaming aggregates and effectively free. The information lost is "how many" distinct
-    // codes, which nobody asked for; what is kept is the honest one: the ACTUAL code when the group
-    // is uniform, and null when it genuinely varies (the UI renders that as "Multiple"). A group of
-    // 5 lines that all share a CPT still shows that CPT, which count(distinct) would also have.
-    `case when min(t.cpt_code) = max(t.cpt_code) then min(t.cpt_code) else null end as cpt_code, ` +
-    `case when min(t.revenue_code) = max(t.revenue_code) then min(t.revenue_code) else null end as revenue_code, ` +
+    // ⚠ THREE STATES, NOT TWO — and count/min/max rather than count(distinct).
+    //
+    // count(distinct) was measured at 1.2s of a 2.1s page (it sorts within every group); count, min
+    // and max are streaming aggregates and effectively free, a 2.6x on the whole query.
+    //
+    // But min/max ALONE is wrong, because SQL aggregates SKIP NULLS. A group of ['99213', null]
+    // has min = max = '99213' and would claim every line carries that CPT; a group where every line
+    // is null has min = max = NULL, and `NULL = NULL` is NULL rather than true, so it would fall to
+    // the ELSE and be reported as varying. Both misstate what the group contains, in OPPOSITE
+    // directions. So the value is emitted only when EVERY line has a code AND they agree
+    // (`count(code) = count(*)`), and a separate `*_mixed` flag distinguishes "several / some
+    // missing" from "no line has one at all". The UI renders those as Multiple and an em dash.
+    `case when count(t.cpt_code) = count(*) and min(t.cpt_code) = max(t.cpt_code) ` +
+    `then min(t.cpt_code) else null end as cpt_code, ` +
+    `(count(t.cpt_code) > 0 and (count(t.cpt_code) <> count(*) or min(t.cpt_code) <> max(t.cpt_code))) as cpt_mixed, ` +
+    `case when count(t.revenue_code) = count(*) and min(t.revenue_code) = max(t.revenue_code) ` +
+    `then min(t.revenue_code) else null end as revenue_code, ` +
+    `(count(t.revenue_code) > 0 and (count(t.revenue_code) <> count(*) or min(t.revenue_code) <> max(t.revenue_code))) as revenue_mixed, ` +
     `t.facility, t.primary_payer, ` +
     `sum(t.charge_amount) as charge_amount, ` +
     `sum(t.allowed_reliable) as allowed_amount, ` +
@@ -1859,7 +1890,8 @@ export function buildCmdExplorerGroupedQuery(
     `case when sum(t.allowed_reliable) > 0 ` +
     `then round(sum(t.insurance_payments) / sum(t.allowed_reliable) * 100, 2) else null end as pct_paid ` +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} ` +
-    `group by t.member_id_bidx, t.payment_received, t.facility, t.primary_payer${havingSql} ` +
+    `group by t.business_entity_id, coalesce(t.member_id_bidx, 'id:' || t.id), ` +
+    `t.payment_received, t.facility, t.primary_payer${havingSql} ` +
     `order by t.payment_received ${dir} nulls last, max(t.id) ${dir} limit ${add(limit)}` +
     `) g left join collections.cmd_explorer_rows e on e.id = g.id ` +
     // Re-stated on the OUTER query: a LEFT JOIN does not preserve the subquery's ordering, and the

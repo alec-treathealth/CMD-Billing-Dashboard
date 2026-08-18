@@ -26,13 +26,31 @@ const build = (cursor: Parameters<typeof buildCmdExplorerGroupedQuery>[0] = null
   buildCmdExplorerGroupedQuery(cursor, {}, dir, 50, ENTITY);
 
 // ── 1. THE GROUP KEY ────────────────────────────────────────────────────────────────────────────
+test('⚠ business_entity_id LEADS the group key — tenancy is structural, not incidental', () => {
+  // Without it, Consolidated (the only cross-tenant view) could merge BXR and Indigo money into one
+  // row: member_id_bidx is an HMAC under ONE key, so the same member id at both tenants yields the
+  // same token. Measured 2026-08-18: 0 groups currently merge across tenants — but only because the
+  // two tenants' facilities differ, which is a property of today's data, not a guarantee.
+  const { sql } = build();
+  assert.match(sql, /group by t\.business_entity_id, /);
+});
+
+test('⚠ a NULL member_id_bidx keys on the row id, so member-less rows can never merge', () => {
+  // SQL GROUP BY treats NULLs as EQUAL. Without this, every member-less row sharing a payment date,
+  // facility and payer would collapse into ONE row claiming to be a single patient — with a summed
+  // total and a representative PHI-reveal id belonging to no one. Measured: 0 such rows exist today
+  // (ingest rejects a charge with no member id), so this is insurance on a nullable column.
+  const { sql } = build();
+  assert.match(sql, /coalesce\(t\.member_id_bidx, 'id:' \|\| t\.id\)/);
+});
+
 test('the group key carries every UN-AGGREGATED displayed dimension', () => {
   // The rule that chose the key: a column displayed un-aggregated must be IN the key, or the cell
   // shows one of several values arbitrarily. facility and primary_payer are displayed AND are filter
   // dimensions, so omitting them would let a row claim a facility it only partly belongs to.
   // Measured cost of including them: 981 groups out of 101,158 — under 1%.
   const { sql } = build();
-  assert.match(sql, /group by t\.member_id_bidx, t\.payment_received, t\.facility, t\.primary_payer/);
+  assert.match(sql, /t\.payment_received, t\.facility, t\.primary_payer/);
 });
 
 test('it reads the ROLLUP, not the base table', () => {
@@ -81,7 +99,12 @@ test('non-additive columns become facts about the group, not a picked value', ()
   assert.match(sql, /count\(\*\)::int as line_count/, 'the collapse is never invisible');
   // Uniform-or-null, NOT count(distinct): measured at 1.2s of a 2.1s page for information nobody
   // asked for. A group of 5 lines sharing one CPT still shows that CPT.
-  assert.match(sql, /case when min\(t\.cpt_code\) = max\(t\.cpt_code\) then min\(t\.cpt_code\) else null end as cpt_code/);
+  // THREE states. SQL aggregates skip nulls, so min=max alone would claim ['99213', null] is
+  // uniformly 99213, and an all-null group (min=max=NULL, and NULL=NULL is not true) would fall to
+  // the ELSE and read as varying. Both misstate the group, in opposite directions.
+  assert.match(sql, /count\(t\.cpt_code\) = count\(\*\) and min\(t\.cpt_code\) = max\(t\.cpt_code\)/);
+  assert.match(sql, /as cpt_mixed/);
+  assert.match(sql, /as revenue_mixed/);
   assert.doesNotMatch(sql, /count\(distinct/, 'dropped on measurement — see the builder');
 });
 
@@ -143,8 +166,10 @@ test('no PHI column is ever projected', () => {
   for (const c of ['patient_name', 'member_id_raw', 'group_number', 'member_id_bidx as', 'group_number_bidx']) {
     assert.ok(!sql.includes(`, ${c}`), `${c} must not be projected`);
   }
-  // member_id_bidx appears ONLY as a grouping key — an HMAC token, never returned to the client.
-  assert.match(sql, /group by t\.member_id_bidx/);
+  // member_id_bidx appears ONLY inside the grouping key (wrapped in the null-safe coalesce) — an
+  // HMAC token used to define the group, never projected back to the client.
+  assert.match(sql, /coalesce\(t\.member_id_bidx/);
+  assert.doesNotMatch(sql, /select[^;]*t\.member_id_bidx as/, 'never projected');
 });
 
 // ── 5. The cursor scalar ────────────────────────────────────────────────────────────────────────

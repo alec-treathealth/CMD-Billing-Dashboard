@@ -243,7 +243,12 @@ const IS_PERCENT = new Set<string>(['pct_allowed', 'pct_paid']);
  * columns: they are absent from `ColKey`, so the column picker cannot show them, a saved view cannot
  * reference them, and `sanitizeGridColumns` would drop them if one ever tried.
  */
-type GridRow = CmdExplorerRow & { __lines?: number; __chargeDateEnd?: string | null };
+type GridRow = CmdExplorerRow & {
+  __lines?: number;
+  __chargeDateEnd?: string | null;
+  __cptMixed?: boolean;
+  __revenueMixed?: boolean;
+};
 
 /**
  * Map one grouped row onto the grid shape.
@@ -278,6 +283,8 @@ function toGridRow(g: CmdExplorerGroupRow): GridRow {
     ingested_at: '',
     __lines: g.line_count,
     __chargeDateEnd: g.charge_date_end,
+    __cptMixed: g.cpt_mixed,
+    __revenueMixed: g.revenue_mixed,
   } as GridRow;
 }
 
@@ -463,6 +470,25 @@ export function CmdCollectionsExplorer({
    * you turn on to read a payment; the raw grain is what you leave on to audit one.
    */
   const [grouped, setGrouped] = useState(false);
+  /**
+   * Toggling grouping NORMALIZES the sort column, keeping the chosen direction.
+   *
+   * ⚠ WITHOUT THIS THE HEADER LIES. Grouped requests always order by payment_received and use only
+   * the direction, so a user who had sorted by Charge Amount and then grouped would see the sort
+   * arrow still on Charge Amount while the rows were ordered by payment date — the indicator and the
+   * server disagreeing, with nothing on screen saying so. The direction is deliberately preserved:
+   * asc/desc was an intentional choice and grouping is not a reason to discard it.
+   */
+  const toggleGrouped = useCallback(() => {
+    setGrouped((wasGrouped) => {
+      if (!wasGrouped) {
+        setSort((prev) =>
+          prev.column === 'payment_received' ? prev : { column: 'payment_received', direction: prev.direction },
+        );
+      }
+      return !wasGrouped;
+    });
+  }, []);
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>(() =>
     seededReport ? 'ready' : 'loading',
   );
@@ -669,6 +695,9 @@ export function CmdCollectionsExplorer({
       month > 0 ||
       hasPhiSearch);
 
+  /** Curated key → its raw CMD spellings. The picker merges; the FILTER still matches raw text. */
+  const facilityGroups = useMemo(() => facilityGroupsFrom(facilityOptions), [facilityOptions]);
+
   /**
    * Run the patient-name search.
    *
@@ -723,7 +752,15 @@ export function CmdCollectionsExplorer({
       setNameSearching(false);
     }
   }, [nameQuery, nameSearchAllowed, recencyDays, month, year, facilitySelection, payerSelection,
-      employerSelection, hasPhiSearch, dMember, dAlpha, dGroup, view]);
+      employerSelection, hasPhiSearch, dMember, dAlpha, dGroup, view,
+      // ⚠ THE TWO EXPANSION MAPS ARE DEPENDENCIES, and leaving them out was a real bug.
+      // This callback expands curated facility keys and canonical employer keys into the RAW values
+      // the filter matches on. Both maps are reloaded when the tenant view changes, so without them
+      // here the closure kept the PREVIOUS view's maps: the grid would refetch with the new
+      // expansions while the name search still sent the old ones — or sent an unexpanded key that
+      // matches nothing — and the user would be told their patient has no rows. Silent, and only
+      // reachable after a view switch with a facility or employer already selected.
+      facilityGroups, employerVocabulary]);
   // Stable dep keys for the selection sets (array identity changes on every toggle otherwise).
   const payerKey = payerSelection.join('\n');
   /**
@@ -821,8 +858,6 @@ export function CmdCollectionsExplorer({
     () => facilityPickerOptionsFrom(facilityOptions),
     [facilityOptions],
   );
-  /** Curated key → its raw CMD spellings. The picker merges; the FILTER still matches raw text. */
-  const facilityGroups = useMemo(() => facilityGroupsFrom(facilityOptions), [facilityOptions]);
   const payerPickerOptions = useMemo<PickerOption[]>(
     () => payerOptions.map((p) => ({ value: p, display: p })),
     [payerOptions],
@@ -1478,10 +1513,14 @@ export function CmdCollectionsExplorer({
     if (grouped && key === 'charge_date' && row.__chargeDateEnd && row.__chargeDateEnd !== row.charge_date) {
       return `${row.charge_date ?? '—'} → ${row.__chargeDateEnd}`;
     }
-    // A null code in grouped mode means the group SPANS several values, which is not the same as
-    // having none. An em dash would read as "no CPT" and understate what is in the row.
-    if (grouped && (key === 'cpt_code' || key === 'revenue_code') && row[key] === null) {
-      return 'Multiple';
+    // THREE states, not two. A null code means either "the group spans several values" or "no line
+    // in the group has one at all", and those are different facts: "Multiple" understates the second
+    // and an em dash understates the first. The server sends a `*_mixed` flag precisely so the UI
+    // does not have to guess from a null.
+    if (grouped && (key === 'cpt_code' || key === 'revenue_code')) {
+      if (row[key] !== null) return row[key] as string;
+      const mixed = key === 'cpt_code' ? row.__cptMixed : row.__revenueMixed;
+      return mixed ? 'Multiple' : '—';
     }
     if (IS_PHI.has(key)) {
       if (!revealed) return PHI_MASK;
@@ -1849,7 +1888,7 @@ export function CmdCollectionsExplorer({
                 variant="outline"
                 size="sm"
                 aria-pressed={grouped}
-                onClick={() => setGrouped((g) => !g)}
+                onClick={toggleGrouped}
                 title={
                   grouped
                     ? 'Showing one row per payment. Turn off to see every charge line.'
