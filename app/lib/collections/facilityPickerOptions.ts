@@ -35,11 +35,27 @@
  * are DISTINCT by construction (the query selects `distinct value`), so no option can ever render
  * `X · X`.
  *
+ * ── 2026-08-17: THE SUFFIX WAS INVISIBLE, SO IT MOVED TO ITS OWN LINE ──────────────────────────
+ * The fix above was correct and still shipped nothing the user could see. The dropdown row renders
+ * with `truncate` (multi-select-tag-picker.tsx), and the disambiguator is a SUFFIX behind an
+ * identical ~27-character prefix — so both LONESTAR options read `LONESTAR MENTAL HEALTH LLC · LO…`
+ * and remained indistinguishable. The information was added and then clipped.
+ *
+ * Live today: `LONESTAR MENTAL HEALTH` carries 10,044 charge lines and `LONESTAR MENTAL HEALTH LLC`
+ * carries 162; both resolve to curated `LONESTAR MENTAL HEALTH LLC`, so both label identically and
+ * picking the wrong one still silently scoped the search to 162 lines.
+ *
+ * So the raw text now goes in `PickerOption.detail`, a SECOND LINE that starts at x=0 with the full
+ * row width and is not truncated. `display` returns to the clean curated name. Everything the
+ * 2026-08-10 ruling protected is untouched: still display-only, still conditional (2 of 48 options),
+ * still raw-grain, `value` still the one raw facility text the filter matches.
+ *
  * ── THE TYPE-AHEAD ─────────────────────────────────────────────────────────────────────────────
- * `PickerOption.display` is both the label AND the haystack `pickerMatches` searches, so the
- * appended raw text stays findable rather than blocking a search. That is the one behaviour this
- * change could plausibly break and a "the labels differ" assertion would not catch, so
- * `collections-facility-picker-labels.test.tsx` drives the REAL `pickerMatches` over these options.
+ * `pickerMatches` searches `display` AND `detail`, so moving the raw text between the two fields
+ * leaves the haystack byte-identical — the text that was findable as a suffix is findable as a
+ * second line. That is the one behaviour this change could plausibly break and a "the labels differ"
+ * assertion would not catch, so `collections-facility-picker-labels.test.tsx` drives the REAL
+ * `pickerMatches` over these options.
  *
  * `searchText` is deliberately NOT set here (Alec, 2026-08-10): making every raw CMD spelling
  * findable is a search-behaviour change, not a display fix, and belongs in its own change.
@@ -78,9 +94,12 @@ export function facilityPickerOptionsFrom(options: readonly FacilityLabelSource[
   }
   return options.map((o) => {
     const label = o.facility_name ?? o.facility;
+    const ambiguous = (times.get(label) ?? 0) > 1;
     return {
       value: o.facility,
-      display: (times.get(label) ?? 0) > 1 ? `${label}${FACILITY_DISAMBIGUATOR}${o.facility}` : label,
+      display: label,
+      // SECOND LINE, not a suffix — see the 2026-08-17 note in the header.
+      ...(ambiguous ? { detail: o.facility } : {}),
       badge: o.care_setting,
     };
   });

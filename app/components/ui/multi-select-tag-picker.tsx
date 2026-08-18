@@ -24,6 +24,26 @@ export type PickerOption = {
   display: string;
   badge?: 'IP' | 'OP' | 'BOTH' | null;
   /**
+   * SECOND LINE under `display` — shown, and matched by the type-ahead.
+   *
+   * Added 2026-08-17 for the Collections facility picker. The 2026-08-10 disambiguation appended the
+   * raw CMD text to `display` as a SUFFIX (`LONESTAR MENTAL HEALTH LLC · LONESTAR MENTAL HEALTH`),
+   * and this row renders with `truncate` — so the one piece of text added specifically to tell two
+   * options apart was the piece guaranteed to be clipped. Both LONESTAR options read
+   * `LONESTAR MENTAL HEALTH LLC · LO…` on screen and picking the wrong one scoped the search to 162
+   * charge lines instead of 10,044.
+   *
+   * A second line fixes it because the distinguishing text starts at x=0 with the full row width to
+   * itself, instead of starting ~27 characters in behind an identical prefix.
+   *
+   * ⚠ IT IS PART OF THE HAYSTACK, and that is required rather than a nicety: the suffix it replaces
+   * lived in `display`, which `pickerMatches` searches, so leaving `detail` out would silently make
+   * text that used to be findable unfindable. That is NOT the same as the `searchText` question ruled
+   * on 2026-08-10 (making EVERY raw spelling findable) — this only preserves what colliding options
+   * already had.
+   */
+  detail?: string | null;
+  /**
    * EXTRA HAYSTACK for the type-ahead — matched in addition to `display`, never shown.
    *
    * Added 2026-08-08 for Qualify's facility narrow, where `display` is `display_acronym` and 16 of 47
@@ -46,8 +66,10 @@ export type PickerOption = {
  * returned (`employerNarrowFor` needs the full returned set to decide whether a selection is even a
  * narrow).
  *
- * Case-insensitive SUBSTRING, over `display` plus any `searchText`. No token splitting, no fuzzy, no
- * diacritic folding — that is the shipped behaviour and this extraction does not change it.
+ * Case-insensitive SUBSTRING, over `display` plus `detail` plus any `searchText`. No token splitting,
+ * no fuzzy, no diacritic folding — that is the shipped behaviour and this extraction does not change
+ * it. `detail` joined the haystack when it was introduced, to hold the type-ahead byte-identical for
+ * options whose disambiguating text merely MOVED out of `display` (see PickerOption.detail).
  *
  * EXPORTED AND PURE because this component had no direct test coverage at all until 2026-08-08, and
  * "the filter four surfaces depend on" is not something to change without one.
@@ -56,6 +78,7 @@ export function pickerMatches(option: PickerOption, query: string): boolean {
   const q = query.trim().toLowerCase();
   if (q === '') return true;
   if (option.display.toLowerCase().includes(q)) return true;
+  if ((option.detail ?? '').toLowerCase().includes(q)) return true;
   return (option.searchText ?? []).some((t) => t.toLowerCase().includes(q));
 }
 
@@ -74,6 +97,7 @@ export function MultiSelectTagPicker({
   displayOverride,
   tone,
   derivedValues,
+  disabled = false,
 }: {
   label: string;
   /** Optional state readout rendered INSIDE the label row, between the label and `Clear N`.
@@ -105,6 +129,18 @@ export function MultiSelectTagPicker({
    *  teal200 control border); 'list' = employer/funding (plain zone, line border). Both use teal chips
    *  + teal focus. UNSET (Collections + everywhere else) = the tenant `--brand-*` styling, unchanged. */
   tone?: 'score' | 'list';
+  /**
+   * INERT BUT STILL LAID OUT. Added 2026-08-17 for Collections' Employer picker in the Individual
+   * segment, where a named employer is contradictory (Individual = no plan sponsor).
+   *
+   * ⚠ THE POINT IS THAT IT IS NOT UNMOUNTING. Every picker in that row is `min-w-[15rem] flex-1`, so
+   * removing one makes flexbox re-divide the free space and the neighbouring inputs visibly resize —
+   * the exact "the bar jumps left and right" defect this prop exists to avoid. A disabled picker
+   * occupies identical space, so the row never moves.
+   *
+   * Defaults false, so every other call site is byte-identical.
+   */
+  disabled?: boolean;
   /** CHIP PROVENANCE: values that were added by a Heating-Up ticker-card click rather than hand-picked.
    *  Those chips render dashed with a small ↳ prefix — behaviourally identical (removable the same way),
    *  only visually marked. Omitted everywhere except the Qualify console. */
@@ -119,9 +155,13 @@ export function MultiSelectTagPicker({
   const boxRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+  // value → the label a SELECTED chip shows. `detail` is folded back in here on purpose: the chip is
+  // a single inline row with no second line, so without it two options that differ only in `detail`
+  // (the LONESTAR pair) would produce two byte-identical chips — re-creating, in the selection, the
+  // exact ambiguity `detail` exists to remove from the dropdown.
   const displayOf = useMemo(() => {
     const m = new Map<string, string>(displayOverride ?? []);
-    for (const o of options) m.set(o.value, o.display);
+    for (const o of options) m.set(o.value, o.detail ? `${o.display} · ${o.detail}` : o.display);
     return m;
   }, [options, displayOverride]);
 
@@ -187,11 +227,15 @@ export function MultiSelectTagPicker({
       </div>
       <div
         onClick={() => {
+          if (disabled) return;
           setOpen(true);
           inputRef.current?.focus();
         }}
+        aria-disabled={disabled || undefined}
         className={[
           'flex min-h-10 w-full flex-wrap items-center gap-1 rounded-lg border bg-surface px-2 py-1.5 text-sm transition-colors',
+          // Muted, not hidden: the row must keep its exact footprint (see the `disabled` prop note).
+          disabled ? 'cursor-not-allowed opacity-55' : '',
           open
             ? tealTone
               ? 'border-teal700 ring-2 ring-teal500/25'
@@ -247,13 +291,19 @@ export function MultiSelectTagPicker({
             setOpen(true);
             onQueryChange?.(e.target.value);
           }}
-          onFocus={() => setOpen(true)}
-          placeholder={selected.length === 0 ? placeholder : 'Add more…'}
+          onFocus={() => {
+            if (!disabled) setOpen(true);
+          }}
+          disabled={disabled}
+          placeholder={selected.length === 0 || disabled ? placeholder : 'Add more…'}
           aria-label={label}
-          className="h-6 min-w-[6rem] flex-1 bg-transparent text-sm text-ink900 outline-none placeholder:text-ink400"
+          className="h-6 min-w-[6rem] flex-1 bg-transparent text-sm text-ink900 outline-none placeholder:text-ink400 disabled:cursor-not-allowed"
         />
       </div>
-      {open && (
+      {/* `!disabled` closes an already-open dropdown the instant the picker goes inert — without it,
+          switching to Individual with the list open would leave a live, clickable option list over a
+          control that no longer accepts input. */}
+      {open && !disabled && (
         <div className="absolute left-0 right-0 top-full z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border border-line bg-surface p-1 shadow-ths animate-ths-reveal">
           {belowMinChars ? (
             <p className="px-2 py-2 text-xs text-ink400">Type at least {minChars} characters to search.</p>
@@ -282,7 +332,14 @@ export function MultiSelectTagPicker({
                       className={['h-3.5 w-3.5 shrink-0 text-[var(--brand-accent)]', on ? '' : 'opacity-0'].join(' ')}
                       aria-hidden
                     />
-                    <span className="truncate text-ink900">{o.display}</span>
+                    <span className="flex min-w-0 flex-col">
+                      <span className="truncate text-ink900">{o.display}</span>
+                      {/* NOT truncated: this line exists to be read in full — it is the only thing
+                          distinguishing two options that share a label. It wraps instead. */}
+                      {o.detail ? (
+                        <span className="break-words text-xs leading-tight text-muted-foreground">{o.detail}</span>
+                      ) : null}
+                    </span>
                   </span>
                   {o.badge !== undefined && (
                     <span

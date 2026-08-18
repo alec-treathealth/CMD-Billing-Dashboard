@@ -626,6 +626,49 @@ export function buildCmdCollectionsEmployerOptionsQuery(
   return { sql, params };
 }
 
+/**
+ * THE WHOLE COLLECTIONS EMPLOYER VOCABULARY for one tenant scope — every distinct raw spelling, no
+ * term, no limit (2026-08-17).
+ *
+ * ── WHY A WHOLE-VOCABULARY LOAD AND NOT THE PER-KEYSTROKE SEARCH ABOVE ─────────────────────────
+ * `buildCmdCollectionsEmployerOptionsQuery` searches per keystroke because the employer vocabulary
+ * was believed to be large. **It is not, on this plane.** That belief was measured on the VOB side
+ * (~11.6k distinct); the collections book carries **1,073 distinct spellings over 116,871 rows**
+ * (measured 2026-08-17, cross-tenant — the widest scope that exists). That is the same order as
+ * facility and payer (~260 each), both of which load whole and filter client-side.
+ *
+ * Measured cost of THIS query, cross-tenant: **118 ms, 13,966 shared hits, index scan on
+ * `idx_cmd_explorer_rows_has_employer`** — no seq scan, no sort. Once per view load, against a
+ * per-keystroke query on a 686k-row table. It is cheaper in aggregate, not just simpler.
+ *
+ * ⚠ AND IT IS REQUIRED FOR CORRECTNESS, which is the real reason. Canonical grouping
+ * (`employerCanonical.ts`) collapses `TESLA INC` / `TESLA, INC.` / `TESLA,INC.` into one option
+ * whose `variants` become the `employer_names` predicate. Those variants must be COMPLETE — a group
+ * built from a LIMITed, term-matched page would carry only the spellings that happened to match,
+ * and the grid would silently under-select while the option looked authoritative. Typing `TESLA,`
+ * matches two of the three spellings; the group must still contain all three. Grouping the whole
+ * vocabulary makes completeness structural instead of something the search term has to get right.
+ *
+ * The per-keystroke builder above STAYS — Payer Intel's employer search uses it
+ * (app/lib/payer-intel/loaders.ts), where a term-scoped page is the right shape. Do not merge them.
+ *
+ * PHI: `employer_name` is the plan SPONSOR (employER, never employEE) and was ruled non-PHI for
+ * Collections display/search on 2026-08-14. Tenant-scoped by bound `$1`; no other column projected.
+ */
+export function buildCmdCollectionsEmployerVocabularyQuery(
+  entityIds: string[],
+): { sql: string; params: unknown[] } {
+  const sql =
+    'select distinct employer_name ' +
+    'from collections.cmd_explorer_rows ' +
+    'where business_entity_id = any($1::uuid[]) ' +
+    // The `<> ''` half is not redundant with `is not null`: mapRow coerces a blank CMD cell to null,
+    // but the 622k CSV-backfilled rows predate that path, so '' is a reachable state. It also has to
+    // match the `employerMode` partition exactly, or the segment counts and this vocabulary disagree.
+    "and employer_name is not null and employer_name <> ''";
+  return { sql, params: [entityIds] };
+}
+
 // --- saved grid views (per-user column layout) ------------------------------
 
 /**
@@ -683,10 +726,38 @@ export function sanitizeGridColumns(input: unknown): CmdExplorerColumnKey[] {
 // --- sort + cursor ----------------------------------------------------------
 
 /**
- * Columns the explorer grid may sort by — a CLOSED allowlist of fixed SQL literals (the two dates +
- * the four rollup-MATERIALIZED money columns). Anything else falls back to the default sort. These
- * are all values the 0050 charge-grain rollup carries per charge, so keyset paging drives off the
- * rollup's indexes (see buildCmdExplorerQuery).
+ * Columns the explorer grid may sort by — a CLOSED allowlist of fixed SQL literals (the two dates,
+ * the seven rollup-MATERIALIZED money/ratio columns, and the four rollup TEXT columns). Anything
+ * else falls back to the default sort. These are all values the 0050 charge-grain rollup carries
+ * per charge, so keyset paging drives off the rollup (see buildCmdExplorerQuery).
+ *
+ * ── THE FOUR TEXT COLUMNS (2026-08-17) ─────────────────────────────────────────────────────────
+ * `cpt_code`, `revenue_code`, `primary_payer` and `facility` became sortable on the request to make
+ * the grid orderable "just like Excel". They are on the rollup, so they need no schema change.
+ *
+ * ⚠ ONLY `primary_payer` HAS A SUPPORTING BTREE (`cmd_charge_rollup_entity_payer_payment`). The
+ * other three sort by parallel seq scan + top-N heapsort — and that was MEASURED before shipping,
+ * because this surface has a 3.5s-grid incident in its history. Cross-tenant, 686k-row book:
+ *
+ *     order by facility        155.9 ms   (proposed, no index)
+ *     order by charge_amount   169.5 ms   (ALREADY SHIPPED, no index either)
+ *
+ * Identical plan shape, and the new one is marginally FASTER than a sort that has been in
+ * production for months. So this widens the allowlist strictly within the cost class the grid
+ * already accepts; it does not introduce a new one. Re-measure before adding a column that is NOT
+ * on the rollup — that is a different question entirely (see the employer_name note below).
+ *
+ * ⚠ `employer_name` IS DELIBERATELY ABSENT and must stay that way. It is LEFT JOINed from the base
+ * table OUTSIDE the keyset subquery, so an ORDER BY on it would reorder only the 50 rows already
+ * fetched — a globally wrong order that looks perfectly correct on screen. Putting it on the rollup
+ * to fix that is separately forbidden (it is not in the rollup's GROUP BY, so it would split a
+ * charge into several rows and reintroduce the snapshot-grain double-count 0050/0059 exist to fix).
+ * A test pins its absence.
+ *
+ * ⚠ THE THREE PHI COLUMNS ARE ABSENT FOR A SECOND, INDEPENDENT REASON. The rollup carries only
+ * blind INDEXES for patient/member/group (`*_bidx`), never plaintext, so there is nothing to sort
+ * into a human order — HMAC order is not alphabetical order. Sorting by one would both look broken
+ * and leak an ordering over PHI to a caller who never passed a reveal gate.
  *
  * allowed_amount / pct_allowed / pct_paid are SORTABLE AGAIN (0059 repoint ③): the rollup now
  * materializes allowed_reliable + both pcts, so there is a real column to keyset on — BUILD X's
@@ -698,6 +769,10 @@ export function sanitizeGridColumns(input: unknown): CmdExplorerColumnKey[] {
 export const CMD_EXPLORER_SORTABLE_COLUMNS = [
   'payment_received',
   'charge_date',
+  'cpt_code',
+  'revenue_code',
+  'primary_payer',
+  'facility',
   'charge_amount',
   'allowed_amount',
   'pct_allowed',
@@ -719,6 +794,10 @@ const CMD_EXPLORER_SORTABLE = new Set<string>(CMD_EXPLORER_SORTABLE_COLUMNS);
 const CMD_EXPLORER_SORT_SQL: Record<CmdExplorerSortColumn, string> = {
   payment_received: 'payment_received',
   charge_date: 'charge_date',
+  cpt_code: 'cpt_code',
+  revenue_code: 'revenue_code',
+  primary_payer: 'primary_payer',
+  facility: 'facility',
   charge_amount: 'charge_amount',
   allowed_amount: 'allowed_reliable',
   pct_allowed: 'pct_allowed',

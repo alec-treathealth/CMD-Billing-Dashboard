@@ -2,8 +2,18 @@
  * THE COLLECTIONS FACILITY PICKER'S LABELS (2026-08-10).
  *
  * Two raw CMD spellings of one facility resolve to the same curated name and the same IP badge, so
- * the dropdown rendered the same row twice while the two options scoped to 4,195 and 81 charge
- * lines. `facilityPickerOptionsFrom` appends the raw text to exactly the labels that collide.
+ * the dropdown rendered the same row twice while the two options scoped to wildly different row
+ * counts. `facilityPickerOptionsFrom` distinguishes exactly the options that collide.
+ *
+ * ⚠ UPDATED 2026-08-17 — THE FIRST FIX WAS INVISIBLE. It appended the raw text to `display` as a
+ * SUFFIX, and the dropdown row renders with CSS `truncate`; behind an identical 27-character prefix
+ * both options still read `LONESTAR MENTAL HEALTH LLC · LO…`. The disambiguator was added and then
+ * clipped. It now lives in `PickerOption.detail`, a second line. Re-measured live the same day:
+ * `LONESTAR MENTAL HEALTH` = 10,044 charge lines, `LONESTAR MENTAL HEALTH LLC` = 162 (was 4,195/81
+ * in 2026-08-10's note — the ratio, not just the totals, is what makes picking wrong so costly).
+ *
+ * These tests therefore assert on `rendered()` — display AND detail together — because the defect
+ * was never about one field's contents. It was about what a human can distinguish on screen.
  *
  * ⚠ THE FIXTURE IS REAL. `LONESTAR MENTAL HEALTH` / `LONESTAR MENTAL HEALTH LLC` → LSMH / IP is live
  * production data, reproducible from the picker's own query. Do not "simplify" it to FOO/BAR — the
@@ -37,14 +47,30 @@ const byValue = (opts: ReturnType<typeof facilityPickerOptionsFrom>, v: string) 
   return o;
 };
 
+/**
+ * Everything an operator can read for one option. NOT a test-only construct: this is byte-for-byte
+ * what a SELECTED chip renders (`displayOf` in multi-select-tag-picker.tsx composes the same string),
+ * and the dropdown shows the same two pieces stacked. Asserting on it is what makes these tests about
+ * "can a human tell these apart" rather than about one field's contents.
+ */
+const rendered = (o: { display: string; detail?: string | null }) =>
+  o.detail ? `${o.display}${FACILITY_DISAMBIGUATOR}${o.detail}` : o.display;
+
 // ── 1. The collision is legible ─────────────────────────────────────────────────────────────────
 test('the two Lonestar options no longer render identically', () => {
   const opts = facilityPickerOptionsFrom(LIVE);
   const bare = byValue(opts, 'LONESTAR MENTAL HEALTH');
   const llc = byValue(opts, 'LONESTAR MENTAL HEALTH LLC');
-  assert.notEqual(bare.display, llc.display, 'the whole defect: same text, different data');
-  assert.equal(bare.display, `LONESTAR MENTAL HEALTH LLC${FACILITY_DISAMBIGUATOR}LONESTAR MENTAL HEALTH`);
-  assert.equal(llc.display, `LONESTAR MENTAL HEALTH LLC${FACILITY_DISAMBIGUATOR}LONESTAR MENTAL HEALTH LLC`);
+  assert.notEqual(rendered(bare), rendered(llc), 'the whole defect: same text, different data');
+
+  // 2026-08-17: the distinguishing text is a SECOND LINE, not a suffix. `display` is deliberately
+  // identical for the two — that is the clean curated name — and `detail` is what tells them apart.
+  // Asserting display-equality here is the point: it pins that the fix does NOT work by making the
+  // first line longer, which is what got clipped last time.
+  assert.equal(bare.display, 'LONESTAR MENTAL HEALTH LLC');
+  assert.equal(llc.display, 'LONESTAR MENTAL HEALTH LLC');
+  assert.equal(bare.detail, 'LONESTAR MENTAL HEALTH');
+  assert.equal(llc.detail, 'LONESTAR MENTAL HEALTH LLC');
 });
 
 // ── 2. THE BEHAVIOUR THE DIFF CHANGES THAT "displays differ" WOULD NOT CATCH ────────────────────
@@ -68,10 +94,20 @@ test('the queries an operator actually types still match', () => {
   assert.equal(count('mental'), 2, 'the query from the original report');
   assert.equal(count('LONESTAR MENTAL HEALTH'), 2, 'the full curated name still matches both');
   assert.equal(count('lonestar mental health llc'), 2, 'case-insensitive, and the LLC row is not lost');
-  // The appended text is what makes the narrower query selective — this is the point of the change.
-  assert.equal(count('HEALTH LLC · LONESTAR MENTAL HEALTH LLC'), 1, 'the raw text disambiguates');
   assert.equal(count('nashville'), 1);
   assert.equal(count('zzz'), 0);
+});
+
+test('the detail line is part of the haystack, so moving the raw text did not hide it', () => {
+  // The 2026-08-10 fix put the raw text in `display`, which pickerMatches searches. Moving it to
+  // `detail` would have silently removed it from the haystack — text that used to be findable
+  // becoming unfindable, with every "the labels differ" assertion still green. This is that guard.
+  const opts = facilityPickerOptionsFrom(LIVE);
+  const bare = byValue(opts, 'LONESTAR MENTAL HEALTH');
+  assert.equal(bare.detail, 'LONESTAR MENTAL HEALTH');
+  // Matched via detail alone: strip the option down to ONLY its detail and it still matches.
+  assert.equal(pickerMatches({ value: 'x', display: 'zzz', detail: bare.detail }, 'lonestar'), true);
+  assert.equal(pickerMatches({ value: 'x', display: 'zzz' }, 'lonestar'), false, 'control');
 });
 
 // ── 3. Nothing else moves ───────────────────────────────────────────────────────────────────────
@@ -79,9 +115,10 @@ test('an unambiguous facility keeps its curated label byte-for-byte', () => {
   const opts = facilityPickerOptionsFrom(LIVE);
   const nash = byValue(opts, 'NASHVILLE TREATMENT');
   // Its curated name differs from its raw text — live, 11 of 48 options are like this — and it must
-  // NOT pick up the suffix. Only collisions do.
+  // NOT pick up a second line. Only collisions do.
   assert.equal(nash.display, 'NASHVILLE TREATMENT CENTER');
-  assert.doesNotMatch(nash.display, /·/);
+  assert.equal(nash.detail, undefined);
+  assert.doesNotMatch(rendered(nash), /·/);
 });
 
 test('a null facility_name can never produce "X · X"', () => {
@@ -124,11 +161,12 @@ test('a third spelling disambiguates itself, and removing the collision reverts 
   ]);
   const lonestar = three.filter((o) => o.display.startsWith('LONESTAR MENTAL HEALTH LLC'));
   assert.equal(lonestar.length, 3);
-  assert.equal(new Set(lonestar.map((o) => o.display)).size, 3, 'all three distinct');
+  assert.equal(new Set(lonestar.map(rendered)).size, 3, 'all three distinct as rendered');
 
-  // If an alias change ever leaves one spelling, the suffix disappears on its own.
+  // If an alias change ever leaves one spelling, the second line disappears on its own.
   const one = facilityPickerOptionsFrom([LIVE[0]!]);
-  assert.equal(one[0]!.display, 'LONESTAR MENTAL HEALTH LLC', 'clean curated label, no suffix');
+  assert.equal(one[0]!.display, 'LONESTAR MENTAL HEALTH LLC', 'clean curated label');
+  assert.equal(one[0]!.detail, undefined, 'no second line when there is nothing to disambiguate');
 });
 
 // ── 6. searchText stays OUT ─────────────────────────────────────────────────────────────────────
