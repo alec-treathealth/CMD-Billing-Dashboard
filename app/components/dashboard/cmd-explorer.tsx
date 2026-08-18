@@ -26,6 +26,7 @@ import {
   ArrowUpDown,
   Bookmark,
   Building2,
+  CalendarRange,
   ChevronDown,
   Columns3,
   CreditCard,
@@ -1670,11 +1671,32 @@ export function CmdCollectionsExplorer({
               given selection — a presentational consolidation, plus the 90d default window.
               Reaching "All months": re-click the active chip (toggles off) or pick "All months"
               in the Month select — exactly as before. */}
-          <div
-            className="inline-flex items-center gap-0.5 rounded-lg border border-line bg-surface p-0.5"
-            role="group"
-            aria-label="Time window"
-          >
+          {/* ⚠ THIS WAS "small and unnoticeable" (Alec, 2026-08-18). Three causes, all fixed here:
+                · the group's border was `border-line` (#E4E9E6) — 1.23:1 against the white surface
+                  it sits on — so the control had no perceptible boundary and read as loose text
+                  rather than a control. WCAG 1.4.11 wants >=3:1 for a control boundary; ink400
+                  (#63756E) measures 4.61:1 on the #FBF8F4 ground. Same invisible token, and the
+                  same fix, as the tenant tabs.
+                · every sibling in this row (Facility / Payer / Employer) carries a visible uppercase
+                  label; this one had only an aria-label, making it the single facet a sighted user
+                  could not name.
+                · the segments were text-xs at px-2.5/py-1 — the smallest thing in the row — and the
+                  ACTIVE segment was marked by a pale --brand-soft fill ALONE, with no weight change
+                  and no boundary, so "which window am I on" was barely readable.
+              Now: labelled like its siblings, bordered in a token that can actually be seen, text-sm
+              at px-3/py-1.5 (~48x34, comfortably over the 24x24 WCAG 2.5.8 target minimum), and the
+              active segment carries fill + WEIGHT + an inset ring so selection never rests on tint
+              alone (WCAG 1.4.1 — colour must not be the only channel). */}
+          <div>
+            <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              <CalendarRange className="h-3.5 w-3.5" aria-hidden />
+              Window
+            </div>
+            <div
+              className="inline-flex items-center gap-1 rounded-lg border border-ink400 bg-surface p-1"
+              role="group"
+              aria-label="Time window"
+            >
             {RECENCY_OPTIONS.map((d) => {
               const active = recencyDays === d;
               return (
@@ -1685,10 +1707,10 @@ export function CmdCollectionsExplorer({
                   title={RECENCY_LABEL[d]}
                   onClick={() => selectRecency(d)}
                   className={[
-                    'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                    'rounded-md px-3 py-1.5 text-sm transition-colors',
                     active
-                      ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]'
-                      : 'text-muted-foreground hover:bg-[var(--brand-soft)]',
+                      ? 'bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)] ring-1 ring-inset ring-[var(--brand-ink)]'
+                      : 'font-medium text-muted-foreground hover:bg-[var(--brand-soft)] hover:text-ink900',
                   ].join(' ')}
                 >
                   {d}d
@@ -1704,10 +1726,10 @@ export function CmdCollectionsExplorer({
                 aria-haspopup="true"
                 onClick={() => setMonthYearOpen((o) => !o)}
                 className={[
-                  'flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+                  'flex items-center gap-1 rounded-md px-3 py-1.5 text-sm transition-colors',
                   month > 0
-                    ? 'bg-[var(--brand-soft)] text-[var(--brand-ink)]'
-                    : 'text-muted-foreground hover:bg-[var(--brand-soft)]',
+                    ? 'bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)] ring-1 ring-inset ring-[var(--brand-ink)]'
+                    : 'font-medium text-muted-foreground hover:bg-[var(--brand-soft)] hover:text-ink900',
                 ].join(' ')}
               >
                 {month > 0 ? `${MONTH_NAMES[month - 1]} ${year}` : 'Month/Year'}
@@ -1744,6 +1766,7 @@ export function CmdCollectionsExplorer({
                   </ControlSelect>
                 </div>
               )}
+              </div>
             </div>
           </div>
         </div>

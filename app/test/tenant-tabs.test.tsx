@@ -82,7 +82,7 @@ test('the tab labels are the SAME source the rest of the app names tenants from'
 
 // ── The 2px stroke (Alec, 2026-08-18 — a reversal of the original "borderless" ask) ──────────────
 
-test('every tab carries a 2px border, and the ACTIVE one takes the brand accent', () => {
+test('every tab carries a 2px border in a token that actually clears 3:1', () => {
   // The first ask was borderless, it shipped that way, and the tabs did not read as CONTROLS —
   // nothing said "clickable" until you hovered one. This pins the reversal so a future tidy-up that
   // strips the stroke has to be a decision rather than a drive-by.
@@ -92,10 +92,28 @@ test('every tab carries a 2px border, and the ACTIVE one takes the brand accent'
   // class contract, which is the part that would silently regress.
   const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../components/dashboard/tenant-tabs.tsx'), 'utf8');
   assert.match(src, /rounded-lg border-2 px-4 py-2/, 'the stroke is on the shared base classes');
-  assert.match(src, /border-\[var\(--brand-accent\)\] bg-\[var\(--brand-soft\)\]/, 'active owns the accent');
-  assert.match(src, /'border-line font-medium/, 'inactive tabs are stroked too, in the neutral line colour');
+
+  // ⚠ CONTRAST IS THE POINT, NOT THE STROKE. The first version used border-line (#E4E9E6) on
+  // inactive tabs — 1.16:1 against the #FBF8F4 ground — and --brand-accent on the active one, which
+  // is BXR's #c8a24b gold at 2.27:1. Both fail the 3:1 WCAG 1.4.11 asks of a control boundary, so a
+  // border was added that could not be seen: the ask ("make them more visible") went unmet while
+  // looking done. These assertions are the regression guard, which is why the tokens are named
+  // explicitly rather than matched loosely.
+  assert.match(src, /'border-ink400 font-medium/, 'inactive: ink400 = 4.61:1, not line = 1.16:1');
+  assert.match(src, /border-\[var\(--brand-ink\)\] bg-\[var\(--brand-soft\)\]/,
+    'active: brand-ink clears 3:1 on all three themes; brand-accent does not on BXR');
+  // Scoped to a QUOTED CLASS STRING ON ONE LINE, not the whole file. Two traps, both hit here:
+  //   1. the comment above these classes documents the old #E4E9E6 value on purpose, so a bare
+  //      /border-line/ matched the DOCUMENTATION and failed — a guard that cannot tell code from
+  //      the comment explaining it punishes writing the comment;
+  //   2. `[^']` matches NEWLINES in a JS regex (unlike `.`), so `/'[^']*border-line/` still spanned
+  //      from an earlier quote elsewhere in the file into that same comment. `[^'\n]` is the fix.
+  assert.doesNotMatch(src, /'[^'\n]*\bborder-line\b/, 'the invisible token must not come back');
+  assert.doesNotMatch(src, /'[^'\n]*border-\[var\(--brand-accent\)\] bg-/, 'nor the 2.27:1 BXR accent');
+  // Hover must not REDUCE contrast below the resting state.
+  assert.doesNotMatch(src, /hover:border-\[var\(--brand-accent\)\]\/50/);
   // Selection must not rest on colour alone (WCAG 1.4.1) — weight still carries it.
-  assert.match(src, /border-\[var\(--brand-accent\)\] bg-\[var\(--brand-soft\)\] font-semibold/);
+  assert.match(src, /border-\[var\(--brand-ink\)\] bg-\[var\(--brand-soft\)\] font-semibold/);
   // Two 2px strokes 4px apart read as one divided box; the gap widened with the border.
   assert.match(src, /role="tablist"[\s\S]{0,120}gap-2"/);
 });

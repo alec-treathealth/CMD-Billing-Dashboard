@@ -209,3 +209,37 @@ test('a null token set means "no search"; an empty one still reaches the filter'
   const occurrences = explorerSrc.match(/if \(nameMatchTokens !== null\) f\.patient_members/g) ?? [];
   assert.equal(occurrences.length, 2, 'grid page + summary both carry it');
 });
+
+// -- 5. The time-window control (Alec, 2026-08-18: "small and unnoticeable") --------------------
+
+test('the time-window group is labelled, bounded in a visible token, and big enough to hit', () => {
+  // Three separate reasons it disappeared, each pinned so a restyle has to re-argue them:
+  //   1. its border was `border-line` (#E4E9E6) = 1.23:1 on the white surface — no perceptible
+  //      boundary, so it read as loose text rather than a control (WCAG 1.4.11 wants >=3:1);
+  //   2. every sibling facet in that row carries a visible uppercase label and this one had only an
+  //      aria-label, making it the one facet a sighted user could not name;
+  //   3. segments were text-xs at px-2.5/py-1 — the smallest thing in the row.
+  const group = explorerSrc.slice(
+    explorerSrc.indexOf('aria-label="Time window"') - 400,
+    explorerSrc.indexOf('aria-label="Time window"') + 200,
+  );
+  assert.match(group, /border border-ink400/, 'ink400 = 4.61:1, not line = 1.23:1');
+  assert.doesNotMatch(group, /border border-line/, 'the invisible token must not come back');
+  assert.match(group, /uppercase tracking-wide text-muted-foreground/, 'labelled like its siblings');
+  assert.match(group, /Window/);
+});
+
+test('the ACTIVE window segment is not distinguished by tint alone', () => {
+  // WCAG 1.4.1: colour must not be the only channel. It previously carried --brand-soft (a pale
+  // fill) and nothing else — no weight change, no boundary — so the selected window was nearly
+  // unreadable. Fill + weight + an inset ring means three channels, any one of which survives.
+  const seg = explorerSrc.slice(
+    explorerSrc.indexOf("'rounded-md px-3 py-1.5 text-sm transition-colors'"),
+    explorerSrc.indexOf("'rounded-md px-3 py-1.5 text-sm transition-colors'") + 320,
+  );
+  assert.match(seg, /font-semibold/, 'weight');
+  assert.match(seg, /ring-1 ring-inset ring-\[var\(--brand-ink\)\]/, 'boundary');
+  assert.match(seg, /bg-\[var\(--brand-soft\)\]/, 'fill');
+  // px-3/py-1.5 at text-sm is ~48x34 — over the 24x24 WCAG 2.5.8 minimum. text-xs/px-2.5 was not.
+  assert.doesNotMatch(explorerSrc, /'rounded-md px-2\.5 py-1 text-xs/, 'the small target must not return');
+});
