@@ -1101,33 +1101,40 @@ test('row_ids: an EMPTY list must not silently widen the grid to every row', () 
   assert.doesNotMatch(empty.sql, /bigint\[\]/, 'empty array emits no id condition');
 });
 
-test('patient_member_bidx emits a direct rollup predicate, bound and cast to text[]', () => {
-  // The FULL-BOOK name search (0105) resolves to member tokens, not row ids. member_id_bidx is on
-  // the rollup and covered by 0092's indexes, so this needs neither a join nor a subquery.
+test('patient_members emits a PAIRWISE predicate, so a token cannot cross tenants', () => {
+  // ⚠ THE REGRESSION THIS PINS IS REAL AND WAS SHIPPED IN THE FIRST DRAFT. member_id_bidx is a keyed
+  // HMAC of the member id and nothing else, so it is tenant-agnostic: 240 of 10,701 live member
+  // tokens exist in BOTH tenants. `member_id_bidx = any(tokens)` therefore returns the other
+  // tenant's rows for those 240 in Consolidated view. Zipping the entity alongside is the fix.
+  const E1 = 'a1b2c3d4-0000-0000-0000-000000000001';
+  const E2 = 'a1b2c3d4-0000-0000-0000-000000000002';
   const q = buildCmdExplorerQuery(
-    null, { patient_member_bidx: ['a'.repeat(64), 'b'.repeat(64)] }, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY,
+    null,
+    { patient_members: [{ entity: E1, member: 'a'.repeat(64) }, { entity: E2, member: 'a'.repeat(64) }] },
+    CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY,
   );
-  assert.match(q.sql, /member_id_bidx = any\(\$\d+::text\[\]\)/);
-  assert.doesNotMatch(q.sql, /select e\.id from collections\.cmd_explorer_rows/, 'no semi-join needed');
-  assert.ok(q.params.some((p) => Array.isArray(p) && (p as string[]).length === 2));
-  // The token must be a PARAMETER. Interpolating it would be an injection seam for a value that
-  // arrives from the client.
-  assert.doesNotMatch(q.sql, /a{64}/);
+  assert.match(q.sql, /\(business_entity_id, member_id_bidx\) in \(select e, m from unnest\(\$\d+::uuid\[\], \$\d+::text\[\]\) as t\(e, m\)\)/);
+  // The bare form must NOT come back — it is what made the same token match both tenants.
+  assert.doesNotMatch(q.sql, /member_id_bidx = any/);
+  // Two parallel arrays, same length, both bound.
+  const arrays = q.params.filter((p) => Array.isArray(p) && (p as unknown[]).length === 2) as string[][];
+  assert.ok(arrays.length >= 2, 'entities and members are both bound arrays');
+  assert.doesNotMatch(q.sql, /a{64}/, 'tokens are parameters, never interpolated');
 });
 
-test('patient_member_bidx: an EMPTY list means "matched nobody" and must select NOTHING', () => {
+test('patient_members: an EMPTY list means "matched nobody" and must select NOTHING', () => {
   // ⚠ THE OPPOSITE HANDLING TO row_ids, DELIBERATELY. row_ids treats [] as absent and leaves the
   // empty-means-nothing rule to the action layer, which is why payerIntelSearch has to re-implement
   // that half in three places. This one enforces it HERE, so every consumer of the shared builder —
   // grid, summary, cohort, Payer Intel — inherits it and none of them can forget.
-  const q = buildCmdExplorerQuery(null, { patient_member_bidx: [] }, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
+  const q = buildCmdExplorerQuery(null, { patient_members: [] }, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
   assert.match(q.sql, /\bfalse\b/, 'an impossible predicate, not a widened grid');
-  assert.doesNotMatch(q.sql, /member_id_bidx = any/);
+  assert.doesNotMatch(q.sql, /unnest\(/);
 });
 
-test('patient_member_bidx absent emits no condition at all', () => {
+test('patient_members absent emits no condition at all', () => {
   const q = buildCmdExplorerQuery(null, {}, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
-  assert.doesNotMatch(q.sql, /member_id_bidx = any/);
+  assert.doesNotMatch(q.sql, /unnest\(/);
   assert.doesNotMatch(q.sql, /\bfalse\b/, 'no search is not the same as a search that found nobody');
 });
 

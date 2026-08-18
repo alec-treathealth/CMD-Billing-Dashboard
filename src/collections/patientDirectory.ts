@@ -118,9 +118,16 @@ export interface PatientDirectorySyncDeps {
  * The scan. Explicit column allowlist - never `select *` - and keyset on the bigserial id, which is
  * the primary key, so each batch is an index range scan regardless of how far the watermark has got.
  *
- * NOT tenant-filtered, on purpose: this builds a cross-tenant index in one pass and stamps every row
- * with its own business_entity_id, exactly as the rollup refresh does. Tenant isolation is a READ
- * concern and is applied by `buildPatientDirectoryReadQuery` below.
+ * ⚠ DELIBERATE CROSS-TENANT READ - the justification the tenancy rule requires, stated at the query
+ * site. This is a BUILD, not a user-facing read: it is the same shape as the charge-rollup refresh,
+ * which also rebuilds every tenant in one pass because a derived index that covered one tenant would
+ * simply be wrong for the other. There is no single caller whose entitlement could scope it, and the
+ * entity is not dropped - every row's own `business_entity_id` is carried into the directory key, so
+ * tenant identity survives the build rather than being flattened out of it.
+ *
+ * Isolation is applied where a PRINCIPAL exists: `buildPatientDirectoryReadQuery` below binds the
+ * server-derived entitlement, and the directory's primary key leads with the entity so a read cannot
+ * cross tenants even by accident.
  */
 export function buildPatientDirectoryScanQuery(
   afterId: string | number,
@@ -135,19 +142,54 @@ export function buildPatientDirectoryScanQuery(
 }
 
 /**
- * The search-side read: one tenant slice of the directory.
+ * The search-side read: the caller's entitled slice of the directory.
  *
- * `business_entity_id = any($1)` is the leading column of the primary key, so this is a plain index
- * range scan. The entity list is ALWAYS server-derived (requirePhiPrincipal), never client input.
+ * ⚠ MULTI-ENTITY BY DESIGN, and here is the required justification. `entityIds` may legitimately
+ * hold MORE THAN ONE business_entity_id, because a super_admin's Consolidated view is defined as
+ * both tenants at once - that is the product, not a leak. What makes it safe is that the list is
+ * ALWAYS the server-derived intersection of the caller's PHI entitlement with the view they are on
+ * (requirePhiPrincipal + viewEntityScope); no client input reaches it, so a caller can never widen
+ * the slice by asking.
+ *
+ * ⚠ business_entity_id IS PROJECTED, AND THAT IS LOAD-BEARING - it was missing in the first draft
+ * and Qodo was right to call it. A member blind index is a keyed HMAC of the member id and nothing
+ * else, so it is TENANT-AGNOSTIC: the same member id in both tenants produces the same token.
+ * Measured live 2026-08-18, this is not hypothetical - 240 of 10,701 member tokens exist in BOTH
+ * tenants. Returning bare tokens meant a name matched in one tenant selected the other tenant's
+ * rows for all 240, in Consolidated view where both are visible and the mix is invisible. The
+ * search now carries (entity, member) PAIRS end to end.
+ *
+ * `business_entity_id = any($1)` is the leading column of the primary key, so this stays a plain
+ * index range scan.
  */
 export function buildPatientDirectoryReadQuery(
   entityIds: readonly string[],
 ): { sql: string; params: unknown[] } {
   return {
     sql:
-      'select member_id_bidx, name_fp, patient_name from collections.cmd_patient_directory ' +
-      'where business_entity_id = any($1::uuid[])',
+      'select business_entity_id, member_id_bidx, name_fp, patient_name ' +
+      'from collections.cmd_patient_directory where business_entity_id = any($1::uuid[])',
     params: [entityIds],
+  };
+}
+
+/**
+ * How far the directory trails the source table, in charge-line ids.
+ *
+ * ⚠ THIS EXISTS BECAUSE "SOME ROWS" IS NOT "ALL ROWS". A budget-stopped initial sync leaves a
+ * NON-EMPTY but PARTIAL directory, and the search's empty-directory guard cannot tell that apart
+ * from a complete one - so every patient beyond the watermark would be reported as "no match" while
+ * the UI promises a whole-book search. That is the silent miss this whole design exists to prevent,
+ * reintroduced through the back door.
+ *
+ * Cheap enough to run per search: both sides are `max()` over a primary key.
+ */
+export function buildPatientDirectoryLagQuery(): { sql: string; params: unknown[] } {
+  return {
+    sql:
+      'select coalesce((select max(id) from collections.cmd_explorer_rows), 0) ' +
+      '     - coalesce((select last_row_id from collections.cmd_patient_directory_state), 0) as lag',
+    params: [],
   };
 }
 

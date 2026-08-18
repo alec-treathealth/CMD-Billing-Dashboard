@@ -525,7 +525,16 @@ export function CmdCollectionsExplorer({
   const [nameSearching, setNameSearching] = useState(false);
   /** null = no name filter applied. [] = searched and matched NOTHING (an empty grid is correct,
    *  and is deliberately distinguished from "no filter" so it cannot silently widen to every row). */
-  const [nameMatchTokens, setNameMatchTokens] = useState<string[] | null>(null);
+  // ⚠ THE RESOLVING VIEW IS STORED WITH THE RESULT, not just the result. A member token is a keyed
+  // HMAC of the member id and nothing else, so it is tenant-agnostic; a result resolved in one view
+  // and left in state across a view switch would be applied to the next tenant's rows. Binding the
+  // result to its origin makes that structurally impossible instead of relying on a reset effect
+  // firing in the right order.
+  const [nameMatch, setNameMatch] = useState<
+    { view: DashboardView | undefined; members: Array<{ entity: string; member: string }> } | null
+  >(null);
+  // Only the CURRENT view's result may reach a filter. A stale one is ignored, not applied.
+  const nameMatchTokens = nameMatch !== null && nameMatch.view === view ? nameMatch.members : null;
   const [nameNotice, setNameNotice] = useState<string | null>(null);
   // Picked employers, as CANONICAL KEYS ('TESLA'), expanded to their raw spellings at filter time.
   const [employerSelection, setEmployerSelection] = useState<string[]>([]);
@@ -724,13 +733,20 @@ export function CmdCollectionsExplorer({
       }
       // [] is kept, not discarded: it means "searched, matched nobody", and the grid must show
       // empty rather than silently reverting to every row.
-      setNameMatchTokens(r.memberTokens);
+      setNameMatch({ view, members: r.members });
       setNameNotice(
         r.matchedPatients === 0
           ? `No patient name matched across all ${r.patientsInScope.toLocaleString()} patients.`
           : `${r.matchedPatients.toLocaleString()} of ${r.patientsInScope.toLocaleString()} patients matched` +
             `${hasAnySearch ? ' — the grid also applies your other filters.' : '.'}`,
       );
+      // The index can legitimately trail the book when a sync was budget-stopped. Saying so is the
+      // difference between "this patient is not here" and "this patient may not be indexed yet".
+      if (r.indexLagRows > 0) {
+        setNameNotice((prev) =>
+          `${prev ?? ''} The name index is ${r.indexLagRows.toLocaleString()} charge lines behind, so a very recent patient may not appear yet.`.trim(),
+        );
+      }
     } catch {
       setNameNotice('The name search could not be completed right now.');
     } finally {
@@ -738,6 +754,19 @@ export function CmdCollectionsExplorer({
     }
   }, [nameQuery, nameSearchAllowed, view, hasAnySearch]);
 
+  /**
+   * Stable dep key for the name-search result, mirroring payerKey/facilityKey.
+   *
+   * ⚠ THIS EXISTS BECAUSE THE DEPENDENCY WAS MISSING AND THE FEATURE SILENTLY DID NOTHING (Qodo #4,
+   * 2026-08-18). `filterArg` and the summary effect both READ the name result, but neither listed it,
+   * and an `eslint-disable exhaustive-deps` on both meant the lint rule that exists to catch exactly
+   * this said nothing. A search updated the notice and the grid kept its previous rows.
+   *
+   * 'none' vs '' is load-bearing: `null` (never searched) must produce a DIFFERENT key from `[]`
+   * (searched, matched nobody), because the two send different filters and must refetch apart.
+   */
+  const nameMatchKey =
+    nameMatchTokens === null ? 'none' : nameMatchTokens.map((p) => `${p.entity}${p.member}`).join('|');
   // Stable dep keys for the selection sets (array identity changes on every toggle otherwise).
   const payerKey = payerSelection.join('\n');
   /**
@@ -1086,7 +1115,7 @@ export function CmdCollectionsExplorer({
         cpt_code?: string;
       revenue_code?: string;
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
-      patient_member_bidx?: string[];
+      patient_members?: Array<{ entity: string; member: string }>;
     } = {};
     // Recency wins over Month/Year (they're mutually exclusive in the UI, but be explicit).
     if (recencyDays > 0) {
@@ -1102,7 +1131,7 @@ export function CmdCollectionsExplorer({
     // Patient-name search result. `[]` is MEANINGFUL: it means "searched, matched nothing", and must
     // still be sent so the grid shows an empty result instead of silently dropping the filter and
     // widening back to every row. The name ITSELF is never sent here — only the ids it resolved to.
-    if (nameMatchTokens !== null) f.patient_member_bidx = nameMatchTokens;
+    if (nameMatchTokens !== null) f.patient_members = nameMatchTokens;
     // Facility multi-select is a top-level scope; a facility drill-down chip narrows to that ONE
     // facility (overriding the dropdown). Payer/CPT chips stay exact single-value refinements.
     if (facilitySelection.length > 0) f.facility = expandFacilityKeys(facilitySelection, facilityGroups);
@@ -1135,7 +1164,7 @@ export function CmdCollectionsExplorer({
     // year only matters when a specific month is chosen (see original rationale); facilityKey is the
     // stable proxy for facilitySelection's contents (payerKey likewise).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, nameMatchKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
   const loadPage = useCallback(
     async (
@@ -1226,7 +1255,7 @@ export function CmdCollectionsExplorer({
       primary_payers?: string[];
       employer_names?: string[];
         phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
-      patient_member_bidx?: string[];
+      patient_members?: Array<{ entity: string; member: string }>;
     } = {};
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
     // Employer segment (0101). 'all' emits NOTHING — the server treats absent as unrestricted, and
@@ -1235,7 +1264,7 @@ export function CmdCollectionsExplorer({
     // Patient-name search result. `[]` is MEANINGFUL: it means "searched, matched nothing", and must
     // still be sent so the grid shows an empty result instead of silently dropping the filter and
     // widening back to every row. The name ITSELF is never sent here — only the ids it resolved to.
-    if (nameMatchTokens !== null) f.patient_member_bidx = nameMatchTokens;
+    if (nameMatchTokens !== null) f.patient_members = nameMatchTokens;
     // Top-level scope (date window + facility set) applies to the summary too — so the drill lists
     // describe the SAME population the grid shows. The chip refinement does NOT (it's a within-
     // results drill; the chips stay a stable facet navigator while drilling).
@@ -1265,7 +1294,7 @@ export function CmdCollectionsExplorer({
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, view]);
+  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, nameMatchKey, view]);
 
   // Fetch the alpha-prefix cohort curve when a ≥3-char alpha-prefix search is active (PHI-gated).
   // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
@@ -1752,7 +1781,7 @@ export function CmdCollectionsExplorer({
                 {nameMatchTokens !== null && (
                   <button
                     type="button"
-                    onClick={() => { setNameMatchTokens(null); setNameQuery(''); setNameNotice(null); }}
+                    onClick={() => { setNameMatch(null); setNameQuery(''); setNameNotice(null); }}
                     className="rounded-md px-2 py-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
                   >
                     Clear name filter

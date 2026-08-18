@@ -1289,10 +1289,12 @@ export interface CmdReportFilter {
    *  capped, which is what made the search partial. Kept because the query layer and Payer Intel
    *  both still harden on it; retiring it end-to-end is a follow-up, not this change. */
   row_ids?: string[];
-  /** Member tokens resolved by the PATIENT-NAME search (0105). Keyed one-way HMACs, not PHI — the
-   *  name itself never travels in a filter. `[]` means "searched, matched nobody" and MUST be
-   *  preserved: dropping it would widen the grid back to the whole book. */
-  patient_member_bidx?: string[];
+  /** (tenant, member) pairs resolved by the PATIENT-NAME search (0105). The member value is a keyed
+   *  one-way HMAC, not PHI — the name itself never travels in a filter. The ENTITY travels with it
+   *  because the token alone is tenant-agnostic (240 of 10,701 live tokens exist in both tenants).
+   *  `[]` means "searched, matched nobody" and MUST be preserved: dropping it would widen the grid
+   *  back to the whole book. */
+  patient_members?: Array<{ entity: string; member: string }>;
 }
 
 /** Max employers one filter may name, and max row ids one name-search may pin. Bounded input:
@@ -1303,6 +1305,8 @@ const CMD_ROW_IDS_MAX = 2000; // legacy id-pinning bound; the name search no lon
 const CMD_PATIENT_MEMBER_MAX = 2000;
 /** A member blind-index token: HMAC-SHA256 as lowercase hex (src/collections/blindIndex.ts). */
 const BIDX_TOKEN_RE = /^[0-9a-f]{64}$/;
+/** A business_entity_id: canonical lowercase UUID. */
+const ENTITY_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Copy the picked employers into the reader filter, validated.
@@ -1394,16 +1398,25 @@ function applyRowIds(
  * the rule here is bounded, typed input at the boundary, and rejecting 64-hex early also stops a
  * caller pushing a megabyte of junk into a `= any($n)` array.
  */
-function applyPatientMemberTokens(
+function applyPatientMembers(
   filter: CmdReportFilter,
-  readerFilter: { patient_member_bidx?: string[] },
+  readerFilter: { patient_members?: Array<{ entity: string; member: string }> },
 ): boolean {
-  const tokens = filter.patient_member_bidx;
-  if (tokens === undefined) return true;
-  if (!Array.isArray(tokens)) return false;
-  if (tokens.length > CMD_PATIENT_MEMBER_MAX) return false;
-  if (!tokens.every((t) => typeof t === 'string' && BIDX_TOKEN_RE.test(t))) return false;
-  readerFilter.patient_member_bidx = tokens;
+  const pairs = filter.patient_members;
+  if (pairs === undefined) return true;
+  if (!Array.isArray(pairs)) return false;
+  if (pairs.length > CMD_PATIENT_MEMBER_MAX) return false;
+  const clean: Array<{ entity: string; member: string }> = [];
+  for (const p of pairs) {
+    if (typeof p !== 'object' || p === null) return false;
+    const { entity, member } = p as { entity?: unknown; member?: unknown };
+    if (typeof entity !== 'string' || !ENTITY_UUID_RE.test(entity)) return false;
+    if (typeof member !== 'string' || !BIDX_TOKEN_RE.test(member)) return false;
+    // ⚠ REBUILT, NOT PASSED THROUGH. Copying only the two validated fields means an extra property
+    // on the client's object cannot ride along into the query builder.
+    clean.push({ entity, member });
+  }
+  readerFilter.patient_members = clean;
   return true;
 }
 
@@ -1629,7 +1642,7 @@ export async function loadCmdReport(
     employer_names?: string[];
     employerMode?: 'all' | 'employer' | 'individual';
     row_ids?: string[];
-    patient_member_bidx?: string[];
+    patient_members?: Array<{ entity: string; member: string }>;
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
@@ -1641,7 +1654,7 @@ export async function loadCmdReport(
   if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
   // Patient-name search result ids. `[]` is preserved on purpose (searched, matched nothing).
   if (!applyRowIds(filter, readerFilter)) return { ok: false, error: 'Invalid name-search result.' };
-  if (!applyPatientMemberTokens(filter, readerFilter)) {
+  if (!applyPatientMembers(filter, readerFilter)) {
     return { ok: false, error: 'Invalid name-search result.' };
   }
   // PHI search (gated + audited here — this is the actual row-returning PHI access).
@@ -1704,7 +1717,7 @@ export async function loadCmdReportGrouped(
     phiIndex?: PhiIndexTokens;
     employer_names?: string[];
     row_ids?: string[];
-    patient_member_bidx?: string[];
+    patient_members?: Array<{ entity: string; member: string }>;
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
@@ -1712,7 +1725,7 @@ export async function loadCmdReportGrouped(
   if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
   if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
   if (!applyRowIds(filter, readerFilter)) return { ok: false, error: 'Invalid name-search result.' };
-  if (!applyPatientMemberTokens(filter, readerFilter)) {
+  if (!applyPatientMembers(filter, readerFilter)) {
     return { ok: false, error: 'Invalid name-search result.' };
   }
   const phi = await resolvePhiSearch(filter.phiSearch, view, true);
@@ -1954,7 +1967,7 @@ export async function loadCmdSearchSummary(
     employer_names?: string[];
     employerMode?: 'all' | 'employer' | 'individual';
     row_ids?: string[];
-    patient_member_bidx?: string[];
+    patient_members?: Array<{ entity: string; member: string }>;
   } = {};
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
@@ -1964,7 +1977,7 @@ export async function loadCmdSearchSummary(
   if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
   // Patient-name search result ids. `[]` is preserved on purpose (searched, matched nothing).
   if (!applyRowIds(filter, readerFilter)) return { ok: false, error: 'Invalid name-search result.' };
-  if (!applyPatientMemberTokens(filter, readerFilter)) {
+  if (!applyPatientMembers(filter, readerFilter)) {
     return { ok: false, error: 'Invalid name-search result.' };
   }
   // PHI search: gate (canRevealPhi) + resolve tokens; audit happens in loadCmdReport (the

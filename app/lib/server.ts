@@ -285,6 +285,7 @@ import {
 } from '../../src/routes/refreshChargeRollupHandler.js';
 import { refreshChargeRollup } from '../../src/collections/refreshChargeRollup.js';
 import {
+  buildPatientDirectoryLagQuery,
   buildPatientDirectoryReadQuery,
   syncPatientDirectory,
   type PatientDirectorySyncStats,
@@ -3613,10 +3614,27 @@ export const CMD_NAME_SEARCH_MIN_TERM = 2;
 export type CmdNameSearchResult =
   | {
       ok: true;
-      /** Keyed-HMAC member tokens for the grid predicate. Non-PHI, one-way. */
-      memberTokens: string[];
-      /** Distinct NAMES matched. Differs from memberTokens.length when a policy carries dependents. */
+      /**
+       * (tenant, member) PAIRS for the grid predicate. Non-PHI — the member value is a one-way HMAC.
+       *
+       * ⚠ THE TENANT IS PART OF THE ANSWER, not decoration. A member blind index is an HMAC of the
+       * member id alone, so it is tenant-agnostic: 240 of 10,701 live tokens exist in BOTH tenants.
+       * Returning bare tokens let a name matched in one tenant select the other's rows for those
+       * 240, in Consolidated view where both are visible and the mix is invisible.
+       */
+      members: Array<{ entity: string; member: string }>;
+      /** Distinct NAMES matched. Differs from members.length when a policy carries dependents. */
       matchedPatients: number;
+      /**
+       * Charge lines ingested since the directory was last synced. 0 means the index is current.
+       *
+       * ⚠ NON-ZERO MEANS THE SEARCH IS INCOMPLETE, AND THE UI MUST SAY SO. A budget-stopped sync
+       * leaves a NON-EMPTY but PARTIAL directory, which the empty-directory guard cannot distinguish
+       * from a complete one — so a patient beyond the watermark reads as "no match" while the UI
+       * promises the whole book. That is exactly the silent miss this design exists to prevent,
+       * coming back through the door marked "resumable".
+       */
+      indexLagRows: number;
       /**
        * DISTINCT PATIENT NAMES in the caller's tenant scope — the honest denominator for "N of M
        * matched". NOT the number of directory rows: the directory is keyed on (member, name), and
@@ -3697,9 +3715,15 @@ export async function searchCmdExplorerPatientName(
   }
 
   const q = buildPatientDirectoryReadQuery(entityIds);
-  let rows: Array<{ member_id_bidx: string; name_fp: string; patient_name: Buffer }>;
+  let rows: Array<{
+    business_entity_id: string;
+    member_id_bidx: string;
+    name_fp: string;
+    patient_name: Buffer;
+  }>;
   try {
     const res = await readerExecutor().query<{
+      business_entity_id: string;
       member_id_bidx: string;
       name_fp: string;
       patient_name: Buffer;
@@ -3718,7 +3742,9 @@ export async function searchCmdExplorerPatientName(
   // Applied BEFORE the decrypt loop: an unbuilt index must not be reported as an absent patient.
   if (rows.length === 0) return { ok: false, reason: 'directory_empty' };
 
-  const memberTokens = new Set<string>();
+  // Keyed by "entity\u0000member" so the SET dedupes PAIRS, not tokens — deduping on the token alone
+  // would silently re-collapse the two tenants this whole change exists to keep apart.
+  const memberPairs = new Map<string, { entity: string; member: string }>();
   const nameHits = new Set<string>();
   const namesInScope = new Set<string>();
   for (const r of rows) {
@@ -3732,13 +3758,30 @@ export async function searchCmdExplorerPatientName(
       continue;
     }
     if (name.toLowerCase().includes(needle)) {
-      memberTokens.add(r.member_id_bidx);
+      memberPairs.set(`${r.business_entity_id}\u0000${r.member_id_bidx}`, {
+        entity: r.business_entity_id,
+        member: r.member_id_bidx,
+      });
       nameHits.add(r.name_fp);
     }
   }
 
-  if (memberTokens.size > CMD_NAME_SEARCH_MEMBER_CAP) {
-    return { ok: false, reason: 'too_broad', count: memberTokens.size, cap: CMD_NAME_SEARCH_MEMBER_CAP };
+  if (memberPairs.size > CMD_NAME_SEARCH_MEMBER_CAP) {
+    return { ok: false, reason: 'too_broad', count: memberPairs.size, cap: CMD_NAME_SEARCH_MEMBER_CAP };
+  }
+
+  // How stale is the index? Read AFTER the match so a current search pays nothing extra on the
+  // hot path's critical section, and BEFORE the audit so the number is part of the recorded run.
+  let indexLagRows = 0;
+  try {
+    const lagQ = buildPatientDirectoryLagQuery();
+    const lagRes = await readerExecutor().query<{ lag: string }>(lagQ.sql, lagQ.params);
+    indexLagRows = Math.max(0, Number(lagRes.rows[0]?.lag ?? 0));
+  } catch {
+    // Non-fatal: a failed freshness probe must not deny a search that already has its answer. It
+    // reports 0 (= "believed current"), which is the same thing the caller assumed before this
+    // existed — never a fabricated non-zero that would raise a false incomplete-index warning.
+    indexLagRows = 0;
   }
 
   // Fail-closed audit BEFORE returning. Counts only — NEVER the term, a name, or a token.
@@ -3746,13 +3789,14 @@ export async function searchCmdExplorerPatientName(
     actorEmail: actor.email,
     actorUserId: actor.userId,
     action: 'search_cmd_explorer_patient_name',
-    detail: { scanned: rows.length, matched_patients: nameHits.size, matched_members: memberTokens.size },
+    detail: { scanned: rows.length, matched_patients: nameHits.size, matched_members: memberPairs.size },
   });
   return {
     ok: true,
-    memberTokens: [...memberTokens],
+    members: [...memberPairs.values()],
     matchedPatients: nameHits.size,
     patientsInScope: namesInScope.size,
+    indexLagRows,
   };
 }
 

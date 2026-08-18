@@ -53,7 +53,7 @@ test('the audit records COUNTS only - never the term, a name, or a token', () =>
   const detail = body.slice(body.indexOf('detail: {'), body.indexOf('});', body.indexOf('detail: {')));
   assert.match(detail, /scanned: rows\.length/);
   assert.match(detail, /matched_patients: nameHits\.size/);
-  assert.match(detail, /matched_members: memberTokens\.size/);
+  assert.match(detail, /matched_members: memberPairs\.size/);
   // EVERY value must be a count. `memberTokens.size` is fine and `[...memberTokens]` would not be —
   // the difference is the whole rule, so assert the shape rather than the identifier.
   const values = [...detail.matchAll(/\w+: ([^,}]+)/g)].map((m) => m[1]!.trim());
@@ -82,35 +82,87 @@ test('an unbuilt or missing index is NOT reported as "no matches"', () => {
 
 // -- 3. The wire carries tokens, and they are bounded and shape-checked -------------------------
 
-test('member tokens are validated as 64-hex and count-bounded at the action boundary', () => {
+test('BOTH halves of the pair are validated, and the pair is rebuilt not passed through', () => {
   assert.match(actionsSrc, /const BIDX_TOKEN_RE = \/\^\[0-9a-f\]\{64\}\$\//);
+  assert.match(actionsSrc, /const ENTITY_UUID_RE =/);
   assert.match(actionsSrc, /const CMD_PATIENT_MEMBER_MAX = 2000;/);
   const fn = actionsSrc.slice(
-    actionsSrc.indexOf('function applyPatientMemberTokens('),
+    actionsSrc.indexOf('function applyPatientMembers('),
     actionsSrc.indexOf('/** Max length for the free-text search term'),
   );
-  assert.match(fn, /if \(tokens === undefined\) return true;/, 'absent means no condition');
-  assert.match(fn, /tokens\.length > CMD_PATIENT_MEMBER_MAX/);
-  assert.match(fn, /BIDX_TOKEN_RE\.test\(t\)/);
+  assert.match(fn, /if \(pairs === undefined\) return true;/, 'absent means no condition');
+  assert.match(fn, /pairs\.length > CMD_PATIENT_MEMBER_MAX/);
+  assert.match(fn, /ENTITY_UUID_RE\.test\(entity\)/, 'the tenant half is validated too');
+  assert.match(fn, /BIDX_TOKEN_RE\.test\(member\)/);
+  // Rebuilt from the two validated fields, so an extra property cannot ride along into the builder.
+  assert.match(fn, /clean\.push\(\{ entity, member \}\)/);
   // The empty array must survive validation - it is the "matched nobody" signal.
-  assert.doesNotMatch(fn, /tokens\.length === 0\) return true/, 'an empty array must NOT be dropped');
+  assert.doesNotMatch(fn, /pairs\.length === 0\) return true/, 'an empty array must NOT be dropped');
 });
 
-test('all three grid actions run the token sanitizer, not just the grid page', () => {
+test('all three grid actions run the pair sanitizer, not just the grid page', () => {
   // The grid, the summary and the cohort/refinement paths each build their own reader filter. A
   // sanitizer wired into only one of them is how a name search ends up applying to the table but
   // not to the totals above it.
-  const calls = actionsSrc.match(/applyPatientMemberTokens\(filter, readerFilter\)/g) ?? [];
+  const calls = actionsSrc.match(/applyPatientMembers\(filter, readerFilter\)/g) ?? [];
   assert.equal(calls.length, 3, 'grid + summary + cohort');
   const rowIdCalls = actionsSrc.match(/applyRowIds\(filter, readerFilter\)/g) ?? [];
   assert.equal(calls.length, rowIdCalls.length, 'wired everywhere row ids already were');
+});
+
+// -- 3b. The tenancy hole Qodo caught, and the two ways it could come back ----------------------
+
+test('the search result carries the TENANT, not a bare token', () => {
+  // ⚠ MEASURED: 240 of 10,701 live member tokens exist in BOTH tenants. A member blind index is an
+  // HMAC of the member id and nothing else, so it cannot distinguish them. Returning bare tokens
+  // made a name matched in one tenant select the other tenant's rows for those 240, in Consolidated
+  // view where both are legitimately visible and the mix is therefore invisible.
+  const body = serverSrc.slice(serverSrc.indexOf('export const CMD_NAME_SEARCH_MEMBER_CAP'));
+  assert.match(body, /members: Array<\{ entity: string; member: string \}>/);
+  assert.match(body, /business_entity_id: string;/, 'the directory read projects the entity');
+  // The dedup key must be the PAIR. A Set of tokens would re-collapse the tenants silently.
+  assert.match(body, /memberPairs\.set\(`\$\{r\.business_entity_id\}/);
+  assert.doesNotMatch(body, /memberTokens/, 'the bare-token shape must not return');
+});
+
+test('a stale result cannot be applied to the next view', () => {
+  // Tokens resolved under one view surviving a view switch is the same hole from the client side.
+  // Binding the result to its originating view makes it structurally impossible rather than relying
+  // on a reset effect firing in the right order.
+  assert.match(explorerSrc, /const \[nameMatch, setNameMatch\] = useState</);
+  assert.match(explorerSrc, /nameMatch !== null && nameMatch\.view === view \? nameMatch\.members : null/);
+  assert.match(explorerSrc, /setNameMatch\(\{ view, members: r\.members \}\)/);
+});
+
+test('the name result is wired into BOTH dependency lists', () => {
+  // ⚠ IT WAS IN NEITHER, AND THE FEATURE SILENTLY DID NOTHING: the notice updated and the grid kept
+  // its previous rows. An `eslint-disable exhaustive-deps` on both hooks meant the lint rule that
+  // exists to catch exactly this said nothing, which is why it needs a test and not just the rule.
+  assert.match(explorerSrc, /const nameMatchKey =/);
+  const deps = [...explorerSrc.matchAll(/\}, \[[^\]]*nameMatchKey[^\]]*\]\);/g)];
+  assert.equal(deps.length, 2, 'filterArg memo AND the summary effect');
+  // null (never searched) and [] (matched nobody) send different filters and must refetch apart.
+  assert.match(explorerSrc, /nameMatchTokens === null \? 'none' :/);
+});
+
+test('an index that trails the book is reported, not hidden', () => {
+  // A budget-stopped sync leaves a NON-EMPTY but PARTIAL directory, which the empty-directory guard
+  // cannot tell from a complete one - so a patient beyond the watermark reads as "no match" while
+  // the UI promises the whole book.
+  const body = serverSrc.slice(serverSrc.indexOf('export const CMD_NAME_SEARCH_MEMBER_CAP'));
+  assert.match(body, /indexLagRows: number;/);
+  assert.match(body, /buildPatientDirectoryLagQuery\(\)/);
+  // A failed freshness probe reports 0 (= believed current), never a fabricated warning.
+  assert.match(body, /indexLagRows = 0;/);
+  assert.match(explorerSrc, /r\.indexLagRows > 0/);
+  assert.match(explorerSrc, /charge lines behind/);
 });
 
 // -- 4. The client ------------------------------------------------------------------------------
 
 test('the client sends member tokens, and the narrowing gate is gone', () => {
   assert.match(explorerSrc, /const nameSearchAllowed = canRevealPhi;/);
-  assert.match(explorerSrc, /f\.patient_member_bidx = nameMatchTokens;/);
+  assert.match(explorerSrc, /f\.patient_members = nameMatchTokens;/);
   assert.doesNotMatch(explorerSrc, /f\.row_ids = nameMatchTokens/, 'row ids are not the wire format');
   // The cap copy is gone with the cap.
   assert.doesNotMatch(explorerSrc, /NAME_SEARCH_CAP/);
@@ -138,7 +190,7 @@ test('a null token set means "no search"; an empty one still reaches the filter'
   // `null` = never searched -> omit the key entirely. `[]` = searched, matched nobody -> send it, so
   // the shared builder emits its impossible predicate. Collapsing the two would silently widen the
   // grid to the whole book right after a search that found no one.
-  assert.match(explorerSrc, /if \(nameMatchTokens !== null\) f\.patient_member_bidx = nameMatchTokens;/);
-  const occurrences = explorerSrc.match(/if \(nameMatchTokens !== null\) f\.patient_member_bidx/g) ?? [];
+  assert.match(explorerSrc, /if \(nameMatchTokens !== null\) f\.patient_members = nameMatchTokens;/);
+  const occurrences = explorerSrc.match(/if \(nameMatchTokens !== null\) f\.patient_members/g) ?? [];
   assert.equal(occurrences.length, 2, 'grid page + summary both carry it');
 });

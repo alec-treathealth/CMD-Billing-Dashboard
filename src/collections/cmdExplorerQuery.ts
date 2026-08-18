@@ -110,7 +110,7 @@ export interface CmdExplorerFilter {
    */
   row_ids?: string[] | null;
   /**
-   * Member tokens the FULL-BOOK patient-name search resolved to (migration 0105).
+   * (tenant, member) PAIRS the FULL-BOOK patient-name search resolved to (migration 0105).
    *
    * Keyed-HMAC `member_id_bidx` values, not PHI: the token is one-way and the searched NAME never
    * reaches SQL. Replaces `row_ids` for name search, and the reason is capacity, not taste — a row
@@ -124,10 +124,18 @@ export interface CmdExplorerFilter {
    * keys on the name, so every distinct name is findable. Precise name-grain filtering needs
    * cmd_explorer_rows.patient_name_bidx backfilled (7.18% populated today); see 0105's header.
    *
+   * ⚠ IT IS A PAIR, NOT A TOKEN, AND THAT COST A REVIEW ROUND. The first version carried bare
+   * `member_id_bidx` values. A member blind index is a keyed HMAC of the member id and NOTHING else,
+   * so it is TENANT-AGNOSTIC — the same member id in both tenants hashes to the same token. Measured
+   * live 2026-08-18: 240 of 10,701 member tokens exist in BOTH tenants. With bare tokens, a name
+   * matched in one tenant selected the OTHER tenant's rows for all 240, in Consolidated view where
+   * both are legitimately visible and the mix is therefore invisible. Same defect class as the
+   * grouped-rows tenancy hole (#246) one layer up.
+   *
    * Empty/absent omits the condition; present-but-empty means "matched nothing" and must select
    * NOTHING, exactly like row_ids.
    */
-  patient_member_bidx?: string[] | null;
+  patient_members?: Array<{ entity: string; member: string }> | null;
   /**
    * The employer SEGMENT toggle: 'all' (default) · 'employer' · 'individual'.
    *
@@ -296,15 +304,26 @@ export function cmdExplorerBaseConds(
       conds.push('false');
     }
   }
-  // FULL-BOOK patient-name search result (0105). A direct column predicate on the rollup itself —
-  // member_id_bidx is projected by the 0050 matview and covered by 0092's indexes, so this needs
-  // neither a join nor a subquery.
+  // FULL-BOOK patient-name search result (0105). A direct predicate on the rollup itself — both
+  // business_entity_id and member_id_bidx are projected by the 0050 matview and covered by 0092's
+  // indexes, so this needs neither a join nor a subquery.
   //
-  // NO RANGE FILTER is needed here, unlike row_ids: these are text tokens compared as text, so a
-  // malformed value can only fail to match. There is no 22003 cast hazard to defend against.
-  if (Array.isArray(filter.patient_member_bidx)) {
-    if (filter.patient_member_bidx.length > 0) {
-      conds.push(`member_id_bidx = any(${add(filter.patient_member_bidx)}::text[])`);
+  // PAIRWISE, via two parallel bound arrays zipped by unnest. `member_id_bidx = any(tokens)` would
+  // be wrong: the token is tenant-agnostic, so in a multi-entity view it selects every tenant that
+  // happens to share a member id (240 of 10,701 do). Zipping keeps each match bound to the tenant it
+  // was matched IN. The two arrays are built from one array of pairs immediately below, so they
+  // cannot drift out of alignment.
+  //
+  // NO RANGE FILTER is needed here, unlike row_ids: these are text/uuid values compared as such, so
+  // a malformed value can only fail to match. There is no 22003 cast hazard to defend against.
+  if (Array.isArray(filter.patient_members)) {
+    if (filter.patient_members.length > 0) {
+      const entities = filter.patient_members.map((p) => p.entity);
+      const members = filter.patient_members.map((p) => p.member);
+      conds.push(
+        `(business_entity_id, member_id_bidx) in ` +
+          `(select e, m from unnest(${add(entities)}::uuid[], ${add(members)}::text[]) as t(e, m))`,
+      );
     } else {
       // Present but empty = "the search matched nobody". Omitting the condition would widen the
       // grid to every row and present it as a name result, which is the row_ids trap in a new
