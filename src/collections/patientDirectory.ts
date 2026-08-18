@@ -190,13 +190,25 @@ export function buildPatientDirectoryReadQuery(
  * The row lag is still returned, but as the SIZE of the exposure once staleness has established that
  * there IS one — "3 hours behind, 4,000 lines unindexed" is actionable; "12 lines unindexed" is not.
  *
- * Cheap enough to run per search: `max(id)` is a primary-key scan and the state read is one row.
+ * ⚠ THE LAG IS A COUNT(*), NOT `max(id) - last_row_id`, AND THE DIFFERENCE IS ENORMOUS. `id` is a
+ * bigserial, and `ON CONFLICT DO NOTHING` CONSUMES A SEQUENCE VALUE FOR EVERY DISCARDED DUPLICATE.
+ * The explorer crons re-pull ~5,231 BXR + ~6,000 Indigo rows every hour and almost all of them
+ * conflict, so the sequence races ahead of the row count by roughly 11,000 per hour while nothing is
+ * actually inserted. Measured live 2026-08-18: the subtraction reported a backlog of 218,007 when
+ * the true number of unindexed rows was 27 — an overstatement of about 8,000x, which would have put
+ * "218,007 charge lines unindexed" under a user's search.
+ *
+ * An id difference measures INSERT ATTEMPTS. Only a count measures rows.
+ *
+ * Cheap despite being a count: measured as a parallel index-only scan on the primary key, 17 ms /
+ * 13 buffers, because the predicate is a range on the PK itself.
  */
 export function buildPatientDirectoryFreshnessQuery(): { sql: string; params: unknown[] } {
   return {
     sql:
-      'select coalesce((select max(id) from collections.cmd_explorer_rows), 0) ' +
-      '     - coalesce((select last_row_id from collections.cmd_patient_directory_state), 0) as lag_rows, ' +
+      'select (select count(*) from collections.cmd_explorer_rows ' +
+      '          where id > coalesce((select last_row_id from collections.cmd_patient_directory_state), 0) ' +
+      '        )::int as lag_rows, ' +
       'coalesce(extract(epoch from (now() - (select refreshed_at ' +
       '  from collections.cmd_patient_directory_state))) / 60, 0)::int as stale_minutes',
     params: [],

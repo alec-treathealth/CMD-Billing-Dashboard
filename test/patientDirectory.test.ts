@@ -273,3 +273,22 @@ test('the counters ACCUMULATE, so a caught-up stamp cannot reset them', async ()
   assert.match(stateWrites[0]!.sql, /rows_scanned\s*=\s*collections\.cmd_patient_directory_state\.rows_scanned \+ excluded/);
   assert.deepEqual(stateWrites[1]!.params, [1, 0, 0], 'the final stamp adds nothing but the time');
 });
+
+// -- 6. The lag must COUNT ROWS, not subtract ids ----------------------------------------------
+
+test('the freshness query counts rows above the watermark, never max(id) - watermark', async () => {
+  // ⚠ THE SUBTRACTION SHIPPED AND WAS WRONG BY ~8,000x IN PRODUCTION. `id` is a bigserial and
+  // `ON CONFLICT DO NOTHING` consumes a sequence value for every DISCARDED duplicate. The explorer
+  // crons re-pull ~11,000 rows an hour and almost all conflict, so the sequence races ahead of the
+  // row count while nothing is inserted. Measured live 2026-08-18: the subtraction reported 218,007
+  // unindexed rows when the truth was 27, and that number was going under a user's search.
+  //
+  // An id difference measures INSERT ATTEMPTS. Only a count measures rows.
+  const { buildPatientDirectoryFreshnessQuery } = await import('../src/collections/patientDirectory.js');
+  const q = buildPatientDirectoryFreshnessQuery();
+  assert.match(q.sql, /count\(\*\) from collections\.cmd_explorer_rows/, 'it counts');
+  assert.match(q.sql, /where id > coalesce\(\(select last_row_id/, 'bounded by the watermark, so it stays a PK range scan');
+  assert.doesNotMatch(q.sql, /max\(id\)/, 'the subtraction must not come back');
+  assert.match(q.sql, /stale_minutes/, 'staleness still travels alongside');
+  assert.deepEqual(q.params, [], 'no bound params — it reads only server-side state');
+});
