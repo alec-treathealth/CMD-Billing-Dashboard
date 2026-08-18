@@ -13,9 +13,15 @@ batch reports plus the "JT Master Issues" sheet. Route and internal names stay
 `billing-audit`; only the **display label** is "Claims Audit". The name "Claims"
 is reserved for Veris S10.
 
-**Currently behind a refactor notice** for everyone except `alec@treathealth.ai`
-(`app/lib/billing-audit/maintenance.ts`). Kill switch:
+**Currently behind a refactor notice** for everyone except the shared bypass
+allowlist — `alec@treathealth.ai` + `ryan@treathealth.ai` as of 2026-08-18
+(`app/lib/maintenance-bypass.ts`, shared with Payer Intel; the flag itself stays
+in `app/lib/billing-audit/maintenance.ts`). Kill switch:
 `CLAIMS_AUDIT_MAINTENANCE=off`.
+
+⚠ The gate covers **both** routes on this tab — `/billing-audit` and
+`/billing-audit/facility-resolution`. The sub-route was ungated until 2026-08-18,
+so a blocked viewer could reach the facility-resolution workbench by URL.
 
 ## Scope: TOB-derived on the consolidated feed; roster-implied only on legacy OP
 

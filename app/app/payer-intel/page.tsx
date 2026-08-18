@@ -12,6 +12,8 @@ import {
   type PayerIntelUrlState,
 } from '@/lib/payer-intel/contract';
 import { PayerIntelView } from '@/components/payer-intel/payer-intel-view';
+import { payerIntelMaintenanceBlocks } from '@/lib/payer-intel/maintenance';
+import { PayerIntelMaintenanceNotice } from '@/components/payer-intel/maintenance-notice';
 
 export const metadata: Metadata = { title: 'Payer Intel | CMD Billing' };
 
@@ -48,6 +50,19 @@ export default async function PayerIntelPage({
   // The page gate is the routing mirror; every server action re-gates via requirePayerIntelPrincipal.
   const principal = requirePayerIntelPrincipalFromAccess(access);
   if (!principal.ok) redirect('/dashboard');
+
+  // ⚠ MAINTENANCE COMES AFTER THE ROLE GATE, NOT BEFORE IT, AND THE ORDER IS DELIBERATE. Checking
+  // maintenance first would render the notice for an entity admin/user who is not entitled to this
+  // surface at all — telling them a tab exists that they may never see, instead of redirecting them
+  // as they are redirected today. Only entitled viewers learn the tab is paused.
+  //
+  // Placed before the board fetch below so a blocked viewer never triggers those queries.
+  //
+  // hasFullDashboard: admissions_seat's ONLY nav link is this page (navLinksFor), so it has nowhere
+  // to be sent; the notice omits its links rather than offering a round trip through a redirect.
+  if (payerIntelMaintenanceBlocks(access.access.user?.email)) {
+    return <PayerIntelMaintenanceNotice hasFullDashboard={access.access.role !== 'admissions_seat'} />;
+  }
 
   const params = await searchParams;
   const asArray = (v: string | string[] | undefined): string[] =>

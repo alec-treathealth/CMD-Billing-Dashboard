@@ -28,6 +28,8 @@ import { redirect } from 'next/navigation';
 import { FacilityResolutionView } from '@/components/collections/facility-resolution-view';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
+import { claimsAuditMaintenanceBlocks } from '@/lib/billing-audit/maintenance';
+import { ClaimsAuditMaintenanceNotice } from '@/components/billing-audit/maintenance-notice';
 import { loadResolutionOverview, queryResolutionQueue } from '@/lib/facility-resolution-actions';
 import { clampView, resolveView } from '@/lib/views';
 import { isQualifyOnlyRole, QUALIFY_HOME } from '@/lib/rbac';
@@ -50,6 +52,12 @@ export default async function FacilityResolutionPage({
   if (access.access.allowedViews.length === 0) {
     return <UnprovisionedNotice email={access.access.user?.email} />;
   }
+
+  // ⚠ THIS SUB-ROUTE WAS NOT GATED, so a viewer held out of /billing-audit could still reach the
+  // Claims Desk facility-resolution workbench by typing its URL. The maintenance notice is a
+  // per-TAB decision, and this page is part of that tab — gating the index alone left the tab half
+  // open. Placed before the data fetch so a blocked viewer never triggers those queries.
+  if (claimsAuditMaintenanceBlocks(access.access.user?.email)) return <ClaimsAuditMaintenanceNotice />;
 
   const requested = resolveView(await searchParams);
   const view = clampView(requested, access.access.allowedViews);

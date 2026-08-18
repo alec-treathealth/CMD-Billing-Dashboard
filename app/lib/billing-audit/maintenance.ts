@@ -9,9 +9,13 @@
  * requires a redeploy. To fully revert, `git revert` the commit that added this flag — nothing else
  * references it. (Mirrors lib/qualify/maintenance.ts.)
  */
+import { bypassesMaintenance } from '../maintenance-bypass';
 
-// Only these emails bypass the maintenance notice and reach the live Claims Desk surface.
-const MAINTENANCE_BYPASS_EMAILS = new Set(['alec@treathealth.ai']);
+// ⚠ THE ALLOWLIST MOVED to lib/maintenance-bypass.ts (2026-08-18) and is now SHARED with Payer
+// Intel, which was gated by the same decision for the same two people. It was a local one-email Set
+// here. Sharing it means someone added for one surface cannot silently be missing from the other —
+// a drift that reads like a permissions bug rather than a missed edit. Qualify deliberately keeps
+// its own; see the note in that file.
 
 function maintenanceEnabled(): boolean {
   const v = (process.env.CLAIMS_AUDIT_MAINTENANCE ?? '').trim().toLowerCase();
@@ -21,5 +25,5 @@ function maintenanceEnabled(): boolean {
 /** True when this viewer should see the maintenance notice instead of the Claims Desk surface. */
 export function claimsAuditMaintenanceBlocks(email: string | null | undefined): boolean {
   if (!maintenanceEnabled()) return false;
-  return !MAINTENANCE_BYPASS_EMAILS.has((email ?? '').trim().toLowerCase());
+  return !bypassesMaintenance(email);
 }
