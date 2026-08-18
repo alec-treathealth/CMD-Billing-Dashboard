@@ -517,10 +517,21 @@ The link set is role-dependent:
 Surfaces:
 
 - `/dashboard` (Overview) and `/dashboard/collections` — the primary product.
-- `/billing-audit` (labelled "Claims Audit") and `/qualify` + `/qualify/m` — both
-  currently behind a **refactor notice shown to everyone except
-  `alec@treathealth.ai`**. Kill switches: `CLAIMS_AUDIT_MAINTENANCE` /
-  `QUALIFY_MAINTENANCE` = `0`/`false`/`off`.
+- `/billing-audit` (labelled "Claims Desk"), `/payer-intel` and `/qualify` +
+  `/qualify/m` — all currently behind a **refactor notice**. Claims Desk and
+  Payer Intel share one bypass allowlist (`app/lib/maintenance-bypass.ts`:
+  `alec@treathealth.ai` + `ryan@treathealth.ai`, 2026-08-18); **Qualify keeps its
+  own single-email list on purpose** — folding it in would silently widen Qualify
+  to whoever is added for the other two. Kill switches:
+  `CLAIMS_AUDIT_MAINTENANCE` / `PAYER_INTEL_MAINTENANCE` / `QUALIFY_MAINTENANCE`
+  = `0`/`false`/`off`.
+  ⚠ The Claims Desk gate covers `/billing-audit/facility-resolution` too — that
+  sub-route was reachable by URL while the index was gated, until 2026-08-18.
+  ⚠ Gating Payer Intel has a consequence Claims Desk does not: `admissions_seat`
+  is a **Payer-Intel-only persona** (`navLinksFor` returns exactly that one link),
+  so a blocked seat has no surface at all. ZERO such users exist today (14
+  super_admin, 3 admin, measured 2026-08-18); provisioning one means adding them
+  to the allowlist or turning the flag off.
 - `/claims` and `/claims/[claimId]` — **taken down 2026-07-15**, now a
   `redirect('/')` stub. The implementation is in git history, not deleted. The
   name "Claims" is reserved for Veris S10.
