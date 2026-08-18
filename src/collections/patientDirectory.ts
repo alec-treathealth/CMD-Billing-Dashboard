@@ -174,21 +174,31 @@ export function buildPatientDirectoryReadQuery(
 }
 
 /**
- * How far the directory trails the source table, in charge-line ids.
+ * Directory freshness: how STALE the sync is, and how many charge lines it trails by.
  *
- * ⚠ THIS EXISTS BECAUSE "SOME ROWS" IS NOT "ALL ROWS". A budget-stopped initial sync leaves a
- * NON-EMPTY but PARTIAL directory, and the search's empty-directory guard cannot tell that apart
- * from a complete one - so every patient beyond the watermark would be reported as "no match" while
- * the UI promises a whole-book search. That is the silent miss this whole design exists to prevent,
- * reintroduced through the back door.
+ * ⚠ READ THE STALENESS, NOT THE LAG — the lag alone is a bad alarm and shipping it as one was a
+ * mistake worth recording. The sync runs hourly; ~6,000 charge lines land per day. So `lag > 0` is
+ * true for most of every hour and would fire a warning on nearly every search. Worse, it would be
+ * fire on a HEALTHY system: 6,000 lines/day spread over 11,161 patients means almost every one of
+ * those rows belongs to a patient the directory ALREADY holds. A warning that is nearly always on
+ * tells the user nothing and trains them to ignore the one time it matters.
  *
- * Cheap enough to run per search: both sides are `max()` over a primary key.
+ * What actually threatens the whole-book promise is a sync that has STOPPED — the missing-key throw,
+ * a permission change, a budget-stopped run that never catches up. That shows as `refreshed_at`
+ * ceasing to advance, which is what `stale_minutes` measures.
+ *
+ * The row lag is still returned, but as the SIZE of the exposure once staleness has established that
+ * there IS one — "3 hours behind, 4,000 lines unindexed" is actionable; "12 lines unindexed" is not.
+ *
+ * Cheap enough to run per search: `max(id)` is a primary-key scan and the state read is one row.
  */
-export function buildPatientDirectoryLagQuery(): { sql: string; params: unknown[] } {
+export function buildPatientDirectoryFreshnessQuery(): { sql: string; params: unknown[] } {
   return {
     sql:
       'select coalesce((select max(id) from collections.cmd_explorer_rows), 0) ' +
-      '     - coalesce((select last_row_id from collections.cmd_patient_directory_state), 0) as lag',
+      '     - coalesce((select last_row_id from collections.cmd_patient_directory_state), 0) as lag_rows, ' +
+      'coalesce(extract(epoch from (now() - (select refreshed_at ' +
+      '  from collections.cmd_patient_directory_state))) / 60, 0)::int as stale_minutes',
     params: [],
   };
 }
