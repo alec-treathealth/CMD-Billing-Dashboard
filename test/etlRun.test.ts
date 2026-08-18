@@ -242,3 +242,52 @@ test('a healthy run with rows is untouched by the guard', () => {
   assert.equal(v.errorLabel, null);
   assert.equal(v.rowsTouched, 5231);
 });
+
+// ── The whole-roster FAILURE (the other half of 2026-08-17, and the one that stayed `ok`) ─────────
+
+test('every customer threw and none completed => error, not a "partial" success', () => {
+  // The body BXR's explorer returned once the report layout changed under it: the header contract
+  // threw for all 15 customers, so `customers 0/15 (failed 15), fetched 0`. This used to record
+  // `status: ok` with `partial_customers_failed=15` — a total outage described in the vocabulary of
+  // a survivable one, in the exact column an operator scans to decide whether anything is wrong.
+  const v = classifyCronResult({
+    status: 200,
+    body: { ok: true, customers_total: 15, customers_processed: 0, customers_failed: 15, rows_fetched: 0 },
+  });
+  assert.equal(v.status, 'error');
+  assert.equal(v.errorLabel, 'all_customers_failed=15');
+  assert.equal(v.rowsTouched, 0);
+});
+
+test('ONE customer surviving is still a partial success — the rule is not narrowed', () => {
+  // The line is processed === 0, not failed > 0. 1 of 15 wrote real rows, so holding the rollup on
+  // it would mean the rollup almost never runs; that trade-off is the whole reason partial runs
+  // count as successes and this change must not erode it.
+  const v = classifyCronResult({
+    status: 200,
+    body: { ok: true, customers_total: 15, customers_processed: 1, customers_failed: 14, rows_fetched: 12 },
+  });
+  assert.equal(v.status, 'ok');
+  assert.equal(v.errorLabel, 'partial_customers_failed=14');
+});
+
+test('a body that never reports customers_processed is NOT diagnosed as a total failure', () => {
+  // ABSENT is unknown, not zero. Reading a missing field as 0 would let any body that omits the
+  // roster count entirely be declared an outage on the strength of a field it never claimed.
+  const v = classifyCronResult({ status: 200, body: { ok: true, rows_fetched: 900, customers_failed: 3 } });
+  assert.equal(v.status, 'ok');
+  assert.equal(v.errorLabel, 'partial_customers_failed=3');
+});
+
+test('a budget-skipped roster stays ok — deliberately not covered by either guard', () => {
+  // processed 0 / failed 0 is indistinguishable from the census freshness-cursor case from inside
+  // the classifier, and it self-heals on the next run. Pinned so that widening either guard to
+  // catch it has to be a decision rather than a side effect.
+  const v = classifyCronResult({
+    status: 200,
+    body: { ok: true, customers_total: 15, customers_processed: 0, customers_failed: 0,
+            customers_skipped_budget: 15, rows_fetched: 0 },
+  });
+  assert.equal(v.status, 'ok');
+  assert.equal(v.errorLabel, null);
+});

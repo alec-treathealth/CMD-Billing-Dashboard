@@ -171,6 +171,13 @@ export async function withEtlRun<T>(opts: EtlRunOptions<T>, fn: () => Promise<T>
  * 20 of 24 customers wrote 20 customers' worth of real rows, and holding the rollup on that would
  * mean the rollup almost never runs. The count is surfaced on the row instead, so a creeping failure
  * rate is visible in `error_label` without being mistaken for an outage.
+ *
+ * ⚠ THE PIPELINE TICK DOES NOT CONSULT THIS FUNCTION. `pipelineTick.ts` decides whether a stage
+ * advanced from `outcome.status === 200` alone, so a run this classifier calls an outage still marks
+ * `pipeline_state` ok and releases its dependents. That divergence PREDATES this function's outage
+ * checks and is left alone on purpose: `pipeline_state` is scheduling truth and `etl_run` is
+ * observation, and changing the first changes WHEN production stages run. Do not assume the two
+ * agree; teaching the tick to read this belongs in a session scoped to the scheduler.
  */
 export function classifyCronResult(result: { status: number; body: unknown }): Omit<EtlRunClose, 'durationMs'> {
   const body = (result.body ?? {}) as Record<string, unknown>;
@@ -182,7 +189,14 @@ export function classifyCronResult(result: { status: number; body: unknown }): O
   }
 
   const failed = typeof body['customers_failed'] === 'number' ? (body['customers_failed'] as number) : 0;
-  const processed = typeof body['customers_processed'] === 'number' ? (body['customers_processed'] as number) : 0;
+  /**
+   * NULL WHEN THE BODY DOES NOT REPORT IT — not 0. Both diagnoses below turn on `processed === 0`,
+   * and defaulting an ABSENT field to 0 would let a body that never mentions the roster at all be
+   * diagnosed as "nothing succeeded". Absent means UNKNOWN here, and an unknown must not produce a
+   * verdict. (This is the `undefined !== null` trap in its other direction: the coercion, not the
+   * comparison.)
+   */
+  const processed = typeof body['customers_processed'] === 'number' ? (body['customers_processed'] as number) : null;
 
   /**
    * ⚠ A WHOLE-ROSTER EMPTY PULL IS AN OUTAGE, NOT A SUCCESS — the 2026-08-17 lesson.
@@ -211,8 +225,37 @@ export function classifyCronResult(result: { status: number; body: unknown }): O
    * a way to tell it apart from a dead filter, because on the 1st the two are indistinguishable
    * from inside this function.
    */
-  if (rowsFetched === 0 && processed > 0 && failed === 0) {
+  if (rowsFetched === 0 && processed !== null && processed > 0 && failed === 0) {
     return { status: 'error', rowsTouched: 0, errorLabel: 'all_customers_empty' };
+  }
+
+  /**
+   * ⚠ A RUN IN WHICH NO CUSTOMER COMPLETED IS AN OUTAGE, NOT A PARTIAL SUCCESS.
+   *
+   * The 2026-08-17 incident had a second half that the check above does not reach. Once BXR's
+   * report layout changed, the header contract threw for EVERY customer — `customers 0/15
+   * (failed 15), fetched 0` — and this function still returned `status: 'ok'` with the label
+   * `partial_customers_failed=15`. The word "partial" was doing the damage: a total failure was
+   * being described by the vocabulary of a survivable one, in the very column an operator scans
+   * to decide whether anything is wrong.
+   *
+   * The partial-runs-are-successes rule above is still right and is NOT being narrowed: 14 of 15
+   * customers writing real rows is a good run. What it never meant is that ZERO of 15 is. The line
+   * between them is `processed === 0` — nothing was written, so there is no partial success to
+   * protect, and the next stage will run against data that did not move.
+   *
+   * `failed > 0` is required, so this cannot fire on the benign roster-skip cases: the census
+   * cron's freshness cursor reports `processed: 0, failed: 0` on every run where the whole roster
+   * was still fresh, and those runs are correct.
+   *
+   * NOT COVERED, deliberately: a run where the wall-clock budget skipped the entire roster
+   * (`processed: 0, failed: 0, skipped_budget: N`). It is the same shape as the census cursor case
+   * from inside here, it is self-healing on the next run by design, and diagnosing it needs a
+   * field not every cron body carries. If that becomes worth alarming on, it deserves its own
+   * label rather than being folded into this one.
+   */
+  if (processed === 0 && failed > 0) {
+    return { status: 'error', rowsTouched: rowsFetched, errorLabel: `all_customers_failed=${failed}` };
   }
 
   return {
