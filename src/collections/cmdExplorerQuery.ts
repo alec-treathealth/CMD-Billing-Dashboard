@@ -1673,3 +1673,260 @@ export function buildCohortDrilldownQueries(
 
   return { stats, byPayer, byCptRevenue, rows };
 }
+
+// --- GROUPED MODE: one row per (patient × payment date × facility × payer) ---------------------
+
+/**
+ * ONE GROUPED ROW — several charge lines condensed into the payment they arrived on.
+ *
+ * ── WHY IT EXISTS ──────────────────────────────────────────────────────────────────────────────
+ * Asked for directly: *"if a 'charge from date' is multiple days, which has multiple charge lines,
+ * but all on a payment that came in on a single day, are we able to condense the charge lines into
+ * a grouping somehow?"* Measured on the live book: 497,337 rollup rows collapse to 101,158 groups —
+ * **4.92 charge lines per group**, so a 50-row page carries ~246 lines' worth of content.
+ *
+ * ── THE GROUP KEY, AND THE RULE THAT CHOSE IT ──────────────────────────────────────────────────
+ * `(business_entity_id, member_id_bidx, payment_received, facility, primary_payer)`.
+ *
+ * ⚠ `business_entity_id` LEADS THE KEY AND IS NOT OPTIONAL. Without it, Consolidated (the only view
+ * that spans tenants) could merge BXR and Indigo money into one row: `member_id_bidx` is an HMAC
+ * under ONE key, so the same member id at both tenants produces the same token. Measured 2026-08-18
+ * this merged nothing — 0 cross-tenant groups — but only because the two tenants' facilities differ,
+ * and "no tenant currently collides" is a property of today's data, not a guarantee. Tenancy on
+ * this surface is structural everywhere else; it is structural here too.
+ *
+ * ⚠ A NULL `member_id_bidx` KEYS ON THE ROW ID INSTEAD (`coalesce(member_id_bidx, 'id:' || id)`).
+ * SQL GROUP BY treats NULLs as EQUAL, so without this every member-less row sharing a payment date,
+ * facility and payer would collapse into a single row purporting to be one patient — with a summed
+ * total, a line count, and a representative PHI-reveal id that belong to no one. Keying on the id
+ * makes each such row its own group, which is the honest answer: we cannot prove they are the same
+ * person, so we do not merge them. Measured 2026-08-18: 0 such rows exist (ingest rejects a charge
+ * with no member id), so this is insurance against a column that is nullable rather than a live fix.
+ *
+ * ⚠ THE COALESCE COSTS ~64%, MEASURED, AND IS KEPT ANYWAY. Median of 6 warm runs, cross-tenant:
+ * a plain `t.member_id_bidx` groups in 662 ms, this expression in 1,086 ms — the expression cannot
+ * use `cmd_charge_rollup_member` as a presorted prefix, so the planner sorts instead.
+ *
+ * Kept because "there are no null members today" is the SAME reasoning that produced the
+ * cross-tenant hole above ("the tenants' facilities differ, so they cannot collide") — it describes
+ * today's data, not an invariant, and both failures are silent and produce a wrong money row with
+ * someone else's PHI-reveal id attached. 0.4s on a view the user opted into is a fair price for a
+ * guarantee instead of a coincidence.
+ *
+ * If this is ever revisited, revisit it with a number: the cheap alternative is to drop the coalesce
+ * AND enforce member_id_bidx NOT NULL where the invariant actually lives (ingest), rather than
+ * paying for the check on every read.
+ *
+ * The rule: **any column displayed UN-AGGREGATED must be in the group key**, or the cell shows one
+ * of several values arbitrarily and the row quietly lies. `member_id_bidx + payment_received` alone
+ * is what the request literally describes — but facility and payer are displayed columns AND filter
+ * dimensions, so leaving them out would let one row claim a facility it only partly belongs to.
+ *
+ * Including them costs **981 groups out of 101,158 (under 1%)**, measured — so honesty here is
+ * nearly free. That measurement is why this is a key choice and not a compromise.
+ *
+ * The three PHI columns need no such treatment: `member_id_bidx` IS in the key, so a group is
+ * exactly one patient and patient_name / member_id / group_number stay single-valued by
+ * construction — the reveal affordance keeps working on the representative row.
+ *
+ * ── WHAT AGGREGATES, AND HOW ───────────────────────────────────────────────────────────────────
+ * SUMMED: charge_amount, allowed_amount (allowed_reliable), insurance_payments, adjustments,
+ * patient_balance_due.
+ *
+ * ⚠ SUMMING `insurance_payments` IS CORRECT HERE, despite the rollup's own rule that it is a
+ * charge-cumulative running total to be MAXed and NEVER summed. That rule is about collapsing the
+ * SNAPSHOTS OF ONE CHARGE — the rollup already did that (`max(insurance_payments)` per charge). This
+ * sums ACROSS DIFFERENT charges, each contributing its own resolved final total, which is addition
+ * over disjoint things. Do not "fix" this to a MAX: that would report one charge's payment as the
+ * whole group's.
+ *
+ * ⚠ THE TWO PERCENTAGES ARE RECOMPUTED FROM THE SUMS, NEVER AVERAGED. Averaging per-charge ratios
+ * would weight a $50 line the same as a $50,000 one and produce a number that matches nothing. The
+ * formulas mirror the rollup's own definitions EXACTLY, including the `* 100` and `round(…, 2)`:
+ *     pct_allowed = round(sum(allowed_reliable) / sum(charge_amount)    * 100, 2)
+ *     pct_paid    = round(sum(insurance_payments) / sum(allowed_reliable) * 100, 2)
+ * If the matview's definition ever changes, these must move with it or a grouped row and an
+ * ungrouped one will disagree about the same money.
+ *
+ * NOT ADDITIVE, so they become facts about the group instead of a value:
+ *   · charge_date  → the min..max span (`charge_date` + `charge_date_end`), which is precisely the
+ *     "multiple days" the request describes;
+ *   · cpt_code / revenue_code → the code only when EVERY line has one and they agree, plus a
+ *     `*_mixed` flag. Three states must be distinguishable — one code, several/partial, or none at
+ *     all — because a group spanning several CPTs cannot honestly show one of them, and a group
+ *     with no CPT at all is not the same thing as one with several.
+ *   · line_count   → how many charge lines were condensed, so the collapse is never invisible.
+ *
+ * ⚠ `sum()` SKIPS NULLS, and `allowed_reliable` is null on 3,939 of 497,337 rows (0.8%) where the
+ * rollup could not resolve an allowed amount. A group containing one of those understates its
+ * allowed total rather than reporting null. That matches how every other aggregate on this surface
+ * already behaves; it is recorded because it is invisible in the output.
+ */
+export interface CmdExplorerGroupRow {
+  /** The representative (latest) rollup id — the keyset tiebreak AND the PHI-reveal key. */
+  id: number;
+  /** Earliest charge_date in the group ('YYYY-MM-DD'). */
+  charge_date: string | null;
+  /** Latest charge_date in the group. Equal to `charge_date` for a single-day group. */
+  charge_date_end: string | null;
+  payment_received: string | null;
+  /** How many charge lines this row condenses. Always >= 1. */
+  line_count: number;
+  /** The CPT when EVERY line in the group has one and they agree; null otherwise. Read together
+   *  with `cpt_mixed`, which separates "several/some missing" from "no line has a CPT". */
+  cpt_code: string | null;
+  /** True when the group's lines do not all carry the same CPT (including some-missing). */
+  cpt_mixed: boolean;
+  /** Same contract as `cpt_code`. */
+  revenue_code: string | null;
+  /** Same contract as `cpt_mixed`. */
+  revenue_mixed: boolean;
+  facility: string | null;
+  primary_payer: string | null;
+  employer_name: string | null;
+  charge_amount: string | null;
+  allowed_amount: string | null;
+  insurance_payments: string | null;
+  adjustments: string | null;
+  patient_balance_due: string | null;
+  pct_allowed: string | null;
+  pct_paid: string | null;
+}
+
+export interface CmdExplorerGroupPage {
+  rows: CmdExplorerGroupRow[];
+  nextCursor: CmdExplorerCursor | null;
+}
+
+/**
+ * Keyset page of GROUPED rows, ordered by payment_received then the representative id.
+ *
+ * ── SORTING IS DELIBERATELY FIXED TO payment_received IN v1 ────────────────────────────────────
+ * Not an oversight. Ordering groups by an AGGREGATE (`sum(charge_amount)`, the recomputed pcts) is
+ * perfectly possible — the keyset simply carries the aggregate value — but every such column needs
+ * its own cursor path and its own test, and a half-tested cursor does not fail loudly: it SKIPS OR
+ * REPEATS rows while looking correct. Shipping the grain first, with one ordering that is provably
+ * right, is the trade. `payment_received` is also the natural order for a payment-grouped view and
+ * the grid's existing default.
+ *
+ * ⚠ THE ORDERING IS TOTAL, WHICH IS WHAT MAKES THE CURSOR SAFE. `max(t.id)` is unique per group (an
+ * id belongs to exactly one group), so `(payment_received, max(id))` can never tie — the failure
+ * that would otherwise silently drop or duplicate a group at a page boundary. This is the same
+ * `{value, id}` cursor shape row mode uses, so `CmdExplorerCursor` is reused unchanged rather than
+ * inventing a second cursor type that would need its own validation.
+ *
+ * The keyset lives in HAVING because it references `max(t.id)`; `payment_received` is a grouping
+ * column so it is legal there too. A WHERE prune on payment_received is emitted alongside it — same
+ * predicate, applied before aggregation — so paging deep does not re-aggregate the whole book. The
+ * NULLS-LAST handling mirrors buildCmdExplorerQuery exactly; read them side by side.
+ */
+export function buildCmdExplorerGroupedQuery(
+  cursor: CmdExplorerCursor | null,
+  filter: CmdExplorerFilter,
+  direction: 'asc' | 'desc',
+  limit: number,
+  entityIds: string[],
+): { sql: string; params: unknown[] } {
+  const params: unknown[] = [];
+  const add: ParamAdder = (v) => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+  const conds = cmdExplorerBaseConds(filter, entityIds, add);
+  const dir = direction === 'asc' ? 'asc' : 'desc';
+  const cmp = direction === 'asc' ? '>' : '<';
+
+  const having: string[] = [];
+  if (cursor !== null) {
+    if (cursor.value === null) {
+      // The cursor row sat in the trailing NULL block: only later NULL-payment groups remain.
+      having.push(`(t.payment_received is null and max(t.id) ${cmp} ${add(cursor.id)})`);
+    } else {
+      // Prune BEFORE aggregating. The `is null` arm is required: under NULLS LAST a null
+      // payment_received sorts after every real date, so those groups are still ahead of us.
+      const pruneParam = add(cursor.value);
+      conds.push(`(t.payment_received ${cmp}= ${pruneParam}::date or t.payment_received is null)`);
+      const vParam = add(cursor.value);
+      const idParam = add(cursor.id);
+      having.push(
+        `(t.payment_received ${cmp} ${vParam}::date ` +
+          `or (t.payment_received = ${vParam}::date and max(t.id) ${cmp} ${idParam}) ` +
+          `or t.payment_received is null)`,
+      );
+    }
+  }
+
+  const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
+  const havingSql = having.length > 0 ? ` having ${having.join(' and ')}` : '';
+
+  // ⚠ THE OUTER PROJECTION IS SPELLED OUT, NOT `g.*`.
+  //
+  // `g.*` would have been safe by inspection — `g` is this function's own fixed subquery — and it
+  // was written that way first. The standing rule ("never SELECT *; project explicit allowlisted
+  // columns") is deliberately unconditional, and this is a good illustration of why: with `g.*` the
+  // outer row shape is defined by whatever the inner select happens to list, so ADDING a column
+  // inside the subquery silently widens what crosses the Server Action boundary. Naming them here
+  // means the shape is a decision, and CmdExplorerGroupRow is the only thing it can be.
+  //
+  // employer_name is LEFT JOINed on the REPRESENTATIVE id, for the same reason row mode joins it
+  // outside the paged subquery: it lives on the 349 MB base table and the rollup deliberately does
+  // not carry it, so joining after the LIMIT costs 50 primary-key lookups instead of a hash join.
+  // Within one group it is one patient's plan sponsor and effectively constant; taking the latest
+  // row's value is a documented choice, not an accident.
+  const sql =
+    `select g.id, g.charge_date, g.charge_date_end, g.payment_received, g.line_count, ` +
+    `g.cpt_code, g.cpt_mixed, g.revenue_code, g.revenue_mixed, g.facility, g.primary_payer, ` +
+    `g.charge_amount, g.allowed_amount, g.insurance_payments, g.adjustments, ` +
+    `g.patient_balance_due, g.pct_allowed, g.pct_paid, e.employer_name from (` +
+    `select max(t.id) as id, ` +
+    `to_char(min(t.charge_date), 'YYYY-MM-DD') as charge_date, ` +
+    `to_char(max(t.charge_date), 'YYYY-MM-DD') as charge_date_end, ` +
+    `to_char(t.payment_received, 'YYYY-MM-DD') as payment_received, ` +
+    `count(*)::int as line_count, ` +
+    // ⚠ THREE STATES, NOT TWO — and count/min/max rather than count(distinct).
+    //
+    // count(distinct) was measured at 1.2s of a 2.1s page (it sorts within every group); count, min
+    // and max are streaming aggregates and effectively free, a 2.6x on the whole query.
+    //
+    // But min/max ALONE is wrong, because SQL aggregates SKIP NULLS. A group of ['99213', null]
+    // has min = max = '99213' and would claim every line carries that CPT; a group where every line
+    // is null has min = max = NULL, and `NULL = NULL` is NULL rather than true, so it would fall to
+    // the ELSE and be reported as varying. Both misstate what the group contains, in OPPOSITE
+    // directions. So the value is emitted only when EVERY line has a code AND they agree
+    // (`count(code) = count(*)`), and a separate `*_mixed` flag distinguishes "several / some
+    // missing" from "no line has one at all". The UI renders those as Multiple and an em dash.
+    `case when count(t.cpt_code) = count(*) and min(t.cpt_code) = max(t.cpt_code) ` +
+    `then min(t.cpt_code) else null end as cpt_code, ` +
+    `(count(t.cpt_code) > 0 and (count(t.cpt_code) <> count(*) or min(t.cpt_code) <> max(t.cpt_code))) as cpt_mixed, ` +
+    `case when count(t.revenue_code) = count(*) and min(t.revenue_code) = max(t.revenue_code) ` +
+    `then min(t.revenue_code) else null end as revenue_code, ` +
+    `(count(t.revenue_code) > 0 and (count(t.revenue_code) <> count(*) or min(t.revenue_code) <> max(t.revenue_code))) as revenue_mixed, ` +
+    `t.facility, t.primary_payer, ` +
+    `sum(t.charge_amount) as charge_amount, ` +
+    `sum(t.allowed_reliable) as allowed_amount, ` +
+    `sum(t.insurance_payments) as insurance_payments, ` +
+    `sum(t.adjustments) as adjustments, ` +
+    `sum(t.patient_balance_due) as patient_balance_due, ` +
+    // Recomputed from the SUMS with the matview's own formulas — see the docblock.
+    `case when sum(t.charge_amount) > 0 and sum(t.allowed_reliable) is not null ` +
+    `then round(sum(t.allowed_reliable) / sum(t.charge_amount) * 100, 2) else null end as pct_allowed, ` +
+    `case when sum(t.allowed_reliable) > 0 ` +
+    `then round(sum(t.insurance_payments) / sum(t.allowed_reliable) * 100, 2) else null end as pct_paid ` +
+    `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} ` +
+    `group by t.business_entity_id, coalesce(t.member_id_bidx, 'id:' || t.id), ` +
+    `t.payment_received, t.facility, t.primary_payer${havingSql} ` +
+    `order by t.payment_received ${dir} nulls last, max(t.id) ${dir} limit ${add(limit)}` +
+    `) g left join collections.cmd_explorer_rows e on e.id = g.id ` +
+    // Re-stated on the OUTER query: a LEFT JOIN does not preserve the subquery's ordering, and the
+    // next cursor is built from the LAST ROW of this result set — an unordered page would hand back
+    // a cursor for an arbitrary group and silently skip or repeat pages. Costs nothing over 50 rows.
+    // `g.payment_received` is the to_char TEXT here, and sorting it as text is order-identical to the
+    // date because ISO-8601 is lexicographically ordered (the same argument row mode relies on).
+    `order by g.payment_received ${dir} nulls last, g.id ${dir}`;
+  return { sql, params };
+}
+
+/** A grouped row's cursor scalar — the payment date it was ordered by, or null in the NULL block. */
+export function cmdExplorerGroupSortValue(row: CmdExplorerGroupRow): string | null {
+  return row.payment_received ?? null;
+}
