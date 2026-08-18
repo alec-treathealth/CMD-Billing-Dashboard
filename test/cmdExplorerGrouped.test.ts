@@ -161,6 +161,22 @@ test('tenant scope is bound, and every value is a parameter', () => {
   assert.ok((params as unknown[]).some((p) => Array.isArray(p) && (p as string[])[0] === "x'; drop table--"));
 });
 
+test('the outer projection is EXPLICIT — no `select *` anywhere', () => {
+  // Standing rule, and unconditional on purpose: with `g.*` the outer row shape would be whatever
+  // the inner subquery happens to list, so adding a column inside it silently widens what crosses
+  // the Server Action boundary. Naming them makes the shape a decision.
+  const { sql } = build();
+  assert.doesNotMatch(sql, /select \*/i);
+  assert.doesNotMatch(sql, /\bg\.\*/, 'the outer projection must name its columns');
+  // Every field of CmdExplorerGroupRow is present, so the type and the SQL cannot drift apart.
+  for (const c of ['g.id', 'g.charge_date', 'g.charge_date_end', 'g.payment_received', 'g.line_count',
+                   'g.cpt_code', 'g.cpt_mixed', 'g.revenue_code', 'g.revenue_mixed', 'g.facility',
+                   'g.primary_payer', 'g.charge_amount', 'g.allowed_amount', 'g.insurance_payments',
+                   'g.adjustments', 'g.patient_balance_due', 'g.pct_allowed', 'g.pct_paid']) {
+    assert.ok(sql.includes(c), `${c} must be projected explicitly`);
+  }
+});
+
 test('no PHI column is ever projected', () => {
   const { sql } = build();
   for (const c of ['patient_name', 'member_id_raw', 'group_number', 'member_id_bidx as', 'group_number_bidx']) {

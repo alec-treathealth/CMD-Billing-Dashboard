@@ -1703,6 +1703,20 @@ export function buildCohortDrilldownQueries(
  * person, so we do not merge them. Measured 2026-08-18: 0 such rows exist (ingest rejects a charge
  * with no member id), so this is insurance against a column that is nullable rather than a live fix.
  *
+ * ⚠ THE COALESCE COSTS ~64%, MEASURED, AND IS KEPT ANYWAY. Median of 6 warm runs, cross-tenant:
+ * a plain `t.member_id_bidx` groups in 662 ms, this expression in 1,086 ms — the expression cannot
+ * use `cmd_charge_rollup_member` as a presorted prefix, so the planner sorts instead.
+ *
+ * Kept because "there are no null members today" is the SAME reasoning that produced the
+ * cross-tenant hole above ("the tenants' facilities differ, so they cannot collide") — it describes
+ * today's data, not an invariant, and both failures are silent and produce a wrong money row with
+ * someone else's PHI-reveal id attached. 0.4s on a view the user opted into is a fair price for a
+ * guarantee instead of a coincidence.
+ *
+ * If this is ever revisited, revisit it with a number: the cheap alternative is to drop the coalesce
+ * AND enforce member_id_bidx NOT NULL where the invariant actually lives (ingest), rather than
+ * paying for the check on every read.
+ *
  * The rule: **any column displayed UN-AGGREGATED must be in the group key**, or the cell shows one
  * of several values arbitrarily and the row quietly lies. `member_id_bidx + payment_received` alone
  * is what the request literally describes — but facility and payer are displayed columns AND filter
@@ -1845,8 +1859,14 @@ export function buildCmdExplorerGroupedQuery(
   const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
   const havingSql = having.length > 0 ? ` having ${having.join(' and ')}` : '';
 
-  // `g.*` is safe here (not a `select *` over a table): `g` is this function's own fixed projection
-  // immediately below, so the column list stays explicit and allowlisted.
+  // ⚠ THE OUTER PROJECTION IS SPELLED OUT, NOT `g.*`.
+  //
+  // `g.*` would have been safe by inspection — `g` is this function's own fixed subquery — and it
+  // was written that way first. The standing rule ("never SELECT *; project explicit allowlisted
+  // columns") is deliberately unconditional, and this is a good illustration of why: with `g.*` the
+  // outer row shape is defined by whatever the inner select happens to list, so ADDING a column
+  // inside the subquery silently widens what crosses the Server Action boundary. Naming them here
+  // means the shape is a decision, and CmdExplorerGroupRow is the only thing it can be.
   //
   // employer_name is LEFT JOINed on the REPRESENTATIVE id, for the same reason row mode joins it
   // outside the paged subquery: it lives on the 349 MB base table and the rollup deliberately does
@@ -1854,7 +1874,10 @@ export function buildCmdExplorerGroupedQuery(
   // Within one group it is one patient's plan sponsor and effectively constant; taking the latest
   // row's value is a documented choice, not an accident.
   const sql =
-    `select g.*, e.employer_name from (` +
+    `select g.id, g.charge_date, g.charge_date_end, g.payment_received, g.line_count, ` +
+    `g.cpt_code, g.cpt_mixed, g.revenue_code, g.revenue_mixed, g.facility, g.primary_payer, ` +
+    `g.charge_amount, g.allowed_amount, g.insurance_payments, g.adjustments, ` +
+    `g.patient_balance_due, g.pct_allowed, g.pct_paid, e.employer_name from (` +
     `select max(t.id) as id, ` +
     `to_char(min(t.charge_date), 'YYYY-MM-DD') as charge_date, ` +
     `to_char(max(t.charge_date), 'YYYY-MM-DD') as charge_date_end, ` +
