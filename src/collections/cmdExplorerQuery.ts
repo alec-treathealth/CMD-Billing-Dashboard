@@ -238,7 +238,31 @@ export function cmdExplorerBaseConds(
 ): string[] {
   const conds: string[] = [];
   // Tenant scope FIRST — server-derived entitled entity ids, applied to every read.
-  conds.push(`business_entity_id = any(${add(entityIds)}::uuid[])`);
+  //
+  // ONE id emits plain EQUALITY, not `= any(...)`, and that is a measured performance fix rather
+  // than a style preference. A ScalarArrayOp qual on the LEADING btree column stops the index from
+  // returning rows in TRAILING-column order, so the grid's
+  // `order by payment_received desc nulls last, id desc` could never be index-served: every page
+  // load read the whole tenant slice and top-N sorted it. Measured on the bxr view, 51 rows out:
+  // `= any(ARRAY[one])` → Parallel Index Scan + Sort, 61,296 buffers (479 MB); plain `=` →
+  // ordered Index Scan on cmd_charge_rollup_entity_payment_id_desc, NO Sort node, 52 buffers
+  // (0.41 MB), 4.2 ms. Same rows, ~1,180x fewer buffers.
+  //
+  // ⚠ STRICTLY length === 1. An EMPTY scope MUST stay on the array form, because
+  // `= any(ARRAY[]::uuid[])` matches NOTHING and that is the fail-closed property the three
+  // builders in THIS module rely on (they do not call assertEntityScope; the qualify/payer-intel
+  // call sites do). Routing an empty array down the `=` branch would bind an array to a uuid
+  // parameter — a type error, not a safe deny. Hence the `undefined` sentinel below rather than a
+  // `length <= 1` test or a non-null assertion.
+  //
+  // The CONSOLIDATED (2-id) shape is deliberately unchanged and still plans as a Parallel Seq Scan;
+  // making that index-servable needs a per-entity UNION ALL rewrite, which is a separate change.
+  const soleEntityId = entityIds.length === 1 ? entityIds[0] : undefined;
+  conds.push(
+    soleEntityId !== undefined
+      ? `business_entity_id = ${add(soleEntityId)}::uuid`
+      : `business_entity_id = any(${add(entityIds)}::uuid[])`,
+  );
   // Facility set-membership. A NON-EMPTY array narrows to those facilities; an EMPTY array (or
   // null/undefined) is NO restriction — the condition is omitted so the result set is ALL
   // facilities, never zero rows. (Emitting `= any(ARRAY[]::text[])` on empty would match nothing.)

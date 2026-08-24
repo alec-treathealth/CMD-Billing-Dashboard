@@ -155,8 +155,11 @@ test('asc flips every comparison together', () => {
 // ── 4. Tenancy + injection ──────────────────────────────────────────────────────────────────────
 test('tenant scope is bound, and every value is a parameter', () => {
   const { sql, params } = buildCmdExplorerGroupedQuery(null, { facility: ["x'; drop table--"] }, 'desc', 50, ENTITY);
-  assert.match(sql, /business_entity_id = any\(\$\d+::uuid\[\]\)/);
-  assert.ok(params.includes(ENTITY as unknown as string) || params.some((p) => Array.isArray(p) && p[0] === ENTITY[0]));
+  // ONE-id scope emits plain equality (the ordered-index fix, migration 0107); a 2+-id scope keeps
+  // `= any($n::uuid[])`. Either way the tenant id is BOUND, never interpolated — which is what this
+  // test is actually guarding.
+  assert.match(sql, /business_entity_id = \$\d+::uuid/);
+  assert.ok(params.includes(ENTITY[0] as string) || params.some((p) => Array.isArray(p) && p[0] === ENTITY[0]));
   assert.doesNotMatch(sql, /drop table/, 'filter values never reach the SQL text');
   assert.ok((params as unknown[]).some((p) => Array.isArray(p) && (p as string[])[0] === "x'; drop table--"));
 });
