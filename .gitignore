@@ -15,6 +15,13 @@ Indigo Cron Job/
 # explicit folder entry guards any non-CSV file dropped there (mirrors the two folders above).
 Indigo Seed Data/
 *.csv
+# ONE narrow exception to the blanket *.csv PHI guard above: the Kipu billing-report
+# fixtures, which the hermetic suite needs. They are DERIVED and verified PHI-free —
+# names/providers/auth numbers replaced and every date shifted -364 days (see that
+# directory's README.md, and re-verify with a leak check before adding another).
+# Keep this exception directory-scoped. NEVER broaden it, and never place a raw
+# export here: real Kipu exports stay outside the repo.
+!test/fixtures/kipu-billing-report/*.csv
 .env
 .env.*
 !.env.example

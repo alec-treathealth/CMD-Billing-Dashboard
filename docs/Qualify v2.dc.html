@@ -1,0 +1,1897 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics=""><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin=""><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Space+Grotesk:wght@500;600;700&amp;family=IBM+Plex+Mono:wght@400;500&amp;family=Fraunces:opsz,wght@9..144,400..700&amp;display=swap" rel="stylesheet"><style>
+html,body{margin:0;padding:0}
+body{background:#FBF8F4;color:#1B2B2A;font-family:Inter,system-ui,sans-serif;letter-spacing:-.006em;-webkit-font-smoothing:antialiased}
+a{color:#135E5A;text-decoration:none}
+a:hover{color:#1C8B82}
+*{box-sizing:border-box}
+button{font:inherit;letter-spacing:inherit}
+@keyframes ths-reveal{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+@keyframes q-draw{to{stroke-dashoffset:0}}
+@keyframes q-marquee{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+@keyframes q-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@keyframes q-caret{0%,49%{opacity:1}50%,100%{opacity:0}}
+@keyframes q-drift-a{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(42px,26px) scale(1.12)}}
+@keyframes q-drift-b{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(-34px,-22px) scale(1.08)}}
+@keyframes q-breathe{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+@keyframes q-scan{0%{transform:scaleX(0);opacity:.9}100%{transform:scaleX(1);opacity:.25}}
+@media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}
+</style></helmet>
+
+<div style="min-height:100vh;background:#FBF8F4">
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="ic-shield" viewBox="0 0 24 24"><path d="M12 3l7.5 2.8v5.4c0 4.6-3.1 7.9-7.5 9.3-4.4-1.4-7.5-4.7-7.5-9.3V5.8z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"></path><path d="M8.8 12.1l2.2 2.2 4.2-4.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></symbol>
+<symbol id="ic-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"></circle><path d="M2.8 20c0-3.4 2.8-5.4 6.2-5.4s6.2 2 6.2 5.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path><circle cx="17.6" cy="9.4" r="2.2" fill="none" stroke="currentColor" stroke-width="1.6"></circle><path d="M17.6 14.2c2.2 0 3.6 1.4 3.6 3.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path></symbol>
+<symbol id="ic-hourglass" viewBox="0 0 24 24"><path d="M7 3.5h10M7 20.5h10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path><path d="M8.4 3.5v3.2L12 10.4l3.6-3.7V3.5M8.4 20.5v-3.2L12 13.6l3.6 3.7v3.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"></path></symbol>
+<symbol id="ic-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.6"></circle><path d="M12 6.8V12l3.4 2.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></symbol>
+<symbol id="ic-trend" viewBox="0 0 24 24"><path d="M3 16.5l5.6-5.6 3.6 3.6L21 6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><path d="M15.2 6H21v5.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></symbol>
+<symbol id="ic-bed" viewBox="0 0 24 24"><path d="M3 19V7M3 13.2h18V19M21 13.2v-1.4a3 3 0 0 0-3-3h-7v4.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><circle cx="7.2" cy="11" r="1.9" fill="none" stroke="currentColor" stroke-width="1.6"></circle></symbol>
+<symbol id="ic-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"></path><circle cx="12" cy="12" r="2.8" fill="none" stroke="currentColor" stroke-width="1.6"></circle></symbol>
+<symbol id="ic-lock" viewBox="0 0 24 24"><rect x="4.8" y="10.4" width="14.4" height="9.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"></rect><path d="M8.2 10.4V7.8a3.8 3.8 0 0 1 7.6 0v2.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></symbol>
+<symbol id="ic-chev" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path></symbol>
+<symbol id="ic-search" viewBox="0 0 24 24"><circle cx="10.6" cy="10.6" r="6.4" fill="none" stroke="currentColor" stroke-width="1.9"></circle><path d="M15.4 15.4L21 21" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"></path></symbol>
+<symbol id="ic-building" viewBox="0 0 24 24"><rect x="4.5" y="3.5" width="15" height="17" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"></rect><path d="M9 8h2M13 8h2M9 12h2M13 12h2M10.5 20.5v-4h3v4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path></symbol>
+<symbol id="ic-case" viewBox="0 0 24 24"><rect x="3" y="7.5" width="18" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"></rect><path d="M9 7.5V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1.5" fill="none" stroke="currentColor" stroke-width="1.6"></path></symbol>
+<symbol id="ic-bank" viewBox="0 0 24 24"><path d="M3.4 9.4L12 4.4l8.6 5M5 9.4v9.2M19 9.4v9.2M3 19.6h18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path></symbol>
+<symbol id="ic-spark" viewBox="0 0 24 24"><path d="M12 3.5l1.9 4.9 4.9 1.9-4.9 1.9L12 17l-1.9-4.8L5.2 10.3l4.9-1.9z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"></path></symbol>
+</defs></svg>
+
+<header style="display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;height:56px;background:#0E3A3A;padding:0 24px">
+  <div style="display:flex;align-items:center;gap:11px">
+    <div title="Placeholder — real mark lives in app/public, which I could not read this turn" style="display:flex;align-items:center;justify-content:center;width:30px;height:30px;border:1px dashed rgba(255,255,255,.45);border-radius:8px;background:repeating-linear-gradient(135deg,rgba(255,255,255,.12) 0 4px,transparent 4px 8px);font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:7.5px;letter-spacing:.06em;color:rgba(255,255,255,.75)">LOGO</div>
+    <div style="line-height:1">
+      <div style="font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;letter-spacing:.04em;color:rgba(255,255,255,.9)">wordmark</div>
+      <div style="margin-top:3px;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:8.5px;letter-spacing:.08em;color:rgba(255,255,255,.5)">from app/public</div>
+    </div>
+  </div>
+  <nav title="Placeholder — real nav is components/nav/nav-links, which I could not read this turn" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:5px 12px;border:1px dashed rgba(255,255,255,.35);border-radius:9px">
+    <span style="font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.12em;color:rgba(255,255,255,.5)">nav</span>
+    <span aria-hidden="true" style="width:52px;height:7px;border-radius:3px;background:rgba(255,255,255,.18)"></span>
+    <span style="position:relative;padding:4px 11px;border:1px dashed rgba(255,255,255,.5);border-radius:7px;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.04em;color:#fff">Qualify<span aria-hidden="true" style="position:absolute;top:-1px;right:1px;font-size:7.5px;font-weight:700;color:#F0917C">v2</span></span>
+    <span aria-hidden="true" style="width:38px;height:7px;border-radius:3px;background:rgba(255,255,255,.18)"></span>
+    <span aria-hidden="true" style="width:26px;height:7px;border-radius:3px;background:rgba(255,255,255,.18)"></span>
+  </nav>
+  <div style="display:flex;align-items:center;gap:14px">
+    <div style="display:flex;align-items:center;gap:0;padding:3px;border-radius:9px;background:rgba(255,255,255,.1)">
+      <button type="button" onClick="{{ setRoleFull }}" style="padding:5px 11px;border:0;border-radius:7px;font-size:11.5px;font-weight:600;cursor:pointer;transition:all 150ms ease-out;background:{{ roleFullBg }};color:{{ roleFullColor }}" title="Sees dollar amounts">Super Admin</button>
+      <button type="button" onClick="{{ setRoleBlind }}" style="padding:5px 11px;border:0;border-radius:7px;font-size:11.5px;font-weight:600;cursor:pointer;transition:all 150ms ease-out;background:{{ roleBlindBg }};color:{{ roleBlindColor }}" title="Amounts-blind: no dollar figures anywhere">Admissions seat</button>
+    </div>
+    <div style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;background:#135E5A;border:1px solid rgba(255,255,255,.25);font-size:11px;font-weight:700;color:#fff">AR</div>
+  </div>
+</header>
+
+<main style="max-width: 1680px; margin: 0 auto; padding: 16px 24px 56px; display: flex; flex-direction: column; gap: 12px; padding-bottom: 16px">
+
+  <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap">
+    <div>
+      <h1 style="margin:0;font-family:Fraunces,Georgia,serif;font-size:27px;font-weight:500;letter-spacing:-.01em;color:#1B2B2A">Qualify</h1>
+      <p style="margin:3px 0 0;font-size:14px;color:#4A5C5A">Does this payer pay us — and at which facility? · <span style="color:#63756E">compose below, the book at a glance above</span></p>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 11px;border-radius:999px;border:1px dashed #B7DAD5;background:#EAF4F2;font-size:11px;font-weight:600;color:#135E5A">
+      <svg width="13" height="13" style="color:#1C8B82"><use href="#ic-spark"></use></svg>
+      Proposed scoring model — six weighted factors, not yet live
+    </div>
+  </div>
+
+  <section>
+    <div style="display:flex;align-items:center;gap:9px;margin-bottom:10px;padding-left:2px">
+      <h2 style="margin:0;font-family:'Space Grotesk',Inter,sans-serif;font-size:15px;font-weight:600;letter-spacing:-.02em">Facilities Heating Up</h2>
+      <span style="display:inline-flex;align-items:center;gap:6px;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.13em;color:#63756E">
+        <span aria-hidden="true" style="width:6px;height:6px;border-radius:50%;background:#2E8B6F;animation:q-pulse 2s ease-in-out infinite"></span>
+        Trending · {{ tickerRange }} · across the book
+      </span>
+    </div>
+    <div style="overflow:hidden;padding:2px 0 8px;-webkit-mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 64px),transparent);mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 64px),transparent)">
+      <div style="display:flex;gap:10px;width:max-content;padding-left:2px;animation:q-marquee 46s linear infinite" style-hover="animation-play-state:paused">
+        <sc-for list="{{ ticker }}" as="t" hint-placeholder-count="6">
+          <button type="button" onClick="{{ t.open }}" style="flex:none;width:216px;padding:12px 14px;text-align:left;border:1px solid #E4E9E6;border-radius:12px;background:#fff;box-shadow:0 1px 2px rgba(27,43,42,.05),0 1px 1px rgba(27,43,42,.04);cursor:pointer;transition:box-shadow 150ms ease-out,transform 150ms ease-out" style-hover="transform:translateY(-2px);box-shadow:0 4px 16px -6px rgba(14,58,58,.12)">
+            <div style="display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:#1B2B2A">
+              <span style="font-size:10px;font-weight:800;color:#63756E">{{ t.hash }}</span>
+              <span aria-hidden="true" style="width:6px;height:6px;border-radius:50%;background:{{ t.hex }}"></span>
+              <span style="margin-left:auto;display:inline-flex;padding:1px 8px;border-radius:999px;background:#eef4f6;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#2D7393">{{ t.loc }}</span>
+              <svg width="12" height="12" style="flex:none;color:#1C8B82"><use href="#ic-chev"></use></svg>
+            </div>
+            <div style="margin-top:4px;min-height:36px;font-size:12.5px;font-weight:600;line-height:1.15;color:#1B2B2A">{{ t.name }}</div>
+            <div style="margin-top:6px;display:flex;align-items:baseline;gap:6px;font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:24px;font-weight:600;line-height:1;color:#1B2B2A">
+              {{ t.rating }}<span style="font-size:13px;color:#63756E">%</span>
+              <span style="font-size:12px;font-weight:700;color:{{ t.deltaHex }}">{{ t.delta }}</span>
+            </div>
+            <div style="margin:6px 0">{{ t.spark }}</div>
+            <div style="display:flex;justify-content:space-between;gap:8px;font-size:10px;color:#63756E">
+              <span>{{ t.lines }} claim lines</span><span>{{ t.place }}</span>
+            </div>
+          </button>
+        </sc-for>
+      </div>
+    </div>
+  </section>
+
+  <section style="position:relative;z-index:30;border:1px solid #E4E9E6;border-radius:16px;background:#fff;box-shadow:0 1px 2px rgba(27,43,42,.05),0 1px 1px rgba(27,43,42,.04)">
+    <div aria-hidden="true" style="height:3px;border-radius:16px 16px 0 0;background:linear-gradient(90deg,#135E5A,#1C8B82 55%,#B7DAD5)"></div>
+    <div style="padding:17px 20px 16px">
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin-bottom:13px">
+        <span style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;background:#0E3A3A;font-size:10.5px;font-weight:600;letter-spacing:.02em;color:#fff"><svg width="10" height="10"><use href="#ic-lock"></use></svg>Identified</span>
+        <span style="font-family:'Space Grotesk',Inter,sans-serif;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#0E3A3A">Two fields is the whole search</span>
+        <span style="margin-left:auto;font-size:11.5px;color:#4A5C5A">Audited on use. Never written to the URL.</span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:180px minmax(220px,1fr) auto auto;gap:12px;align-items:end">
+        <div>
+          <label style="display:flex;align-items:center;gap:6px;margin-bottom:5px;font-size:11.5px;font-weight:600;color:#0E3A3A"><svg width="13" height="13" style="color:#135E5A"><use href="#ic-shield"></use></svg>Alpha prefix</label>
+          <input type="text" value="{{ prefix }}" onChange="{{ onPrefix }}" onKeyDown="{{ onSubmitKey }}" placeholder="XQH" maxlength="5" style="width:100%;height:42px;padding:0 12px;border:1px solid #B7DAD5;border-radius:10px;background:#fff;font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:17px;font-weight:500;letter-spacing:.16em;text-transform:uppercase;color:#1B2B2A;outline:none" style-focus="border-color:#1C8B82;box-shadow:0 0 0 3px rgba(28,139,130,.18)">
+        </div>
+        <div style="position:relative">
+          <label style="display:flex;align-items:center;gap:6px;margin-bottom:5px;font-size:11.5px;font-weight:600;color:#0E3A3A"><svg width="13" height="13" style="color:#135E5A"><use href="#ic-building"></use></svg>Facility<span style="font-weight: 400; color: #63756E; display: none">— optional</span></label>
+          <input type="text" value="{{ facilityQuery }}" onChange="{{ onFacilityQuery }}" onFocus="{{ onFacilityFocus }}" onKeyDown="{{ onSubmitKey }}" placeholder="Search and select a facility" style="width:100%;height:42px;padding:0 12px;border:1px solid {{ facilityBorder }};border-radius:10px;background:#fff;font-size:14px;font-weight:500;color:#1B2B2A;outline:none" style-focus="border-color:#1C8B82;box-shadow:0 0 0 3px rgba(28,139,130,.18)">
+          <sc-if value="{{ suggestOpen }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute;z-index:40;left:0;right:0;top:100%;margin-top:5px;padding:5px;border:1px solid #B7DAD5;border-radius:12px;background:#fff;box-shadow:0 12px 30px -12px rgba(14,58,58,.32);max-height:246px;overflow:auto">
+              <sc-for list="{{ suggestions }}" as="g" hint-placeholder-count="4">
+                <button type="button" onClick="{{ g.pick }}" style="width:100%;display:flex;align-items:center;gap:9px;padding:8px 10px;border:0;border-radius:8px;background:none;text-align:left;cursor:pointer;transition:background 150ms ease-out" style-hover="background:#EAF4F2">
+                  <span aria-hidden="true" style="flex:none;width:7px;height:7px;border-radius:50%;background:{{ g.hex }}"></span>
+                  <span style="flex:1;min-width:0;font-size:13px;font-weight:500;color:#1B2B2A;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ g.name }}</span>
+                  <span style="flex:none;font-size:11px;color:#63756E">{{ g.place }}</span>
+                  <span style="flex:none;font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:12px;font-weight:500;color:{{ g.hex }}">{{ g.rating }}</span>
+                </button>
+              </sc-for>
+              <sc-if value="{{ noSuggestions }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:9px 10px;font-size:12.5px;color:#63756E">No facility by that name.</div>
+              </sc-if>
+            </div>
+          </sc-if>
+        </div>
+        <div>
+          <label style="display:flex;align-items:center;gap:6px;margin-bottom:5px;font-size:11.5px;font-weight:600;color:#0E3A3A"><svg width="13" height="13" style="color:#135E5A"><use href="#ic-bed"></use></svg>Setting</label>
+          <div style="display:flex;gap:4px;height:42px;padding:4px;border:1px solid #B7DAD5;border-radius:10px;background:#F7FBFA">
+            <sc-for list="{{ locLens }}" as="l" hint-placeholder-count="3">
+              <button type="button" onClick="{{ l.pick }}" title="{{ l.title }}" style="min-width:52px;padding:0 13px;border:1px solid {{ l.border }};border-radius:7px;background:{{ l.bg }};font-size:13px;font-weight:600;color:{{ l.color }};cursor:pointer;transition:all 150ms ease-out" style-hover="border-color:#1C8B82">{{ l.label }}</button>
+            </sc-for>
+          </div>
+        </div>
+        <button type="button" onClick="{{ onQualify }}" style="height:42px;align-self:flex-end;display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:0 20px;border:0;border-radius:10px;background:#135E5A;font-size:14px;font-weight:600;color:#fff;cursor:pointer;transition:background 150ms ease-out" style-hover="background:#0E3A3A">
+          <svg width="16" height="16"><use href="#ic-search"></use></svg>{{ qualifyLabel }}
+        </button>
+      </div>
+
+      <sc-if value="{{ isResults }}" hint-placeholder-val="{{ true }}">
+        <div style="margin-top:13px;padding-top:12px;border-top:1px dashed #B7DAD5;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px">
+          <sc-for list="{{ kpis }}" as="k" hint-placeholder-count="3">
+            <div style="padding:8px 12px 9px;border:1px solid #E4E9E6;border-radius:11px;background:{{ k.bg }};animation:ths-reveal .22s ease-out both;animation-delay:{{ k.delay }}">
+              <div style="font-size:10.5px;font-weight:600;line-height:1.3;color:#4A5C5A;text-wrap:pretty">{{ k.label }}</div>
+              <div style="margin-top:2px;display:flex;align-items:baseline;font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:22px;font-weight:600;line-height:1;color:{{ k.color }}">{{ k.value }}<span style="margin-left:1px;font-size:13px">{{ k.suffix }}</span></div>
+              <sc-if value="{{ k.hasRange }}" hint-placeholder-val="{{ true }}">
+                <div style="margin-top:6px;display:flex;align-items:stretch;gap:8px">
+                  <sc-for list="{{ k.range }}" as="r" hint-placeholder-count="2">
+                    <div style="flex:1;min-width:0;padding-left:8px;border-left:2px solid {{ r.hex }}">
+                      <div style="display:flex;align-items:baseline;gap:4px">
+                        <span style="font-size:8.5px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:#63756E">{{ r.label }}</span>
+                        <span style="font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:12.5px;font-weight:600;color:{{ r.hex }}">{{ r.value }}</span>
+                      </div>
+                      <div style="font-size:9.5px;line-height:1.3;color:#63756E;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ r.who }}</div>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <div style="margin-top:5px;font-size:10px;line-height:1.35;color:#63756E;text-wrap:pretty">{{ k.caption }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+      </div>
+    </section><div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;padding:12px 20px;background:#0E3A3A">
+      <div style="font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:19px;font-weight:500;color:#fff">{{ matchCount }}</div>
+      <div style="font-size:11.5px;line-height:1.3;color:rgba(255,255,255,.7)">charge lines<br>match your filters</div>
+      <div style="display:flex;align-items:center;gap:10px;padding-left:16px;border-left:1px solid rgba(255,255,255,.15)">
+        <div aria-hidden="true" style="display:flex;align-items:flex-end;gap:3px;height:17px">
+          <sc-for list="{{ readoutPips }}" as="p" hint-placeholder-count="4">
+            <span style="width:5px;border-radius:2px;height:{{ p.h }};border:1px {{ p.style }} {{ p.border }};background:{{ p.bg }}"></span>
+          </sc-for>
+        </div>
+        <span style="font-size:11.5px;line-height:1.25;color:rgba(255,255,255,.7)"><b style="display:block;font-size:12px;font-weight:600;color:#fff">{{ patientTotal }}</b>{{ evidenceVerdict }}</span>
+      </div>
+      <sc-if value="{{ showBilled }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;align-items:center;gap:10px;padding-left:16px;border-left:1px solid rgba(255,255,255,.15)">
+          <span style="font-size:11.5px;line-height:1.25;color:rgba(255,255,255,.7)"><b style="display:block;font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:13px;font-weight:500;color:#fff">{{ billedTotal }}</b>billed in window</span>
+        </div>
+      </sc-if>
+      <sc-if value="{{ showPolicyScore }}" hint-placeholder-val="{{ true }}">
+        <div style="margin-left:auto;display:flex;align-items:center;gap:11px;padding-left:18px;border-left:1px solid rgba(255,255,255,.15)">
+          <div style="text-align:right">
+            <div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.11em;color:rgba(255,255,255,.55)">Policy rating</div>
+            <div style="margin-top:1px;font-size:11px;color:rgba(255,255,255,.6)">{{ polScoreBasis }}</div>
+          </div>
+          <div style="font-family:Fraunces,Georgia,serif;font-size:38px;font-weight:600;line-height:.85;letter-spacing:-.02em;color:{{ polHex }}">{{ polRating }}</div>
+          <span style="padding:3px 11px;border-radius:999px;background:{{ polPillBg }};font-size:11.5px;font-weight:700;letter-spacing:.02em;color:{{ polHex }}">{{ polVerdict }}</span>
+        </div>
+      </sc-if>
+      <sc-if value="{{ showPolicyTags }}" hint-placeholder-val="{{ true }}">
+        <div style="flex-basis:100%;display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding-top:11px;border-top:1px solid rgba(255,255,255,.14)">
+          <span style="margin-right:3px;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.11em;color:rgba(255,255,255,.5)">On file</span>
+          <sc-for list="{{ polTags }}" as="t" hint-placeholder-count="6">
+            <span title="{{ t.title }}" style="display:inline-flex;align-items:baseline;gap:5px;max-width:100%;padding:3px 10px;border:1px dashed {{ t.border }};border-radius:999px;background:rgba(255,255,255,.06)">
+              <span style="flex:none;font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:rgba(255,255,255,.5)">{{ t.label }}</span>
+              <span style="min-width:0;font-family:{{ t.font }};font-variant-numeric:tabular-nums;font-size:11.5px;font-weight:600;line-height:1.35;color:{{ t.color }};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.value }}</span>
+            </span>
+          </sc-for>
+        </div>
+      </sc-if>
+      <div style="flex-basis: 100%; display: none; flex-wrap: wrap; align-items: baseline; gap: 5px 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.14)">
+        <span style="display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;color:#fff">
+          <svg aria-hidden="true" width="14" height="14" style="color:#5FC9BE"><use href="#ic-clock"></use></svg>
+          Trailing <span style="font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums">{{ resolvedWindow }}</span> days
+          <span style="padding:2px 7px;border-radius:999px;background:rgba(95,201,190,.16);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:#5FC9BE">auto</span>
+        </span>
+        <span style="min-width:0;font-size:12px;line-height:1.45;color:rgba(255,255,255,.68);text-wrap:pretty">{{ windowReason }}</span>
+      </div>
+    </div><div style="border:1px solid #E4E9E6;border-radius:16px;background:#fff;box-shadow:0 1px 2px rgba(27,43,42,.05);overflow:hidden">
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding:12px 17px 10px;background:linear-gradient(180deg,#EAF4F2,#fff);border-bottom:1px solid #E4E9E6">
+            <span aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:8px;background:#135E5A;color:#fff"><svg width="15" height="15"><use href="#ic-spark"></use></svg></span>
+            <h2 style="margin:0;font-family:'Space Grotesk',Inter,sans-serif;font-size:16px;font-weight:600;letter-spacing:-.02em">Ask about this policy</h2>
+            <span style="font-size:11.5px;color:#63756E">{{ aiScopeNote }}</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(238px,1fr));gap:7px;padding:12px 17px 11px">
+            <sc-for list="{{ chips }}" as="c" hint-placeholder-count="4">
+              <button type="button" onClick="{{ c.run }}" style="position:relative;display:flex;align-items:flex-start;gap:8px;padding:9px 12px;border:1px solid {{ c.border }};border-radius:11px;background:{{ c.bg }};font-size:12.5px;font-weight:600;line-height:1.35;color:{{ c.color }};text-align:left;cursor:pointer;transition:all 150ms ease-out" style-hover="border-color:#1C8B82;color:#135E5A">
+                <svg width="13" height="13" style="flex:none;margin-top:1px;color:{{ c.iconColor }}"><use href="#{{ c.icon }}"></use></svg>
+                <span style="min-width:0;text-wrap:pretty">{{ c.label }}</span>
+              </button>
+            </sc-for>
+          </div>
+          <sc-if value="{{ aiIdle }}" hint-placeholder-val="{{ true }}">
+            <p style="margin:0;padding:0 17px 14px;font-size:12px;line-height:1.55;color:#63756E">Ranked by what these numbers make worth asking — the teal one is where this result is least obvious.</p>
+          </sc-if>
+          <sc-if value="{{ aiOn }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:0 17px 14px">
+              <div ref="{{ streamRef }}" style="padding:12px 15px;border:1px solid #E4E9E6;border-radius:13px;background:#FBF8F4">
+                <div style="font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:9.5px;font-weight:500;text-transform:uppercase;letter-spacing:.16em;color:#135E5A">TL;DR</div>
+                <p style="margin:6px 0 0;font-size:14px;line-height:1.6;color:#1B2B2A;text-wrap:pretty">{{ aiTldr }}<sc-if value="{{ caretTldr }}" hint-placeholder-val="{{ false }}"><span style="display:inline-block;width:7px;height:15px;margin-left:2px;vertical-align:-2px;background:#1C8B82;animation:q-caret 1s step-end infinite"></span></sc-if></p>
+
+                <sc-if value="{{ hasSignals }}" hint-placeholder-val="{{ false }}">
+                  <div style="margin-top:12px;padding-top:11px;border-top:1px solid #E4E9E6">
+                    <div style="font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:9.5px;font-weight:500;text-transform:uppercase;letter-spacing:.16em;color:#2E8B6F">Signals</div>
+                    <div style="margin-top:8px;display:flex;flex-direction:column;gap:7px">
+                      <sc-for list="{{ aiSignals }}" as="s" hint-placeholder-count="3">
+                        <div style="display:grid;grid-template-columns:14px 1fr;gap:9px;align-items:start">
+                          <span aria-hidden="true" style="margin-top:6px;width:6px;height:6px;border-radius:50%;background:#2E8B6F"></span>
+                          <span style="font-size:13px;line-height:1.55;color:#1B2B2A">{{ s.text }}<sc-if value="{{ s.caret }}" hint-placeholder-val="{{ false }}"><span style="display:inline-block;width:7px;height:14px;margin-left:2px;vertical-align:-2px;background:#1C8B82;animation:q-caret 1s step-end infinite"></span></sc-if></span>
+                        </div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ hasRisks }}" hint-placeholder-val="{{ false }}">
+                  <div style="margin-top:12px;padding-top:11px;border-top:1px solid #E4E9E6">
+                    <div style="font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:9.5px;font-weight:500;text-transform:uppercase;letter-spacing:.16em;color:#C0453B">Risks</div>
+                    <div style="margin-top:8px;display:flex;flex-direction:column;gap:7px">
+                      <sc-for list="{{ aiRisks }}" as="r" hint-placeholder-count="2">
+                        <div style="display:grid;grid-template-columns:14px 1fr;gap:9px;align-items:start">
+                          <span aria-hidden="true" style="margin-top:6px;width:6px;height:6px;border-radius:50%;background:#C0453B"></span>
+                          <span style="font-size:13px;line-height:1.55;color:#1B2B2A">{{ r.text }}<sc-if value="{{ r.caret }}" hint-placeholder-val="{{ false }}"><span style="display:inline-block;width:7px;height:14px;margin-left:2px;vertical-align:-2px;background:#1C8B82;animation:q-caret 1s step-end infinite"></span></sc-if></span>
+                        </div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ hasRanks }}" hint-placeholder-val="{{ false }}">
+                  <div style="margin-top:12px;padding-top:11px;border-top:1px solid #E4E9E6">
+                    <div style="font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:9.5px;font-weight:500;text-transform:uppercase;letter-spacing:.16em;color:#135E5A">{{ ranksTitle }}</div>
+                    <div style="margin-top:8px;display:flex;flex-direction:column;gap:1px">
+                      <sc-for list="{{ aiRanks }}" as="r" hint-placeholder-count="5">
+                        <div style="display:grid;grid-template-columns:20px minmax(0,1fr) auto auto;gap:11px;align-items:center;padding:7px 9px;border-radius:9px;background:{{ r.bg }}">
+                          <span style="font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;font-weight:600;color:#63756E">{{ r.rank }}</span>
+                          <span style="min-width:0;font-size:13px;font-weight:600;color:#1B2B2A;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ r.name }}</span>
+                          <span style="font-size:11px;color:#63756E;white-space:nowrap">{{ r.evidence }}</span>
+                          <span style="min-width:34px;text-align:right;font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:14px;font-weight:600;color:{{ r.hex }}">{{ r.rating }}</span>
+                        </div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ aiDone }}" hint-placeholder-val="{{ false }}">
+                  <p style="margin:14px 0 0;padding-top:12px;border-top:1px dashed #E4E9E6;font-size:11px;color:#63756E">{{ aiFooter }}</p>
+                </sc-if>
+              </div>
+            </div>
+          </sc-if>
+        </div></main></div>
+
+    
+  
+
+  <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+    <section style="position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;min-height:0;padding:30px 24px 32px;border:1px solid #E4E9E6;border-radius:16px;background:linear-gradient(180deg,#FDFBF8,#FBF8F4);animation:ths-reveal .22s ease-out both">
+      <div aria-hidden="true" style="position:absolute;inset:0;pointer-events:none">
+        <span style="position:absolute;left:6%;top:-10%;width:340px;height:340px;border-radius:999px;filter:blur(56px);opacity:.5;background:radial-gradient(circle,rgba(28,139,130,.4),transparent 68%);animation:q-drift-a 22s ease-in-out infinite"></span>
+        <span style="position:absolute;right:3%;top:26%;width:300px;height:300px;border-radius:999px;filter:blur(56px);opacity:.5;background:radial-gradient(circle,rgba(183,218,213,.6),transparent 70%);animation:q-drift-b 27s ease-in-out infinite"></span>
+      </div>
+      <div style="position:relative;z-index:2;max-width:560px;display:flex;flex-direction:column;align-items:center;text-align:center">
+        <span aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:48px;height:48px;border-radius:13px;background:linear-gradient(135deg,#0E3A3A,#135E5A 60%,#1C8B82);box-shadow:0 12px 30px -12px rgba(14,58,58,.45);animation:q-breathe 6s ease-in-out infinite">
+          <svg width="26" height="26" viewBox="0 0 34 34" fill="none"><circle cx="17" cy="17" r="6.5" fill="#EAF4F2"></circle><circle cx="17" cy="17" r="11" stroke="#B7DAD5" stroke-opacity="0.6" stroke-width="1.5" fill="none"></circle><circle cx="28" cy="17" r="2.6" fill="#F0917C"></circle></svg>
+        </span>
+        <h2 style="margin:13px 0 0;font-family:Fraunces,Georgia,serif;font-size:24px;font-weight:500;letter-spacing:-.01em;color:#1B2B2A">Search to qualify a lead</h2>
+        <p style="margin:6px 0 0;font-size:13.5px;line-height:1.5;color:#4A5C5A">Type the alpha prefix off the card. The plan on file behind it fills in the rest; name a facility only when you want that one facility's read.</p>
+        <div style="margin-top:15px;display:flex;flex-wrap:wrap;justify-content:center;gap:7px">
+          <sc-for list="{{ examplePolicies }}" as="e" hint-placeholder-count="3">
+            <button type="button" onClick="{{ e.pick }}" style="display:flex;flex-direction:column;align-items:flex-start;gap:2px;padding:8px 13px;border:1px solid #B7DAD5;border-radius:11px;background:#fff;text-align:left;cursor:pointer;transition:all 150ms ease-out" style-hover="border-color:#1C8B82;background:#F7FBFA">
+              <span style="font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;font-weight:600;letter-spacing:.12em;color:#135E5A">{{ e.prefix }}</span>
+              <span style="font-size:11px;font-weight:500;color:#4A5C5A">{{ e.who }}</span>
+              <span style="font-size:10px;font-weight:600;color:{{ e.hex }}">{{ e.band }}</span>
+            </button>
+          </sc-for>
+        </div>
+      </div>
+    </section>
+  </sc-if>
+
+  <sc-if value="{{ isResolving }}" hint-placeholder-val="{{ false }}">
+    <section style="border:1px solid #E4E9E6;border-radius:16px;background:#fff;box-shadow:0 1px 2px rgba(27,43,42,.05);padding:26px 24px;animation:ths-reveal .22s ease-out both">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span aria-hidden="true" style="width:7px;height:7px;border-radius:50%;background:#1C8B82;animation:q-pulse 1s ease-in-out infinite"></span>
+        <h2 style="margin:0;font-family:'Space Grotesk',Inter,sans-serif;font-size:15px;font-weight:600;letter-spacing:-.02em">Finding a window with enough patients to trust</h2>
+        <span style="font-size:11.5px;color:#63756E">needs 10 distinct patients · stops at the first that clears</span>
+      </div>
+      <div style="margin-top:20px;display:grid;grid-template-columns:repeat(5,1fr);gap:10px">
+        <sc-for list="{{ windowSteps }}" as="w" hint-placeholder-count="5">
+          <div style="position:relative;overflow:hidden;padding:14px 14px 13px;border:1px solid {{ w.border }};border-radius:12px;background:{{ w.bg }};transition:all 220ms ease-out;opacity:{{ w.opacity }}">
+            <div style="display:flex;align-items:baseline;gap:5px;font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:21px;font-weight:500;line-height:1;color:{{ w.numColor }}">{{ w.days }}<span style="font-size:11px;font-weight:400;color:#63756E">days</span></div>
+            <div style="margin-top:9px;font-size:11.5px;font-weight:600;color:{{ w.textColor }}">{{ w.result }}</div>
+            <div aria-hidden="true" style="position:absolute;left:0;bottom:0;height:2px;width:100%;transform-origin:left;background:{{ w.barColor }};transform:scaleX({{ w.barScale }});transition:transform 320ms ease-out"></div>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+  </sc-if>
+
+  <sc-if value="{{ isResults }}" hint-placeholder-val="{{ true }}">
+    <div style="display:flex;flex-direction:column;gap:12px">
+
+      
+
+
+      <sc-if value="{{ showCards }}" hint-placeholder-val="{{ false }}">
+      <section>
+
+        <div style="display: inline; grid-template-columns: repeat(auto-fit,minmax(520px,1fr)); align-items: start">
+          <sc-for list="{{ cards }}" as="f" hint-placeholder-count="6" style="display: inline">
+            <article style="overflow: hidden; border: 1px solid {{ f.cardBorder }}; border-radius: 16px; background: #fff; box-shadow: {{ f.shadow }}; animation: ths-reveal .22s ease-out both; animation-delay: {{ f.delay }}; transition: box-shadow 150ms ease-out; margin-top: 5px; margin-bottom: 5px; border-width: 2px" style-hover="box-shadow:0 4px 16px -6px rgba(14,58,58,.12)">
+              <div aria-hidden="true" style="height: 3px; background: {{ f.topBar }}; overflow: visible; opacity: 0"></div>
+
+              <div style="padding:12px 17px 12px">
+                <div style="display:flex;align-items:flex-start;gap:16px">
+                  <div style="flex:1;min-width:0">
+                    <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
+                      <span style="display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:6px;background:#EAF4F2;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;font-weight:600;color:#135E5A">{{ f.rank }}</span>
+                      <span style="display:inline-flex;padding:1px 7px;border-radius:999px;background:#eef4f6;font-size:9.5px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#2D7393">{{ f.loc }}</span>
+                      <sc-if value="{{ f.sampleTag }}" hint-placeholder-val="{{ false }}">
+                        <span style="display:inline-flex;padding:1px 7px;border:1px solid #E4E9E6;border-radius:999px;background:#fff;font-size:9.5px;font-weight:700;color:#63756E">{{ f.sampleTag }}</span>
+                      </sc-if>
+                      <sc-if value="{{ f.conflict }}" hint-placeholder-val="{{ false }}">
+                        <span style="display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border:1px solid #F0917C;border-radius:999px;background:#FCEDE8;font-size:9.5px;font-weight:700;color:#C0453B">factors disagree</span>
+                      </sc-if>
+                    </div>
+                    <h3 style="margin:5px 0 0;font-family:'Space Grotesk',Inter,sans-serif;font-size:18px;font-weight:600;letter-spacing:-.02em;line-height:1.2;color:#1B2B2A;text-wrap:pretty">{{ f.name }}</h3>
+                    <div style="margin-top:2px;font-size:12px;line-height:1.4;color:#63756E;text-wrap:pretty">{{ f.place }}</div>
+                    <sc-if value="{{ f.hasTags }}" hint-placeholder-val="{{ false }}">
+                      <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:5px">
+                        <sc-for list="{{ f.tags }}" as="t" hint-placeholder-count="6">
+                          <span title="{{ t.title }}" style="display:inline-flex;align-items:baseline;gap:5px;max-width:100%;padding:3px 9px;border:1px dashed {{ t.border }};border-radius:999px;background:{{ t.bg }}">
+                            <span style="flex:none;font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#63756E">{{ t.label }}</span>
+                            <span style="min-width:0;font-family:{{ t.font }};font-variant-numeric:tabular-nums;font-size:11px;font-weight:600;line-height:1.35;color:{{ t.color }};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.value }}</span>
+                          </span>
+                        </sc-for>
+                      </div>
+                    </sc-if>
+                  </div>
+
+                  <div style="flex:none;text-align:right">
+                    <div style="font-family:Fraunces,Georgia,serif;font-size:{{ f.numSize }};font-weight:600;line-height:.9;letter-spacing:-.02em;color:{{ f.numColor }}">{{ f.ratingText }}</div>
+                    <div style="margin-top:5px;display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;background:{{ f.pillBg }};font-size:11px;font-weight:700;letter-spacing:.02em;color:{{ f.pillColor }}">{{ f.verdict }}</div>
+                  </div>
+                </div>
+
+                <sc-if value="{{ f.insufficient }}" hint-placeholder-val="{{ false }}">
+                  <div style="margin-top:11px;padding:10px 13px;border:1px dashed #E4E9E6;border-radius:12px;background:#F4F2EF">
+                    <div style="font-size:13.5px;font-weight:600;color:#4A5C5A">Not enough data to rate</div>
+                    <div style="margin-top:4px;font-size:12.5px;line-height:1.5;color:#63756E">{{ f.insufficientDetail }}</div>
+                    <div style="margin-top:9px;font-size:11.5px;color:#63756E">We could score this by reaching further back, but a number built on {{ f.patients }} people would be noise wearing a color. Ask a biller.</div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ f.rated }}" hint-placeholder-val="{{ true }}">
+                  <div>
+                    <div style="margin-top:11px;display:flex;flex-wrap:wrap;align-items:center;gap:5px 14px">
+                      <div aria-hidden="true" style="display:flex;align-items:flex-end;gap:3px;height:17px">
+                        <sc-for list="{{ f.pips }}" as="p" hint-placeholder-count="4">
+                          <span style="width:5px;border-radius:2px;height:{{ p.h }};border:1px {{ p.style }} {{ p.border }};background:{{ p.bg }}"></span>
+                        </sc-for>
+                      </div>
+                      <span style="white-space:nowrap;font-size:11.5px;color:#63756E"><b style="font-weight:600;color:#1B2B2A">{{ f.patients }} patients</b> · {{ f.evidence }}</span>
+                      <span style="margin-left:auto;white-space:nowrap;font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:11px;color:#63756E">{{ f.lines }} lines</span>
+                      <sc-if value="{{ f.showAmounts }}" hint-placeholder-val="{{ true }}">
+                        <span style="white-space:nowrap;font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:11px;color:#63756E">{{ f.amounts }}</span>
+                      </sc-if>
+                    </div>
+
+                    <div style="margin-top:10px">
+                      <div style="display:flex;height:5px;overflow:hidden;border-radius:999px;background:#E4E9E6">
+                        <sc-for list="{{ f.weights }}" as="w" hint-placeholder-count="6">
+                          <span title="{{ w.title }}" style="display:block;height:100%;width:{{ w.width }};background:{{ w.color }};border-right:1px solid rgba(255,255,255,.7)"></span>
+                        </sc-for>
+                      </div>
+                      <div style="margin-top:5px;display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 12px;font-size:10.5px;color:#63756E">
+                        <span style="white-space:nowrap">weighting · {{ f.weightCounts }}</span>
+                        <span style="white-space:nowrap">{{ f.weightNote }}</span>
+                      </div>
+                    </div>
+                  </div>
+                </sc-if>
+              </div>
+
+              <button type="button" onClick="{{ f.toggle }}" style="width:100%;display:flex;align-items:center;gap:8px;padding:7px 17px;border:0;border-top:1px solid #E4E9E6;background:{{ f.expandBg }};font-size:12px;font-weight:600;color:#135E5A;cursor:pointer;text-align:left;transition:background 150ms ease-out" style-hover="background:#EAF4F2">
+                <svg width="13" height="13" style="flex:none;transform:rotate({{ f.chevRot }});transition:transform 150ms ease-out"><use href="#ic-chev"></use></svg>
+                {{ f.expandLabel }}
+                <span style="margin-left:auto;font-weight:400;color:#63756E">{{ f.expandHint }}</span>
+              </button>
+
+              <sc-if value="{{ f.open }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:2px 17px 12px;background:#FBF8F4;border-top:1px solid #E4E9E6">
+                  <sc-for list="{{ f.factors }}" as="x" hint-placeholder-count="6">
+                    <div style="display:grid;grid-template-columns:26px 1fr auto;gap:11px;align-items:start;padding:8px 0;border-bottom:1px solid #E4E9E6">
+                      <span aria-hidden="true" style="display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:8px;background:{{ x.iconBg }};color:{{ x.iconColor }}"><svg width="15" height="15"><use href="#{{ x.iconId }}"></use></svg></span>
+                      <div style="min-width:0">
+                        <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
+                          <span style="font-size:13px;font-weight:600;color:#1B2B2A">{{ x.label }}</span>
+                          <span style="display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:700;color:{{ x.dirColor }}">{{ x.arrow }} {{ x.dirLabel }}</span>
+                        </div>
+                        <div style="margin-top:3px;font-size:12.5px;line-height:1.5;color:#4A5C5A;text-wrap:pretty">{{ x.detail }}</div>
+                      </div>
+                      <span style="font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:12.5px;font-weight:500;color:#63756E">{{ x.weight }}</span>
+                    </div>
+                  </sc-for>
+                  <sc-if value="{{ f.hasSeries }}" hint-placeholder-val="{{ true }}">
+                    <div style="margin-top:12px;padding:11px 13px 10px;border:1px solid #E4E9E6;border-radius:12px;background:#fff">
+                      <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px">
+                        <span style="font-family:'Space Grotesk',Inter,sans-serif;font-size:12.5px;font-weight:600;letter-spacing:-.01em;color:#1B2B2A">Rating trend</span>
+                        <span style="font-size:10.5px;color:#63756E">{{ f.trendSubtitle }}</span>
+                        <span style="margin-left:auto;display:flex;flex-wrap:wrap;gap:9px;font-size:9.5px;color:#63756E">
+                          <span style="display:inline-flex;align-items:center;gap:4px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:#2E8B6F"></span>Strong ≥ 50</span>
+                          <span style="display:inline-flex;align-items:center;gap:4px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:#C9881E"></span>Watch 30–49</span>
+                          <span style="display:inline-flex;align-items:center;gap:4px;white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:#C0453B"></span>Weak &lt; 30</span>
+                        </span>
+                      </div>
+                      <div style="margin-top:7px;width:100%">
+                        {{ f.trendChart }}
+                        <div style="margin-top:4px;display:flex;justify-content:space-between;font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums;font-size:9.5px;color:#63756E">
+                          <span>{{ f.trendFirst }}</span><span>{{ f.trendLast }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </sc-if>
+                </div>
+              </sc-if>
+            </article>
+          </sc-for>
+        </div>
+      </section>
+      </sc-if>
+
+      <section style="display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-items:start">
+        
+
+      </section>
+
+      <section style="border: 1px solid #E4E9E6; border-radius: 16px; background: #fff; box-shadow: 0 1px 2px rgba(27,43,42,.05); overflow: hidden; display: none">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:15px 18px 11px">
+          <h2 style="margin:0;font-family:'Space Grotesk',Inter,sans-serif;font-size:15px;font-weight:600;letter-spacing:-.02em">Recent cases</h2>
+          <span style="font-size:11.5px;color:#63756E">{{ casesNote }}</span>
+          <sc-if value="{{ revealNote }}" hint-placeholder-val="{{ false }}">
+            <span style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border:1px solid #F0917C;border-radius:999px;background:#FCEDE8;font-size:11px;font-weight:600;color:#C0453B"><svg width="11" height="11"><use href="#ic-lock"></use></svg>{{ revealNote }}</span>
+          </sc-if>
+        </div>
+        <div style="display:grid;grid-template-columns:{{ caseCols }};gap:0;font-size:12.5px">
+          <sc-for list="{{ caseCells }}" as="c" hint-placeholder-count="24">
+            <div style="padding:9px 18px;border-top:1px solid #E4E9E6;background:{{ c.bg }};font-family:{{ c.font }};font-variant-numeric:tabular-nums;font-size:{{ c.size }};font-weight:{{ c.weight }};text-transform:{{ c.transform }};letter-spacing:{{ c.spacing }};color:{{ c.color }};text-align:{{ c.align }};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+              <sc-if value="{{ c.isReveal }}" hint-placeholder-val="{{ false }}">
+                <button type="button" onClick="{{ c.reveal }}" style="display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border:1px solid #E4E9E6;border-radius:7px;background:#fff;font-size:11px;font-weight:600;color:#4A5C5A;cursor:pointer;transition:all 150ms ease-out" style-hover="border-color:#B7DAD5;color:#135E5A"><svg width="12" height="12"><use href="#ic-eye"></use></svg>{{ c.text }}</button>
+              </sc-if>
+              <sc-if value="{{ c.isText }}" hint-placeholder-val="{{ true }}">
+                {{ c.text }}
+              </sc-if>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+
+      <p style="margin:6px 0 0;font-size:11px;color:#63756E">Internal tool — handles PHI. Patient identifiers are masked by default; every reveal is written to the audit log with your user, the row, and the time.</p>
+    </div>
+  </sc-if>
+
+
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1680},&quot;state&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;empty&quot;,&quot;resolving&quot;,&quot;results&quot;,&quot;insufficient-first&quot;,&quot;ai-streaming&quot;,&quot;ai-complete&quot;],&quot;default&quot;:&quot;results&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Prototype states&quot;},&quot;role&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;biller&quot;,&quot;blind&quot;],&quot;default&quot;:&quot;biller&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Prototype states&quot;},&quot;streamSpeed&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:3,&quot;min&quot;:0.5,&quot;max&quot;:10,&quot;step&quot;:0.5,&quot;unit&quot;:&quot;s&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Prototype states&quot;}}">
+const T = {
+  teal900:'#0E3A3A', teal700:'#135E5A', teal500:'#1C8B82', teal200:'#B7DAD5', teal50:'#EAF4F2',
+  coral600:'#E2674F', coral400:'#F0917C', coral50:'#FCEDE8', ground:'#FBF8F4', surface:'#FFFFFF',
+  ink900:'#1B2B2A', ink600:'#4A5C5A', ink400:'#63756E', line:'#E4E9E6',
+  ok:'#2E8B6F', warn:'#C9881E', danger:'#C0453B', neutral:'#6B7B79', info:'#2D7393',
+  okWash:'#E6F2EC', warnWash:'#FBF1DE', dangerWash:'#FBE7E4', neutralWash:'#F4F2EF',
+};
+
+const PIP_H = ['7px','10px','13.5px','17px'];
+
+function pipsFor(n){ if(n<3) return 1; if(n<10) return 2; if(n<25) return 3; return 4; }
+function tierFor(n){ return n<3 ? 'insufficient' : n<10 ? 'thin' : 'full'; }
+function usd0(n){ return '$' + Math.round(n).toLocaleString('en-US'); }
+function verdictOf(r){ return r>=50 ? 'Strong' : r>=30 ? 'Watch' : 'Weak'; }
+function hexOf(r){ return r===null ? T.neutral : r>=50 ? T.ok : r>=30 ? T.warn : T.danger; }
+function washOf(r){ return r===null ? T.neutralWash : r>=50 ? T.okWash : r>=30 ? T.warnWash : T.dangerWash; }
+
+const F = (icon,label,weight,dir,detail) => ({icon,label,weight,dir,detail});
+
+const FACILITIES = [
+  {
+    key:'nashville', name:'Nashville Mental Health', place:'Nashville, TN', loc:'Both',
+    rating:68, patients:31, lines:186, allowed:412380, billed:611200,
+    points:[54,57,55,60,62,61,66,68],
+    factors:[
+      F('#ic-shield','Claims reliability',35,'pos','67% of billed amount allowed across 186 lines, all confirmed-tier'),
+      F('#ic-users','Sample confidence',15,'pos','31 distinct patients — well clear of the reliability threshold of 10'),
+      F('#ic-hourglass','Claim-status mix',20,'pos','9% of claims still sitting at the payer past 90 days'),
+      F('#ic-clock','Time to resolution',10,'pos','Median 38 days from service to final payment'),
+      F('#ic-trend','Market position',10,'neu','Billing 2.1x the CMS fee-schedule rate for this code set'),
+      F('#ic-bed','Operational fit',10,'pos','Avg length of stay 17 days vs 18 authorized'),
+    ],
+  },
+  {
+    key:'pacific', name:'Pacific Coast Mental Health', place:'Long Beach, CA', loc:'OP',
+    rating:54, patients:11, lines:47, allowed:96420, billed:178500,
+    points:[61,58,60,56,57,52,55,54],
+    factors:[
+      F('#ic-shield','Claims reliability',35,'pos','62% of billed amount allowed across 47 lines, all confirmed-tier'),
+      F('#ic-users','Sample confidence',15,'pos','11 distinct patients — above the reliability threshold of 10'),
+      F('#ic-hourglass','Claim-status mix',20,'neg','31% of claims still sitting at the payer past 90 days'),
+      F('#ic-clock','Time to resolution',10,'neg','Median 74 days from service to final payment'),
+      F('#ic-trend','Market position',10,'neg','Billing 3.2x the CMS fee-schedule rate for this code set'),
+      F('#ic-bed','Operational fit',10,'neg','Avg length of stay 21 days vs 18 authorized'),
+    ],
+  },
+  {
+    key:'tnbh', name:'Tennessee Behavioral Health', place:'Chattanooga, TN', loc:'IP',
+    rating:47, patients:14, lines:96, allowed:203900, billed:287100, conflict:true,
+    points:[38,42,44,49,51,48,49,47],
+    factors:[
+      F('#ic-shield','Claims reliability',35,'pos','71% of billed amount allowed across 96 lines, all confirmed-tier'),
+      F('#ic-users','Sample confidence',15,'pos','14 distinct patients — above the reliability threshold of 10'),
+      F('#ic-hourglass','Claim-status mix',20,'neg','58% of claims still sitting at the payer past 90 days — the worst in this payer set'),
+      F('#ic-clock','Time to resolution',10,'neg','Median 119 days from service to final payment'),
+      F('#ic-trend','Market position',10,'neu','Billing 2.6x the CMS fee-schedule rate for this code set'),
+      F('#ic-bed','Operational fit',10,'neu','Avg length of stay 19 days vs 18 authorized'),
+    ],
+  },
+  {
+    key:'kentucky', name:'Kentucky Wellness Center', place:'Louisville, KY', loc:'Both',
+    rating:41, patients:9, lines:38, allowed:61240, billed:149800,
+    points:[47,45,44,46,43,41,42,41],
+    factors:[
+      F('#ic-shield','Claims reliability',35,'neu','41% of billed amount allowed across 38 lines, all confirmed-tier'),
+      F('#ic-users','Sample confidence',15,'neg','9 distinct patients — one short of the threshold of 10; read as directional'),
+      F('#ic-hourglass','Claim-status mix',20,'neu','22% of claims still sitting at the payer past 90 days'),
+      F('#ic-clock','Time to resolution',10,'neu','Median 61 days from service to final payment'),
+      F('#ic-trend','Market position',10,'neu','Billing 2.4x the CMS fee-schedule rate for this code set'),
+      F('#ic-bed','Operational fit',10,'neu','Length of stay not on file for this slice'),
+    ],
+  },
+  {
+    key:'firstresp', name:'First Responders of California', place:'Sacramento, CA', loc:'OP',
+    rating:33, patients:17, lines:121, allowed:88710, billed:268900,
+    points:[44,42,39,37,36,34,35,33],
+    factors:[
+      F('#ic-shield','Claims reliability',35,'neg','33% of billed amount allowed across 121 lines, all confirmed-tier'),
+      F('#ic-users','Sample confidence',15,'pos','17 distinct patients — above the reliability threshold of 10'),
+      F('#ic-hourglass','Claim-status mix',20,'neg','44% of claims still sitting at the payer past 90 days'),
+      F('#ic-clock','Time to resolution',10,'neg','Median 96 days from service to final payment'),
+      F('#ic-trend','Market position',10,'neg','Billing 4.1x the CMS fee-schedule rate for this code set'),
+      F('#ic-bed','Operational fit',10,'pos','Avg length of stay 15 days vs 18 authorized'),
+    ],
+  },
+  {
+    key:'lonestar', name:'Lonestar Mental Health', place:'Austin, TX', loc:'IP',
+    rating:26, patients:12, lines:64, allowed:41300, billed:212600,
+    points:[36,34,31,29,30,27,26,26],
+    factors:[
+      F('#ic-shield','Claims reliability',35,'neg','19% of billed amount allowed across 64 lines, all confirmed-tier'),
+      F('#ic-users','Sample confidence',15,'pos','12 distinct patients — above the reliability threshold of 10'),
+      F('#ic-hourglass','Claim-status mix',20,'neg','52% of claims still sitting at the payer past 90 days'),
+      F('#ic-clock','Time to resolution',10,'neg','Median 131 days from service to final payment'),
+      F('#ic-trend','Market position',10,'neg','Billing 4.8x the CMS fee-schedule rate for this code set'),
+      F('#ic-bed','Operational fit',10,'neg','Avg length of stay 24 days vs 18 authorized'),
+    ],
+  },
+  {
+    key:'telehealth', name:'Telehealth MH', place:null, loc:'OP',
+    rating:null, patients:2, lines:6, allowed:null, billed:null,
+    points:[],
+    factors:[
+      F('#ic-users','Sample confidence',15,'neg','2 distinct patients in 365 days — below the floor of 3 for any rating'),
+      F('#ic-shield','Claims reliability',35,'neu','6 claim lines on file, too few to separate signal from a single case'),
+    ],
+  },
+];
+
+/**
+ * The alpha prefix IS the policy. Everything below is already on file behind it — the rep
+ * types five characters and the plan identifies itself. Three worked examples, deliberately
+ * spread across the bands so the KPI tiles can be read low / average / high.
+ */
+const POLICIES = {
+  // target = where this plan's volume-weighted rating should land; share = how much of the
+  // book's volume runs on it. NOTHING absolute is authored here — patients, lines, billed,
+  // allowed and collection rates are all derived from the scoped facility set, so the parts
+  // always equal the whole. The six differ on payer, funding, network and plan type, which is
+  // what makes the prompt set change from one search to the next.
+  GGS: {prefix:'GGS', payer:'Anthem Blue Cross of California', payerShort:'Anthem BCC', employer:'Google LLC',
+        funding:'Self-funded', group:'GGS0041', policy:'PPO', network:'OON',
+        target:71, share:0.62, paidRatio:0.90, resolveDays:38},
+  W29: {prefix:'W29', payer:'Aetna', payerShort:'Aetna', employer:'Vanderbilt Univ. Medical Center',
+        funding:'Self-funded', group:'0084217', policy:'PPO', network:'INN',
+        target:45, share:1, paidRatio:0.78, resolveDays:67},
+  110: {prefix:'110', payer:'UnitedHealthcare', payerShort:'UHC', employer:'UPS Airlines',
+        funding:'Fully insured', group:'2290153', policy:'EPO', network:'OON',
+        target:22, share:0.34, paidRatio:0.52, resolveDays:129},
+  YRK: {prefix:'YRK', payer:'Cigna', payerShort:'Cigna', employer:'Walmart Inc.',
+        funding:'Self-funded', group:'3308841', policy:'Open Access Plus', network:'OON',
+        target:58, share:0.47, paidRatio:0.84, resolveDays:52},
+  ZBH: {prefix:'ZBH', payer:'Blue Cross Blue Shield of Texas', payerShort:'BCBSTX', employer:'Dell Technologies',
+        funding:'Fully insured', group:'5583910', policy:'HMO', network:'OON',
+        target:15, share:0.19, paidRatio:0.41, resolveDays:148},
+  QDX: {prefix:'QDX', payer:'Oscar Health', payerShort:'Oscar', employer:'Stripe, Inc.',
+        funding:'Fully insured', group:'QDX21107', policy:'EPO', network:'OON',
+        target:30, share:0.07, paidRatio:0.58, resolveDays:94},
+  MHN: {prefix:'MHN', payer:'Health Net', payerShort:'Health Net', employer:'CalPERS',
+        funding:'Fully insured', group:'7714002', policy:'PPO', network:'INN',
+        target:37, share:0.55, paidRatio:0.71, resolveDays:81},
+};
+/**
+ * A policy's rating cannot be an independent number: if the bar says 22 while the ranked
+ * facilities read 68 down to 33, one of them is lying. So the facility table holds BASE
+ * behaviour and each policy shifts it — a plan that pays badly pays badly everywhere — and
+ * the bar's number is then the volume-weighted mean of that shifted set. The pair is
+ * reconciled by construction, not by hand.
+ */
+const clampR = v => Math.max(4, Math.min(96, Math.round(v)));
+const _polCache = {};
+function polFor(prefix){
+  const base = POLICIES[(prefix || '').toUpperCase()] || POLICIES.W29;
+  if(_polCache[base.prefix]) return _polCache[base.prefix];
+  const rated = FACILITIES.filter(f => f.rating !== null);
+  const wsum = rated.reduce((t,f) => t + f.patients, 0);
+  const baseMean = rated.reduce((t,f) => t + f.rating * f.patients, 0) / wsum;
+  const shift = base.target - baseMean;
+  const ratio = base.target / baseMean;
+  const sh = base.share;
+
+  // Polarity belongs to the METRIC, not to the factor's direction: allowed/paid/collected
+  // shares fall as a policy weakens, denials and aging rise. Volumes inside the prose scale
+  // by the policy's share for the same reason the ratings scale — a detail that quotes the
+  // book-wide figure on a third-of-the-book policy is the parts contradicting the whole.
+  const INVERSE = /(denial|denied|write|written off|at payer|past \d+|aging|unresolved|appeal)/i;
+  const scalePct = (detail) => detail.replace(/(\d+(?:\.\d+)?)%([^.;]*)/g, (m, num, tail) => {
+    const k = INVERSE.test(tail) || INVERSE.test(detail.slice(0, detail.indexOf(m))) ? 1 / ratio : ratio;
+    return Math.max(1, Math.min(99, Math.round(parseFloat(num) * k))) + '%' + tail;
+  });
+  const scaleVol = (detail) => detail.replace(/(\d+)(\s+(?:claim )?lines)/g,
+    (m, num, tail) => Math.max(1, Math.round(parseInt(num, 10) * sh)) + tail);
+
+  const facs = FACILITIES.map(f => {
+    const patients = Math.max(1, Math.round(f.patients * sh));
+    const lines = Math.max(1, Math.round(f.lines * sh));
+    const billed = f.billed === null ? null : Math.round(f.billed * sh / 100) * 100;
+    const allowed = f.allowed === null ? null
+      : Math.min(Math.round(f.allowed * sh * ratio / 100) * 100, Math.round(billed * 0.92));
+    // Below the floor of 3 there is no rating to show, whatever the base table says.
+    const ratable = f.rating !== null && patients >= 3;
+    const factors = f.factors.map(x => {
+      let detail = scaleVol(scalePct(x.detail));
+      let dir = x.dir;
+      if(/distinct patients/.test(x.detail)){
+        detail = /floor of 3/.test(x.detail)
+          ? `${patients} distinct patient${patients === 1 ? '' : 's'} in 365 days — below the floor of 3 for any rating`
+          : `${patients} distinct patients — ${patients >= 10 ? 'above' : 'below'} the reliability threshold of 10`;
+        dir = patients >= 10 ? 'pos' : 'neg';
+      }
+      return Object.assign({}, x, {detail, dir});
+    });
+    return Object.assign({}, f, {
+      patients, lines, billed, allowed, factors,
+      rating: ratable ? clampR(f.rating + shift) : null,
+      points: ratable ? f.points.map(v => clampR(v + shift)) : [],
+    });
+  });
+
+  // Collection rate is a per-facility, per-policy fact, so it is derived here and nowhere else:
+  // the base table's rates are re-centred on this policy's own paid ratio, and the policy's
+  // rate is then the allowed-weighted mean of the scoped set. Any consumer reading
+  // PAID_RATIO directly would be quoting the book-wide figure on a single policy.
+  const paidBase = facs.filter(f => f.rating !== null && PAID_RATIO[f.key] !== null && PAID_RATIO[f.key] !== undefined);
+  const paidMean = paidBase.reduce((t,f) => t + PAID_RATIO[f.key] * f.patients, 0)
+    / (paidBase.reduce((t,f) => t + f.patients, 0) || 1);
+  facs.forEach(f => {
+    const raw = PAID_RATIO[f.key];
+    f.paidRatio = (raw === null || raw === undefined) ? null
+      : Math.max(0.05, Math.min(0.99, raw * (base.paidRatio / (paidMean || 1))));
+  });
+
+  // A policy thin enough that NO facility clears the 3-patient floor has no rating — not a
+  // zero, not a NaN. Every consumer has to handle null, the same way the cards already do.
+  const r2 = facs.filter(f => f.rating !== null);
+  const pw = r2.reduce((t,f) => t + f.patients, 0);
+  const rating = pw > 0 ? Math.round(r2.reduce((t,f) => t + f.rating * f.patients, 0) / pw) : null;
+  const sum = (key) => facs.reduce((t,f) => t + (f[key] || 0), 0);
+  const paidSet = facs.filter(f => f.paidRatio !== null && f.allowed);
+  const out = Object.assign({}, base, {
+    facs, rating,
+    patients: sum('patients'), lines: sum('lines'), billed: sum('billed'), allowed: sum('allowed'),
+    paidRatio: paidSet.length
+      ? paidSet.reduce((t,f) => t + f.paidRatio * f.allowed, 0) / paidSet.reduce((t,f) => t + f.allowed, 0)
+      : base.paidRatio,
+  });
+  _polCache[base.prefix] = out;
+  return out;
+}
+/**
+ * Who an answer is ABOUT. With a facility named it is that facility; with only a prefix there
+ * is no selection on screen, so the subject must be the ranked leader — otherwise a question
+ * explicitly about which facility gets answered with whichever key state happened to hold.
+ */
+function subjectFac(pol, facilityKey){
+  if(facilityKey){
+    const one = pol.facs.find(f => f.key === facilityKey);
+    if(one) return one;
+  }
+  const rated = pol.facs.filter(f => f.rating !== null);
+  return rated.length ? rated.reduce((p,q) => q.rating > p.rating ? q : p) : pol.facs[0];
+}
+
+/** "A, B and C" — never "A and B and C". */
+const listAnd = (items) => items.length < 3
+  ? items.join(' and ')
+  : items.slice(0, -1).join(', ') + ' and ' + items[items.length - 1];
+
+/**
+ * The subject of an answer is the ranked leader, which by construction is rising — so a
+ * "this has been sliding" prompt keyed to the subject can never fire. It is keyed to the
+ * facility that HAS slid instead, and the branch names that same facility.
+ */
+function steepestDecline(pol){
+  const drop = f => f.points[0] - f.points[f.points.length - 1];
+  const cands = pol.facs.filter(f => f.rating !== null && f.points.length >= 3 && drop(f) >= 6);
+  return cands.length ? cands.reduce((p,q) => drop(q) > drop(p) ? q : p) : null;
+}
+
+/** "UPS Airlines's" is wrong; "UPS Airlines'" is not. */
+const poss = (name) => name + (/s$/i.test(name) ? "'" : "'s");
+
+/** Autopopulated search context — already on file in the backend, so the rep never types it. */
+const CTX = {
+  nashville:  {payer:'Aetna', employer:'Vanderbilt Univ. Medical Center', funding:'Self-funded', group:'0084217', policy:'PPO', network:'INN'},
+  pacific:    {payer:'Aetna', employer:'Boeing', funding:'Self-funded', group:'4471203', policy:'PPO', network:'OON'},
+  tnbh:       {payer:'Aetna', employer:'HCA Healthcare', funding:'Self-funded', group:'0117744', policy:'PPO', network:'OON'},
+  kentucky:   {payer:'Aetna', employer:'UPS Airlines', funding:'Fully insured', group:'2290153', policy:'EPO', network:'OON'},
+  firstresp:  {payer:'Aetna', employer:'CalPERS', funding:'Fully insured', group:'7714002', policy:'PPO', network:'INN'},
+  lonestar:   {payer:'Aetna', employer:'Dell Technologies', funding:'Self-funded', group:'5583910', policy:'PPO', network:'OON'},
+  telehealth: {payer:'Aetna', employer:null, funding:null, group:null, policy:null, network:'OON'},
+};
+
+/** Share of allowed the payer has actually paid, per facility — drives the scoped KPI tiles. */
+const PAID_RATIO = {nashville:0.93, pacific:0.81, tnbh:0.62, kentucky:0.74, firstresp:0.69, lonestar:0.48, telehealth:null};
+
+const CTX_FIELDS = [
+  {key:'payer', label:'Payer', icon:'#ic-shield', mono:false},
+  {key:'employer', label:'Employer', icon:'#ic-case', mono:false},
+  {key:'funding', label:'Funding', icon:'#ic-bank', mono:false},
+  {key:'group', label:'Group #', icon:'#ic-case', mono:true},
+  {key:'policy', label:'Policy type', icon:'#ic-shield', mono:false},
+  {key:'network', label:'Network', icon:'#ic-building', mono:true},
+];
+
+const TICKER = [
+  {key:'nashville', name:'Nashville Mental Health', rating:68, delta:'▲ +6.4 pts', deltaHex:T.ok, lines:186, place:'Nashville, TN', loc:'Both', points:[54,57,55,60,62,61,66,68]},
+  {key:'tnbh', name:'Tennessee Behavioral Health', rating:47, delta:'▲ +4.1 pts', deltaHex:T.ok, lines:96, place:'Chattanooga, TN', loc:'IP', points:[38,42,44,49,51,48,49,47]},
+  {key:'california', name:'California Mental Health', rating:58, delta:'▲ +3.7 pts', deltaHex:T.ok, lines:142, place:'San Diego, CA', loc:'Both', points:[51,52,50,54,55,56,57,58]},
+  {key:'dallas', name:'Dallas Mental Health', rating:44, delta:'◆ +0.1 pts', deltaHex:T.ink400, lines:73, place:'Dallas, TX', loc:'OP', points:[45,43,44,46,44,43,44,44]},
+  {key:'kentucky', name:'Kentucky Wellness Center', rating:41, delta:'▼ -2.8 pts', deltaHex:T.danger, lines:38, place:'Louisville, KY', loc:'Both', points:[47,45,44,46,43,41,42,41]},
+  {key:'losangeles', name:'Los Angeles Mental Health', rating:36, delta:'NEW', deltaHex:T.info, lines:29, place:'Los Angeles, CA', loc:'OP', points:[33,34,35,34,36,35,36,36]},
+  {key:'firstresp', name:'First Responders of California', rating:33, delta:'▼ -5.2 pts', deltaHex:T.danger, lines:121, place:'Sacramento, CA', loc:'OP', points:[44,42,39,37,36,34,35,33]},
+  {key:'lonestar', name:'Lonestar Mental Health', rating:26, delta:'▼ -7.9 pts', deltaHex:T.danger, lines:64, place:'Austin, TX', loc:'IP', points:[36,34,31,29,30,27,26,26]},
+];
+
+const WINDOWS = [
+  {days:30, patients:4},
+  {days:60, patients:6},
+  {days:90, patients:8},
+  {days:180, patients:11},
+  {days:365, patients:16},
+];
+
+const PERIODS = ['P-8','P-7','P-6','P-5','P-4','P-3','P-2','Now'];
+
+/** Chip catalogue. `weight` = how much the numbers make this worth asking; the top one is flagged. */
+/**
+ * Prompts are derived from the plan's own attributes: a self-funded OON EPO raises different
+ * questions than an in-network PPO, so the six offered are never the same six twice.
+ */
+function chipsFor(pol, scoped, subject){
+  const thin = pol.patients < 10;
+  const slider = steepestDecline(pol);
+  const narrow = pol.policy === 'EPO' || pol.policy === 'HMO';
+  const anyRated = pol.facs.some(f => f.rating !== null);
+  const nothingStrong = anyRated && !pol.facs.some(f => f.rating !== null && f.rating >= 50);
+
+  // Every candidate is conditional on something this search actually returned. Six are shown,
+  // most specific first, so no two policies offer the same six.
+  const candidates = [
+    scoped
+      ? {id:'explain', icon:'ic-spark', label:'Why does this facility score what it does?'}
+      : anyRated
+        ? {id:'ranks', icon:'ic-trend', label:'Which of our facilities does this policy pay best?'}
+        : {id:'explain', icon:'ic-spark', label:'What do we actually know about this policy?'},
+    thin && {id:'thin', icon:'ic-users', label:'Is there even enough history to trust this?'},
+    nothingStrong && !thin && {id:'takeit', icon:'ic-bed', label:'Should we be taking this policy at all?'},
+    anyRated && !nothingStrong && {id:'placement', icon:'ic-bed', label: scoped ? 'Should I place this patient here?' : 'Where should this patient go?'},
+    narrow && {id:'plantype', icon:'ic-lock', label: pol.policy + ' plan — is there any path to payment?'},
+    pol.network === 'OON'
+      ? {id:'network', icon:'ic-shield', label:'We are out of network here — what does that cost us?'}
+      : {id:'network', icon:'ic-shield', label:'In network on this plan — are we billing the full rate?'},
+    pol.funding === 'Self-funded'
+      ? {id:'funding', icon:'ic-case', label:'Self-funded plan — who actually decides this claim?'}
+      : {id:'funding', icon:'ic-case', label:'Fully insured — how much room is there to negotiate?'},
+    slider && {id:'slide', icon:'ic-trend', label: slider.name + ' has been sliding — what changed?'},
+    {id:'speed', icon:'ic-clock', label: pol.resolveDays > 100 ? 'This pays slowly — how slowly?' : 'How long until we see the money?'},
+    !narrow && {id:'pay', icon:'ic-shield', label:'What does this policy actually pay us?'},
+    {id:'improve', icon:'ic-hourglass', label:'What would move this rating?'},
+  ].filter(Boolean);
+
+  const seen = {};
+  return candidates.filter(c => seen[c.id] ? false : (seen[c.id] = true)).slice(0, 6);
+}
+
+function lc(s){
+  if(!s) return s;
+  const c = s.charAt(0);
+  if(c >= 'A' && c <= 'Z' && s.charAt(1) === s.charAt(1).toLowerCase()) return c.toLowerCase() + s.slice(1);
+  return s;
+}
+function fx(fac, label){ for(const x of fac.factors) if(x.label === label) return x; return null; }
+function dirWord(d){ return d === 'pos' ? 'reads positive' : d === 'neg' ? 'reads negative' : 'reads flat'; }
+function byWeight(list){ return list.slice().sort((p,q) => q.weight - p.weight); }
+function sampleHedge(fac){
+  const t = tierFor(fac.patients);
+  if(t === 'full') return `Sample confidence is ${fac.patients} distinct patients across ${fac.lines} lines — enough to read the allowed rate as signal.`;
+  if(t === 'thin') return `Sample confidence is only ${fac.patients} distinct patients — above the floor of 3 but under the threshold of 10, so treat every number here as directional.`;
+  return `Sample confidence is ${fac.patients} distinct patients — below the floor of 3, so nothing here should be read as a rate.`;
+}
+
+/**
+ * Every sentence is DERIVED from the selected facility's own factors[], patients, lines and points[].
+ * Nothing is hard-coded per facility — the explainer can never contradict the card above it.
+ */
+function aiContent(id, fac, blind, pol){
+  const n = fac.name;
+  const pct = fac.rating;
+  const v = pct === null ? 'unrated' : verdictOf(pct).toLowerCase();
+  const pos = byWeight(fac.factors.filter(x => x.dir === 'pos'));
+  const neg = byWeight(fac.factors.filter(x => x.dir === 'neg'));
+  const neu = byWeight(fac.factors.filter(x => x.dir === 'neu'));
+  const rel = fx(fac, 'Claims reliability');
+  const amountLine = (!blind && fac.allowed !== null)
+    ? ` In this window that is ${usd0(fac.allowed)} allowed against ${usd0(fac.billed)} billed.`
+    : '';
+
+  // UNRATED owns its own sentences. Threading a null rating through the rated templates is what
+  // produces "rates — … a unrated read" and a "holds the score down" clause on a card that has no
+  // score — and a neutral factor promoted under SIGNALS is the opposite of restraint. So: no
+  // signals, ever, and no language that implies a number exists.
+  if(fac.rating === null){
+    const ratedSet = pol.facs.filter(f => f.rating !== null);
+    if(!ratedSet.length){
+      // Nothing on this policy is rateable, so there is no comparison, no leader and no
+      // number to offer for any question asked of it.
+      return {
+        tldr: `There is nothing to rate on this policy yet. ${pol.patients} distinct patients across ${pol.lines} lines in 365 days, spread over ${pol.facs.length} facilities — not one of them reaches the floor of 3 patients, so no facility here has a rating and neither does the policy.`,
+        signals: [`What we do know is the plan itself: ${pol.payer}, ${pol.funding.toLowerCase()}, ${pol.policy} ${pol.network}. That is enough to reason about coverage, just not about our history.`],
+        risks: [`Any number produced from this would be one or two cases wearing a percentage. Ask a biller who has worked this payer.`,
+                `${pol.network === 'OON' ? 'Out of network with no track record is the highest-risk combination on this screen.' : 'In network, so the contracted rate applies even with no history to check it against.'}`],
+        footer: 'Ratings are suppressed below the sample floor rather than estimated.',
+      };
+    }
+    const best = ratedSet.reduce((p,q) => q.rating > p.rating ? q : p);
+    const tldr = id === 'compare'
+      ? `${n} cannot be ranked against the rest of this payer set — ${fac.patients} distinct patients in 365 days is below the floor of 3, so there is no rating to compare. ${best.name} leads the set at ${best.rating}.`
+      : id === 'speed'
+        ? `There is no readable resolution picture for ${n} on this policy — ${fac.lines} claim lines across ${fac.patients} patients is not enough to time anything.`
+        : id === 'pay'
+          ? `${n} has no rateable payment history for this policy: ${fac.patients} distinct patients in 365 days. Any percentage of charges would be one case wearing a decimal.`
+        : id === 'placement'
+          ? `We cannot answer this from data. ${n} has ${fac.patients} distinct patients on this payer in 365 days — below the floor of 3, so there is no read to place against. Ask a biller before committing.`
+        : id === 'improve'
+          ? `This is not a scoring problem, it is a volume problem. ${n} needs patients before any factor can be worked: ${fac.patients} in 365 days is below the floor of 3.`
+          : `${n} has no rating. ${fac.patients} distinct patients in the last 365 days is below the floor of 3, so there is no honest number to put on this facility for this payer.`;
+    return {
+      tldr,
+      signals: [],
+      risks: [
+        `${fac.patients} patients across ${fac.lines} claim lines. Any percentage built on that would swing several points on a single case.`,
+        'Reaching further back would produce a number, not evidence. Ask a biller before placing here.',
+      ],
+      footer: 'No score is shown because none can be justified from this sample.',
+    };
+  }
+
+  const signalsFrom = (pos.length ? pos : neu).map(x =>
+    `${x.label} carries ${x.weight}% of the weight and ${dirWord(x.dir)} — ${lc(x.detail)}.`);
+  const risksFrom = neg.map(x =>
+    `${x.label} carries ${x.weight}% and ${dirWord(x.dir)} — ${lc(x.detail)}.`);
+
+  if(id === 'explain'){
+    const lead = rel
+      ? `Claims reliability is 35% of the weighting and ${dirWord(rel.dir)}: ${lc(rel.detail)}.`
+      : 'There is no reliability reading for this slice.';
+    const drag = neg.length
+      ? ` What holds the score down is ${lc(neg[0].label)} — ${lc(neg[0].detail)}.`
+      : ' No factor reads negative in this slice.';
+    return {
+      tldr: `${n} rates ${pct === null ? '—' : pct} on the proposed model — a ${v} read. ${lead}${amountLine}${drag}`,
+      signals: signalsFrom.length ? signalsFrom : ['Nothing in this slice reads positive.'],
+      risks: risksFrom.concat(tierFor(fac.patients) === 'full' ? [] : [sampleHedge(fac)]),
+      footer: 'Derived from the factors shown on the card above, in the window resolved at the top. Weighting is the proposed v2 model, not the live rating.',
+    };
+  }
+
+  if(id === 'placement'){
+    const t = tierFor(fac.patients);
+    const lead = pct >= 50
+      ? `Yes — ${n} is a ${v} placement for this policy at ${pct} on the proposed model.`
+      : pct >= 30
+        ? `With eyes open. ${n} reads ${v} at ${pct}: placeable, but not one to assume.`
+        : `Not without a conversation. ${n} reads ${v} at ${pct} for this policy.`;
+    return {
+      tldr: `${lead}${amountLine}${neg.length ? ` The thing to know before you commit is ${lc(neg[0].label).toLowerCase()} — ${lc(neg[0].detail)}.` : ''}`,
+      signals: signalsFrom.length ? signalsFrom.slice(0,2) : ['Nothing in this slice reads positive.'],
+      risks: risksFrom.slice(0,2).concat(t === 'full' ? [] : [sampleHedge(fac)]),
+      footer: 'A placement read, not an authorization — benefits still have to be verified on the case.',
+    };
+  }
+
+  if(id === 'pay'){
+    const ratio = fac.allowed !== null ? Math.round((fac.allowed / fac.billed) * 100) : null;
+    const rate = fx(fac, 'Market position');
+    const rateSentence = rate ? ` ${lc(rate.detail).charAt(0).toUpperCase()}${lc(rate.detail).slice(1)}.` : '';
+    return {
+      tldr: blind
+        ? `Amounts are withheld for your role, so this answers in shape rather than dollars: ${n} allows a ${v} share of what we bill this payer, rating ${pct}.${rateSentence}`
+        : `${n} has ${usd0(fac.allowed)} allowed against ${usd0(fac.billed)} billed for this payer — ${ratio}% of charges, a ${v} read at ${pct}.${rateSentence}`,
+      signals: signalsFrom.slice(0,2),
+      risks: (risksFrom.length ? risksFrom.slice(0,1) : []).concat([sampleHedge(fac)]),
+      footer: 'Allowed is what the payer agreed to, not what has landed — see the resolution question for that.',
+    };
+  }
+
+  if(id === 'speed'){
+    const res = fx(fac, 'Time to resolution');
+    const aging = fx(fac, 'Claim-status mix');
+    const paid = fac.paidRatio;
+    return {
+      tldr: `${res ? lc(res.detail).replace(/^median/i,'Median') : 'Resolution time is not on file for this slice'} at ${n}.${aging ? ` ${lc(aging.detail).charAt(0).toUpperCase()}${lc(aging.detail).slice(1)}.` : ''}${paid !== null && paid !== undefined ? ` ${Math.round(paid*100)}% of what was allowed has actually landed.` : ''}`,
+      signals: [res, aging].filter(Boolean).map(x => `${x.label} carries ${x.weight}% of the weight and ${dirWord(x.dir)} — ${lc(x.detail)}.`),
+      risks: risksFrom.filter(r => !/resolution|status/i.test(r)).slice(0,1).concat([sampleHedge(fac)]),
+      footer: 'Aging and resolution are two of the six factors; together they are 30% of the proposed weighting.',
+    };
+  }
+
+  if(id === 'ranks'){
+    const rated = pol.facs.filter(f => f.rating !== null).sort((a,b) => b.rating - a.rating);
+    const top = rated.slice(0, 5);
+    if(!top.length) return aiContent('explain', fac, blind, pol);
+    const best = top[0];
+    const strong = top.filter(f => f.rating >= 50);
+    const unrated = pol.facs.filter(f => f.rating === null);
+    return {
+      tldr: `On ${poss(pol.employer)} ${pol.payer} plan, ${best.name} is where this policy pays best — ${best.rating} on ${best.patients} distinct patients across ${best.lines} lines. ${
+        strong.length > 1 ? `${strong.length} of our facilities clear the strong band on it; the rest read watch or below.`
+        : strong.length === 1 ? 'It is the only one that clears the strong band on it; the rest read watch or below.'
+        : `Nothing we run clears the strong band on this policy — ${best.rating} is the best read available, which is ${best.rating >= 30 ? 'watch, not strong' : 'still weak'}.`}`,
+      signals: [
+        (() => {
+          // "Leads on X" is a claim about the METRIC, not about the overall score. The
+          // top-rated facility wins on the weighted six factors and can still sit third on
+          // any one of them, so the leader of the cited factor is looked up rather than assumed.
+          const topFactor = byWeight(best.factors.filter(x => x.dir === 'pos'))[0] || best.factors[0];
+          const pctIn = (d) => { const m = d.match(/(\d+(?:\.\d+)?)%/); return m ? parseFloat(m[1]) : null; };
+          const field = pol.facs.filter(f => f.rating !== null)
+            .map(f => ({f, x: f.factors.find(y => y.label === topFactor.label)}))
+            .filter(o => o.x && pctIn(o.x.detail) !== null);
+          const leader = field.length ? field.reduce((p,q) => pctIn(q.x.detail) > pctIn(p.x.detail) ? q : p) : null;
+          if(!leader || leader.f.key === best.key || pctIn(topFactor.detail) === null){
+            return `${best.name} leads on ${lc(topFactor.label)} — ${lc(topFactor.detail)}.`;
+          }
+          return `${best.name}'s strongest factor is ${lc(topFactor.label)} — ${lc(topFactor.detail)}. ${leader.f.name} actually tops that one at ${Math.round(pctIn(leader.x.detail))}%, but ranks lower overall across the other five.`;
+        })(),
+        (() => {
+          const spread = best.rating - top[top.length-1].rating;
+          // Three-way: a single sub-threshold row must not be described in copy written for
+          // the case where none of them clear.
+          const under = top.filter(f => f.patients < 10);
+          const hedge = under.length === 0
+            ? ', which is a real difference, not noise.'
+            : under.length === top.length
+              ? ' — but every one of them is under the reliability threshold of 10 patients, so treat the order as directional and the gap as unproven.'
+              : ` — though ${under.length} of the ${top.length} shown (${listAnd(under.map(f => f.name))}) sits under the 10-patient threshold, so ${under.length === 1 ? 'its placement is' : 'those placements are'} directional.`;
+          return `${rated.length} facilit${rated.length === 1 ? 'y' : 'ies'} ${rated.length === 1 ? 'has' : 'have'} enough volume on this policy to rank at all${rated.length > top.length ? `, and the ${top.length} shown are the strongest of them` : ''}; the spread from ${best.rating} to ${top[top.length-1].rating} is ${spread} points${hedge}`;
+        })(),
+      ],
+      risks: [`${top[top.length-1].name} is the weakest of the ${top.length} shown at ${top[top.length-1].rating} — ${lc((byWeight(top[top.length-1].factors.filter(x => x.dir === 'neg'))[0] || top[top.length-1].factors[0]).detail)}.`]
+        .concat(unrated.length
+          ? [`${listAnd(unrated.map(f => `${f.name} (${f.patients})`))} cannot be ranked at all — each is under the floor of 3 distinct patients in 365 days.`]
+          : []),
+      ranks: top,
+      ranksTitle: `Top ${top.length} facilities on this policy`,
+      footer: 'Ranked on the proposed v2 model within this payer only. Cross-payer ranking is a different question.',
+    };
+  }
+
+  if(id === 'network'){
+    const oon = pol.network === 'OON';
+    const share = Math.round((pol.allowed / pol.billed) * 100);
+    return {
+      tldr: oon
+        ? `Out of network on ${pol.payer}, so there is no contracted rate to fall back on: ${share}% of what we bill on this policy gets allowed${blind ? '' : ` — ${usd0(pol.allowed)} of ${usd0(pol.billed)}`}. The ${100 - share}% gap is the cost of being out of network, and it is not appealable.`
+        : `In network on ${pol.payer}, so the allowed amount is contractually set: ${share}% of billed charges get allowed on this policy${blind ? '' : ` — ${usd0(pol.allowed)} of ${usd0(pol.billed)}`}. Anything under that is a coding or documentation problem, not a rate problem.`,
+      signals: [oon
+        ? `${Math.round(pol.paidRatio * 100)}% of what was allowed has actually landed, so the OON discount is the loss — collection on the allowed amount is not the weak link.`
+        : `${Math.round(pol.paidRatio * 100)}% of the contracted allowed amount has landed, which is the number to hold the payer to.`],
+      risks: oon
+        ? [`OON balances land on the patient unless a single-case agreement is in place. Confirm one exists before the admit.`,
+           `${pol.policy} out of network means the member's own benefit may cap what is payable regardless of what we bill.`]
+        : [`In-network rates are the ceiling. There is no upside to bill above them, only denial risk.`],
+      footer: `Network status is read off the plan on file for prefix ${pol.prefix} — verify on the case before you quote anything to the patient.`,
+    };
+  }
+
+  if(id === 'funding'){
+    const self = pol.funding === 'Self-funded';
+    return {
+      tldr: self
+        ? `${pol.employer} self-funds this plan — ${pol.payer} only administers it. The money is the employer's, which means exceptions and single-case agreements are decided by a plan administrator, not by a payer rate sheet.`
+        : `This is a fully insured ${pol.payer} plan, so ${pol.payer} carries the risk and sets the terms. There is no employer to appeal to and no plan document to argue from — the rate sheet is the rate sheet.`,
+      signals: self
+        ? [`Self-funded plans are where out-of-network exceptions are actually winnable: the decision-maker has a budget, not a contract, to protect.`,
+           `Median ${pol.resolveDays} days to resolution on this policy — administrators move slower than carriers, so build that into the expectation you set.`]
+        : [`Fully insured means the terms are filed with the state, so what is payable is knowable up front — median ${pol.resolveDays} days to resolution on this policy.`],
+      risks: self
+        ? [`No contract means no guaranteed rate. ${Math.round((pol.allowed / pol.billed) * 100)}% of billed is what has actually been allowed, and next case can differ.`]
+        : [`Nothing to negotiate. If the plan does not cover the level of care, volume will not change that.`],
+      footer: `Funding type comes from the plan record behind prefix ${pol.prefix}, not from the member card.`,
+    };
+  }
+
+  if(id === 'plantype'){
+    const narrow = pol.policy === 'EPO' || pol.policy === 'HMO';
+    const share = Math.round((pol.allowed / pol.billed) * 100);
+    return {
+      tldr: narrow
+        ? `${pol.policy} plans generally do not pay out of network at all, and this one is ${pol.network}. That it pays anything — ${share}% of billed allowed on ${pol.lines} lines — means these went through as exceptions, not as benefits.`
+        : `${pol.policy} on ${pol.payer}: out-of-network benefits exist, so there is a real path to payment. ${share}% of billed has been allowed across ${pol.lines} lines on this policy.`,
+      signals: narrow
+        ? [`${Math.round(pol.paidRatio * 100)}% of the allowed amount landed, so when an exception is granted it does get paid.`]
+        : [`${Math.round(pol.paidRatio * 100)}% of allowed has landed, and median ${pol.resolveDays} days to resolution.`],
+      risks: narrow
+        ? [`Assume no coverage until an authorization says otherwise. ${pol.patients} patients in the window is a thin base to predict an exception from.`,
+           `Median ${pol.resolveDays} days to resolution — the slowest pattern in the book. Cash will be late even when it comes.`]
+        : [`Out-of-network benefits still carry the member's deductible and coinsurance, which is the patient's exposure, not the payer's.`],
+      footer: `Plan type is on file behind prefix ${pol.prefix}. Benefits still have to be verified per case.`,
+    };
+  }
+
+  if(id === 'thin'){
+    return {
+      tldr: `No — not to lean on. ${pol.patients} distinct patients across ${pol.lines} lines is the entire history on this policy, and the threshold for a reliable read is 10. What the number gives you is a direction, not a rate.`,
+      signals: [`${fac.name} carries the most of it — ${fac.patients} patients across ${fac.lines} lines — so if you trust any part of this, trust that part.`],
+      risks: [`Any percentage computed on ${pol.patients} patients moves several points when one case resolves. Quote a range, never a figure.`,
+              `The window already reached back as far as it goes and still landed here. More time will not fix this; more volume will.`],
+      footer: tierFor(pol.patients) === 'none' ? 'Below the floor of 3 — no rating should be inferred at all.' : 'Directional only. Verify benefits on the case.',
+    };
+  }
+
+  if(id === 'takeit'){
+    const ratedT = pol.facs.filter(f => f.rating !== null).sort((a,b) => b.rating - a.rating);
+    if(!ratedT.length) return aiContent('explain', fac, blind, pol);
+    const bestF = ratedT[0];
+    return {
+      tldr: `Only with the money question settled first. Nothing we run clears the strong band on ${poss(pol.employer)} ${pol.payer} plan — ${bestF.name} is the best of it at ${bestF.rating}, which is ${bestF.rating >= 30 ? 'watch' : 'weak'}. The policy allows ${Math.round((pol.allowed / pol.billed) * 100)}% of what we bill and takes a median ${pol.resolveDays} days to resolve.`,
+      signals: [`${bestF.name} is where the exposure is smallest if you do take it — ${lc((byWeight(bestF.factors.filter(x => x.dir === 'pos'))[0] || bestF.factors[0]).detail)}.`],
+      risks: [`${Math.round(pol.paidRatio * 100)}% of the allowed amount does land, so the loss is the allowed rate itself, not collections — there is nothing to work.`,
+              pol.funding === 'Self-funded'
+                ? 'Self-funded, so a single-case agreement is the only real lever. Get it in writing before the admit.'
+                : 'Fully insured, so the rate is filed with the state and there is nothing to negotiate.'],
+      footer: 'A business read on the policy, not a clinical one. Admission decisions are not made here.',
+    };
+  }
+
+  if(id === 'slide'){
+    const sf = steepestDecline(pol) || fac;
+    const sneg = byWeight(sf.factors.filter(x => x.dir === 'neg'));
+    const sp = sf.points;
+    const worstStep = (() => { let d = 0, at = 1; for(let i = 1; i < sp.length; i++){ const x = sp[i] - sp[i-1]; if(x < d){ d = x; at = i; } } return {d, at}; })();
+    return {
+      tldr: `${sf.name} has given back ${sp[0] - sp[sp.length-1]} points across ${sp.length} periods, from ${sp[0]} to ${sp[sp.length-1]}. The steepest single drop was ${Math.abs(worstStep.d)} points at P-${sp.length - worstStep.at}${sneg.length ? `, and the factor carrying it is ${lc(sneg[0].label)} — ${lc(sneg[0].detail)}` : ''}.`,
+      signals: sneg.slice(0,2).map(x => `${x.label} is ${x.weight}% of the weighting and reads negative — ${lc(x.detail)}.`),
+      risks: [`The last three periods read ${sp.slice(-3).join(', ')}. ${sp[sp.length-1] < sp[sp.length-2] ? 'It has not bottomed yet.' : 'It may be flattening, but one period is not a floor.'}`],
+      footer: 'The series is the proposed rating recomputed per period, not a claims count.',
+    };
+  }
+
+  if(id === 'compare'){
+    const rated = pol.facs.filter(f => f.rating !== null);
+    const best = rated.reduce((p,q) => q.rating > p.rating ? q : p);
+    const worst = rated.reduce((p,q) => q.rating < p.rating ? q : p);
+    const unrated = pol.facs.filter(f => f.rating === null);
+    const gap = pct === null ? null : pct - best.rating;
+    const sig = [];
+    sig.push(`${best.name} is the safest placement in this payer set: rating ${best.rating} on ${best.patients} distinct patients across ${best.lines} lines.`);
+    if(fac.key === best.key){
+      sig.push(`${n} is that facility — nothing in this result beats it on the proposed model.`);
+    } else {
+      sig.push(`${n} sits ${Math.abs(gap)} points ${gap > 0 ? 'above' : 'below'} it at ${pct}${pos.length ? `, carried by ${lc(pos[0].label)}` : ''}.`);
+    }
+    const rsk = [`${worst.name} is the weakest at ${worst.rating} — ${lc((byWeight(worst.factors.filter(x => x.dir === 'neg'))[0] || worst.factors[0]).detail)}.`];
+    if(unrated.length) rsk.push(`${unrated.map(f => f.name).join(' and ')} cannot be ranked at all — ${unrated[0].patients} patients in 365 days is below the sample floor.`);
+    return {
+      tldr: fac.key === best.key
+        ? `Against the rest of this payer set, ${n} is the top of it at ${pct} — nothing here beats it on the proposed model. ${worst.name} trails at ${worst.rating}.`
+        : `Against the rest of this payer set, ${n} trails the strongest facility by ${Math.abs(gap)} points at ${pct}. ${best.name} leads at ${best.rating}; ${worst.name} trails at ${worst.rating}.`,
+      signals: sig,
+      risks: rsk,
+      footer: 'Comparison is within this payer only — cross-payer ranking is a different question.',
+    };
+  }
+
+  if(id === 'improve'){
+    // A lever only exists where a factor reads NEGATIVE. A neutral factor is not a lever, so it must
+    // not be promoted into one — otherwise the sentence names a lever and then says 0% is recoverable.
+    const recoverable = neg.reduce((t,x) => t + x.weight, 0);
+    const hasLever = neg.length > 0;
+    const thin = tierFor(fac.patients) !== 'full';
+    return {
+      tldr: hasLever
+        ? `The lever is ${lc(neg[0].label)}, worth ${neg[0].weight}% of the score on its own — ${lc(neg[0].detail)}. ${recoverable}% of the weighting currently reads negative, so that is the whole recoverable block.${amountLine}`
+        : `Nothing on ${n} reads negative, so there is no lever to pull — only a sample to grow.${thin ? ` At ${fac.patients} patients the score is directional; volume is the only thing that will firm it up.` : ' The score is already resting on the factors we would otherwise be working.'}`,
+      signals: (hasLever
+        ? [`${neg.map(x => lc(x.label)).join(', ')} together carry ${recoverable}% and all read negative — the largest recoverable block.`]
+        : []).concat(pos.length
+        ? [`${pos[0].label} at ${pos[0].weight}% already reads positive, so effort spent there returns least — ${lc(pos[0].detail)}.`]
+        : []),
+      risks: (thin ? [sampleHedge(fac)] : []).concat(neu.length
+        ? [`${neu[0].label} is neutral today — ${lc(neu[0].detail)} — but a drift would start to cost.`]
+        : []),
+      footer: 'Ranked by weight recoverable per unit of effort, not by size of the factor.',
+    };
+  }
+
+  const p = fac.points;
+  if(p.length < 2){
+    return {
+      tldr: `${n} has no readable series — ${fac.lines} claim lines over the period is not enough to plot a trend, let alone read one.`,
+      signals: [`${fac.patients} distinct patients in 365 days. A line drawn through this would be a line drawn through noise.`],
+      risks: ['No trend can be shown, and none should be inferred from the absence of one.'],
+      footer: 'Series suppressed below the sample floor.',
+    };
+  }
+  const first = p[0], last = p[p.length - 1];
+  const net = last - first;
+  const tail = p.slice(-3);
+  const flat = Math.max.apply(null, tail) - Math.min.apply(null, tail) <= 3;
+  let maxStep = 0, maxAt = 1;
+  for(let i = 1; i < p.length; i++){ const d = Math.abs(p[i] - p[i-1]); if(d > maxStep){ maxStep = d; maxAt = i; } }
+  return {
+    tldr: `${n} has moved from ${first} to ${last} across ${p.length} periods — a net ${net >= 0 ? '+' : ''}${net} points. The last three read ${tail.join(', ')}${flat ? ', which is flat: the move has finished, and the current number is a plateau rather than a climb.' : ', so it is still moving.'}`,
+    signals: [
+      `Net ${net >= 0 ? 'gain' : 'loss'} of ${Math.abs(net)} points over the series, with the largest single-period move (${maxStep} points) between P-${p.length - maxAt} and P-${p.length - maxAt - 1 || 'now'}.`,
+      `Current period reads ${last}, which is ${v === 'strong' ? 'above' : v === 'watch' ? 'inside' : 'below'} the ${v} band.`,
+    ],
+    risks: (flat ? [`Three flat periods at the end of the series. ${neg.length ? `Without a change in ${lc(neg[0].label)} there is no mechanism for further gain.` : 'There is no visible mechanism for further gain.'}`] : [])
+      .concat([`The series rests on ${fac.patients} distinct patients — a single large case can move it a point or two.`]),
+    footer: `${p.length} trailing periods of the same length as the resolved window.`,
+  };
+}
+
+class Component extends DCLogic {
+  constructor(props){
+    super(props);
+    const st = props.state || 'results';
+    this.state = {
+      role: props.role || 'biller',
+      view: st === 'insufficient-first' ? 'results' : (st === 'ai-streaming' || st === 'ai-complete' ? 'results' : st),
+      insufficientFirst: st === 'insufficient-first',
+      prefix: st === 'empty' ? '' : 'W29',
+      stepIndex: -1,
+      resolvedWindow: 180,
+      manualWindow: null,
+      overrideOpen: false,
+      open: {},
+      selected: 'tnbh',
+      loc: 'all',
+      chip: st === 'ai-streaming' || st === 'ai-complete' ? 'explain' : null,
+      facilityQuery: '',
+      facility: null,
+      suggestOpen: false,
+      cursor: 0,
+      revealed: {},
+    };
+    this._timers = [];
+  }
+
+  componentDidMount(){
+    const st = this.props.state || 'results';
+    if(st === 'resolving') this.runResolve();
+    if(st === 'ai-streaming') this.runStream('explain');
+    if(st === 'ai-complete') this.setState({chip:'explain', cursor:9999});
+  }
+
+  componentDidUpdate(prev){
+    if(prev.state !== this.props.state && this.props.state){
+      this.clearTimers();
+      const st = this.props.state;
+      if(st === 'empty') this.setState({view:'empty', prefix:'', chip:null, cursor:0, insufficientFirst:false, facility:null, facilityQuery:'', suggestOpen:false});
+      else if(st === 'resolving'){ this.setState({view:'resolving', prefix:'W29', chip:null, cursor:0, insufficientFirst:false}); this.runResolve(); }
+      else if(st === 'results') this.setState({view:'results', prefix:'W29', chip:null, cursor:0, insufficientFirst:false});
+      else if(st === 'insufficient-first') this.setState({view:'results', prefix:'W29', chip:null, cursor:0, insufficientFirst:true, selected:'telehealth'});
+      else if(st === 'ai-streaming'){ this.setState({view:'results', prefix:'W29', insufficientFirst:false}); this.runStream('explain'); }
+      else if(st === 'ai-complete') this.setState({view:'results', prefix:'W29', insufficientFirst:false, chip:'explain', cursor:9999});
+    }
+    if(prev.role !== this.props.role && this.props.role) this.setState({role:this.props.role});
+  }
+
+  componentWillUnmount(){ this.clearTimers(); }
+  clearTimers(){ this._timers.forEach(clearTimeout); this._timers = []; }
+  later(fn, ms){ const t = setTimeout(fn, ms); this._timers.push(t); return t; }
+
+  runResolve(){
+    this.clearTimers();
+    this.setState({view:'resolving', stepIndex:0, manualWindow:null});
+    const step = (i) => {
+      this.setState({stepIndex:i});
+      if(WINDOWS[i].patients >= 10){
+        this.later(() => this.setState({view:'results', resolvedWindow:WINDOWS[i].days}), 620);
+        return;
+      }
+      this.later(() => step(i+1), 480);
+    };
+    this.later(() => step(0), 60);
+  }
+
+  followStream(){
+    const el = this.streamEl;
+    if(!el) return;
+    let sc = el.parentElement;
+    while(sc && sc !== document.body && sc !== document.documentElement){
+      const st = getComputedStyle(sc);
+      if(/(auto|scroll)/.test(st.overflowY) && sc.scrollHeight > sc.clientHeight + 4) break;
+      sc = sc.parentElement;
+    }
+    const r = el.getBoundingClientRect();
+    if(sc && sc !== document.body && sc !== document.documentElement){
+      const cr = sc.getBoundingClientRect();
+      const d = r.bottom - (cr.bottom - 28);
+      if(d > 1) sc.scrollTop += d;
+    } else {
+      const d = r.bottom - (window.innerHeight - 28);
+      if(d > 1) window.scrollTo({top: window.scrollY + d});
+    }
+  }
+
+  runStream(chip){
+    this.clearTimers();
+    const speed = this.props.streamSpeed ?? 3;
+    const spol = polFor(this.state.prefix);
+    const fac = subjectFac(spol, this.state.facility);
+    const c = aiContent(chip, fac, this.state.role === 'blind', spol);
+    const total = this.streamTokens(c).length;
+    const per = Math.max(8, (speed * 1000) / Math.max(total, 1));
+    this.setState({chip, cursor:0});
+    const tick = (n) => {
+      if(n > total) return;
+      this.setState({cursor:n}, () => requestAnimationFrame(() => this.followStream()));
+      this.later(() => tick(n+1), per);
+    };
+    this.later(() => tick(1), 140);
+  }
+
+  streamTokens(c){
+    const out = [];
+    c.tldr.split(' ').forEach(w => out.push({sec:'tldr', i:0, w}));
+    c.signals.forEach((s, i) => s.split(' ').forEach(w => out.push({sec:'sig', i, w})));
+    c.risks.forEach((s, i) => s.split(' ').forEach(w => out.push({sec:'risk', i, w})));
+    return out;
+  }
+
+  renderVals(){
+    const s = this.state;
+    const blind = s.role === 'blind';
+    const view = s.view;
+    const win = s.manualWindow ?? s.resolvedWindow;
+    const winRow = WINDOWS.find(w => w.days === win) || WINDOWS[3];
+
+    // ── ordering: insufficient-first flips the honest-restraint card to the top ──
+    // A named facility narrows to that one card — its context is already known, so ranking is moot.
+    // Prefix ALONE is the ranking case: top 5 by proposed rating.
+    const pol = polFor(s.prefix);
+    let list;
+    let scoped = false;
+    if(s.facility){
+      const one = pol.facs.find(f => f.key === s.facility);
+      list = one ? [one] : [];
+      scoped = true;
+    } else if(s.insufficientFirst){
+      list = [pol.facs[6]].concat(pol.facs.slice(0,4));
+    } else {
+      list = pol.facs.filter(f => f.rating !== null).sort((p,q) => q.rating - p.rating).slice(0,5);
+    }
+    if(s.loc !== 'all'){
+      list = list.filter(f => s.loc === 'IP' ? (f.loc === 'IP' || f.loc === 'Both') : (f.loc === 'OP' || f.loc === 'Both'));
+    }
+
+    const ctx = s.facility ? CTX[s.facility] : null;
+    // Everything in the readout bar, the KPI tiles and the window sentence must describe the SAME
+    // rows as the card(s) below. When one facility is named, that means ITS figures — not the
+    // payer-wide totals, which would assert a reliable sample for a facility we just refused to rate.
+    const scopeFac = scoped ? (pol.facs.find(fx3 => fx3.key === s.facility) || null) : null;
+    const scopeLines = scopeFac ? scopeFac.lines : pol.lines;
+    const scopePatients = scopeFac ? scopeFac.patients : pol.patients;
+    const scopeBilled = scopeFac ? scopeFac.billed : pol.billed;
+    const scopeAllowed = scopeFac ? scopeFac.allowed : pol.allowed;
+    const scopePaidRatio = scopeFac ? scopeFac.paidRatio : pol.paidRatio;
+    const hasAmounts = scopeAllowed !== null && scopeBilled !== null && scopePaidRatio !== null;
+    const pctOf = (a,b) => String(Math.round((a / b) * 100));
+    const scopeLabel = scopeFac ? scopeFac.name : pol.payerShort;
+    const wash = v => v >= 50 ? 'linear-gradient(120deg,#E6F2EC,#F2F9F5)' : v >= 30 ? 'linear-gradient(120deg,#FBF1DE,#FDF7EC)' : 'linear-gradient(120deg,#FBE7E4,#FDF1EF)';
+
+    const pipRow = (n, dark) => [0,1,2,3].map(i => {
+      const on = i < pipsFor(n);
+      return {
+        h: PIP_H[i],
+        style: on ? 'solid' : 'dashed',
+        border: on ? (dark ? T.teal200 : T.teal700) : (dark ? 'rgba(255,255,255,.35)' : 'rgba(99,117,110,.45)'),
+        bg: on ? (dark ? T.teal200 : T.teal700) : 'transparent',
+      };
+    });
+
+    const trendSvg = (fac, W, H) => {
+      const tp = fac.points && fac.points.length >= 2 ? fac.points : null;
+      if(!tp) return null;
+      const X = i => 8 + (i / (tp.length - 1)) * (W - 16);
+      const Y = v => H - 12 - (v / 100) * (H - 26);
+      const line = tp.map((v,i) => `${i?'L':'M'}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join(' ');
+      const area = line + ` L${X(tp.length-1).toFixed(1)} ${H-12} L${X(0).toFixed(1)} ${H-12} Z`;
+      const hx = hexOf(fac.rating);
+      const gid = 'tfill-' + fac.key;
+      return React.createElement('svg', {width:'100%', viewBox:`0 0 ${W} ${H}`, fill:'none', role:'img',
+        'aria-label':`${fac.name} rating over ${tp.length} periods, ending ${fac.rating}`,
+        preserveAspectRatio:'xMidYMid meet', style:{display:'block', width:'100%', height:H + 'px'}},
+        React.createElement('defs', null,
+          React.createElement('linearGradient', {id:gid, x1:'0', y1:'0', x2:'0', y2:'1'},
+            React.createElement('stop', {offset:'0', stopColor:hx, stopOpacity:'0.18'}),
+            React.createElement('stop', {offset:'1', stopColor:hx, stopOpacity:'0'}))),
+        React.createElement('line', {x1:8, x2:W-8, y1:Y(50), y2:Y(50), stroke:T.ok, strokeOpacity:'0.35', strokeWidth:1, strokeDasharray:'3 4'}),
+        React.createElement('line', {x1:8, x2:W-8, y1:Y(30), y2:Y(30), stroke:T.danger, strokeOpacity:'0.3', strokeWidth:1, strokeDasharray:'3 4'}),
+        React.createElement('path', {d:area, fill:`url(#${gid})`}),
+        React.createElement('path', {d:line, stroke:hx, strokeWidth:2, strokeLinecap:'round', strokeLinejoin:'round',
+          style:{strokeDasharray:900, strokeDashoffset:900, animation:'q-draw 900ms ease-out forwards'}}),
+        tp.map((v,i) => React.createElement('circle', {key:i, cx:X(i), cy:Y(v), r: i === tp.length-1 ? 3.6 : 2.2,
+          fill: i === tp.length-1 ? hx : T.surface, stroke:hx, strokeWidth:1.6})),
+        React.createElement('text', {x:X(tp.length-1), y:Y(tp[tp.length-1])-8, textAnchor:'end', fontSize:'13', fontWeight:'600',
+          fill:hx, fontFamily:'IBM Plex Mono, monospace'}, String(fac.rating)));
+    };
+
+    const cardTags = () => {
+      return CTX_FIELDS.map(cf => {
+        const raw = pol[cf.key];
+        const missing = raw === null || raw === undefined;
+        return {
+          label: cf.label,
+          value: missing ? 'not on file' : String(raw),
+          title: `${cf.label} · ${missing ? 'not on file' : raw} · autofilled from the record`,
+          font: cf.mono ? "'IBM Plex Mono',ui-monospace,monospace" : "Inter,system-ui,sans-serif",
+          color: missing ? T.ink400 : T.teal700,
+          border: missing ? T.line : T.teal200,
+          bg: missing ? T.surface : T.teal50,
+        };
+      });
+    };
+
+    const dirMeta = {
+      pos:{color:T.ok, arrow:'▲', label:'helps', bar:T.ok},
+      neg:{color:T.danger, arrow:'▼', label:'hurts', bar:T.danger},
+      neu:{color:T.ink400, arrow:'◆', label:'neutral', bar:'#C3CDC9'},
+    };
+
+    const cards = list.map((f, idx) => {
+      const rated = f.rating !== null;
+      const tier = tierFor(f.patients);
+      const hex = hexOf(f.rating);
+      const isOpen = !!s.open[f.key];
+      const help = f.factors.filter(x => x.dir === 'pos').length;
+      const hurt = f.factors.filter(x => x.dir === 'neg').length;
+      return {
+        key: f.key,
+        rank: String(idx + 1),
+        name: f.name,
+        place: f.place || 'Location not on file',
+        loc: f.loc,
+        rated,
+        insufficient: !rated,
+        insufficientDetail: `${f.patients} patients in the last 365 days — the floor is 3 to show a number at all, 10 to show a confident one.`,
+        patients: String(f.patients),
+        lines: f.lines.toLocaleString('en-US'),
+        ratingText: rated ? String(f.rating) : '—',
+        numSize: rated ? '58px' : '44px',
+        numColor: rated ? hex : T.neutral,
+        verdict: rated ? verdictOf(f.rating) : 'Not rated',
+        pillBg: rated ? washOf(f.rating) : T.neutralWash,
+        pillColor: rated ? hex : T.ink400,
+        topBar: rated ? hex : T.line,
+        cardBorder: (!rated) ? T.line : (s.selected === f.key ? T.teal500 : T.line),
+        shadow: s.selected === f.key ? '0 4px 16px -6px rgba(14,58,58,.12)' : '0 1px 2px rgba(27,43,42,.05),0 1px 1px rgba(27,43,42,.04)',
+        sampleTag: !rated ? '' : tier === 'thin' ? 'thin sample' : '',
+        conflict: !!f.conflict,
+        pips: pipRow(f.patients, false),
+        evidence: tier === 'full' ? 'enough to rate' : tier === 'thin' ? 'directional only' : 'not enough to rate',
+        showAmounts: !blind && rated && f.allowed !== null,
+        amounts: (!blind && f.allowed !== null) ? `${usd0(f.allowed)} / ${usd0(f.billed)}` : '',
+        weights: f.factors.map(x => ({
+          width: x.weight + '%',
+          color: dirMeta[x.dir].bar,
+          title: `${x.label} · ${x.weight}% · ${dirMeta[x.dir].label}`,
+        })),
+        weightCounts: [
+          help > 0 ? `${help} help` : null,
+          hurt > 0 ? `${hurt} hurt` : null,
+          (f.factors.length - help - hurt) > 0 ? `${f.factors.length - help - hurt} neutral` : null,
+        ].filter(Boolean).join(', '),
+        weightNote: f.conflict ? 'reliability carries it, aging drags it' : hurt > help ? 'the weight sits on what is wrong' : 'the heavy factor is the good one',
+        tags: scoped ? cardTags() : [],
+        hasTags: scoped,
+        trendChart: trendSvg(f, 900, 92),
+        hasSeries: !!(f.points && f.points.length >= 2),
+        trendSubtitle: (f.points && f.points.length >= 2) ? `last ${f.points.length} periods` : 'no rateable series',
+        trendFirst: PERIODS[0],
+        trendLast: PERIODS[PERIODS.length - 1],
+        delay: (Math.min(idx, 3) * 60) + 'ms',
+        open: isOpen,
+        expandBg: isOpen ? T.teal50 : T.surface,
+        expandLabel: isOpen ? 'Hide the reasoning' : 'Why this score',
+        expandHint: rated ? (isOpen ? '' : '6 factors') : (isOpen ? '' : 'what we do have'),
+        chevRot: isOpen ? '90deg' : '0deg',
+        factors: f.factors.map(x => ({
+          icon: x.icon, label: x.label, weight: x.weight + '%',
+          detail: x.detail,
+          dirColor: dirMeta[x.dir].color, arrow: dirMeta[x.dir].arrow, dirLabel: dirMeta[x.dir].label,
+          iconId: x.icon.replace('#',''),
+          iconBg: x.dir === 'pos' ? T.okWash : x.dir === 'neg' ? T.dangerWash : T.teal50,
+          iconColor: x.dir === 'pos' ? T.ok : x.dir === 'neg' ? T.danger : T.teal700,
+        })),
+        toggle: () => this.setState(st => ({open: Object.assign({}, st.open, {[f.key]: !st.open[f.key]}), selected: f.key})),
+      };
+    });
+
+    // ── ticker ──
+    const spark = (points, hex, w, h) => {
+      if(points.length < 2) return null;
+      const min = Math.min.apply(null, points), max = Math.max.apply(null, points);
+      const range = (max - min) || 1;
+      const d = points.map((v,i) => `${i?'L':'M'}${((i/(points.length-1))*w).toFixed(1)} ${(h-4-((v-min)/range)*(h-8)).toFixed(1)}`).join(' ');
+      const id = 'g-' + hex.replace('#','') + '-' + points.join('');
+      return React.createElement('svg', {width:w, height:h, viewBox:`0 0 ${w} ${h}`, fill:'none', 'aria-hidden':true, style:{display:'block'}},
+        React.createElement('defs', null,
+          React.createElement('linearGradient', {id, x1:'0', y1:'0', x2:'1', y2:'0'},
+            React.createElement('stop', {offset:'0', stopColor:hex, stopOpacity:'0.25'}),
+            React.createElement('stop', {offset:'1', stopColor:hex, stopOpacity:'1'}))),
+        React.createElement('path', {d, stroke:`url(#${id})`, strokeWidth:2, strokeLinecap:'round', strokeLinejoin:'round',
+          style:{strokeDasharray:600, strokeDashoffset:600, animation:'q-draw 900ms ease-out forwards'}}));
+    };
+
+    const tickerSet = TICKER.concat(TICKER).map((t, i) => ({
+      hash: '#' + ((i % TICKER.length) + 1),
+      name: t.name, rating: String(t.rating), delta: t.delta, deltaHex: t.deltaHex,
+      lines: t.lines.toLocaleString('en-US'), place: t.place, loc: t.loc,
+      hex: hexOf(t.rating),
+      spark: spark(t.points, hexOf(t.rating), 184, 26),
+      open: () => {
+        this.clearTimers();
+        const known = FACILITIES.some(f => f.key === t.key);
+        this.setState({
+          facility: known ? t.key : null,
+          facilityQuery: t.name,
+          suggestOpen: false,
+          selected: known ? t.key : 'tnbh',
+          chip: null, cursor: 0,
+        });
+        this.runResolve();
+      },
+    }));
+
+    // ── resolving steps ──
+    const steps = WINDOWS.map((w, i) => {
+      const done = s.stepIndex > i || (s.stepIndex === i && w.patients >= 10);
+      const active = s.stepIndex === i;
+      const cleared = w.patients >= 10 && done;
+      const touched = s.stepIndex >= i;
+      return {
+        days: String(w.days),
+        border: cleared ? T.teal500 : active ? T.teal200 : T.line,
+        bg: cleared ? T.teal50 : T.surface,
+        opacity: touched ? '1' : '0.4',
+        numColor: cleared ? T.teal700 : touched ? T.ink900 : T.ink400,
+        textColor: cleared ? T.teal700 : touched ? T.ink600 : T.ink400,
+        result: !touched ? 'not tried' : cleared ? `${w.patients} patients — enough` : active ? `${w.patients} patients…` : `${w.patients} patients — too few`,
+        barColor: cleared ? T.teal500 : T.coral400,
+        barScale: touched ? '1' : '0',
+      };
+    });
+
+    // ── AI ──
+    const selFac = subjectFac(pol, s.facility);
+    const aiFac = selFac;
+    let aiTldr = '', aiSignals = [], aiRisks = [], aiFooter = '', aiDone = false, caretTldr = false, aiRanks = [], ranksTitle = '';
+    if(s.chip){
+      const c = aiContent(s.chip, aiFac, blind, pol);
+      const tokens = this.streamTokens(c);
+      const n = Math.min(s.cursor, tokens.length);
+      aiDone = n >= tokens.length;
+      const shown = tokens.slice(0, n);
+      const tldrWords = shown.filter(t => t.sec === 'tldr').map(t => t.w);
+      aiTldr = tldrWords.join(' ');
+      const bucket = (sec, src) => src.map((_, i) => {
+        const words = shown.filter(t => t.sec === sec && t.i === i).map(t => t.w);
+        return {text: words.join(' '), n: words.length};
+      }).filter(x => x.n > 0);
+      const sig = bucket('sig', c.signals);
+      const rsk = bucket('risk', c.risks);
+      const last = shown.length ? shown[shown.length - 1] : null;
+      caretTldr = !aiDone && !!last && last.sec === 'tldr';
+      aiSignals = sig.map((x, i) => ({text:x.text, caret: !aiDone && !!last && last.sec === 'sig' && last.i === i}));
+      aiRisks = rsk.map((x, i) => ({text:x.text, caret: !aiDone && !!last && last.sec === 'risk' && last.i === i}));
+      aiFooter = c.footer;
+      if(aiDone && c.ranks){
+        ranksTitle = c.ranksTitle;
+        aiRanks = c.ranks.map((f, i) => ({
+          rank: String(i + 1),
+          name: f.name,
+          rating: String(f.rating),
+          hex: hexOf(f.rating),
+          evidence: `${f.patients} patients · ${f.lines} lines`,
+          bg: i % 2 ? T.surface : '#fff',
+        }));
+      }
+    }
+
+    const chipList = chipsFor(pol, scoped, selFac);
+    const suggestedId = scoped
+      ? (selFac.rating === null ? 'ranks' : selFac.conflict ? 'explain' : 'placement')
+      : (pol.network === 'OON' ? 'network' : 'ranks');
+    const chips = chipList.map(c => ({
+      label: c.label,
+      icon: c.icon,
+      suggested: c.id === suggestedId && !s.chip,
+      iconColor: (s.chip === c.id || c.id === suggestedId) ? T.teal500 : T.ink400,
+      border: s.chip === c.id ? T.teal500 : c.id === suggestedId ? T.teal200 : T.line,
+      bg: s.chip === c.id ? T.teal50 : c.id === suggestedId ? 'rgba(234,244,242,.55)' : T.surface,
+      color: s.chip === c.id ? T.teal700 : T.ink600,
+      run: () => this.runStream(c.id),
+    }));
+
+    // ── trend chart ──
+    const tp = aiFac.points.length >= 2 ? aiFac.points : null;
+    const W = 300, H = 76;
+    const x = i => 7 + (i / (tp.length - 1)) * (W - 20);
+    const y = v => H - 9 - (v / 100) * (H - 22);
+    const noSeries = !tp;
+    const line = (tp || []).map((v,i) => `${i?'L':'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ');
+    const area = noSeries ? '' : line + ` L${x(tp.length-1).toFixed(1)} ${H-9} L${x(0).toFixed(1)} ${H-9} Z`;
+    const tHex = hexOf(aiFac.rating);
+    const trendChart = noSeries ? React.createElement('div', {style:{padding:'6px 2px', maxWidth:'196px'}},
+      React.createElement('div', {style:{fontSize:'12px', fontWeight:600, color:T.ink600}}, 'No series to plot'),
+      React.createElement('div', {style:{marginTop:'2px', fontSize:'10.5px', lineHeight:1.4, color:T.ink400, textWrap:'pretty'}},
+        `${aiFac.lines} claim lines — a line through this is a line through noise.`))
+    : React.createElement('svg', {width:'100%', viewBox:`0 0 ${W} ${H}`, fill:'none', role:'img',
+      'aria-label':`${aiFac.name} rating over 8 periods, ending ${aiFac.rating}`, style:{display:'block'}},
+      React.createElement('defs', null,
+        React.createElement('linearGradient', {id:'tfill', x1:'0', y1:'0', x2:'0', y2:'1'},
+          React.createElement('stop', {offset:'0', stopColor:tHex, stopOpacity:'0.18'}),
+          React.createElement('stop', {offset:'1', stopColor:tHex, stopOpacity:'0'}))),
+      React.createElement('line', {x1:7, x2:W-7, y1:y(50), y2:y(50), stroke:T.ok, strokeOpacity:'0.35', strokeWidth:1, strokeDasharray:'3 4'}),
+      React.createElement('line', {x1:7, x2:W-7, y1:y(30), y2:y(30), stroke:T.danger, strokeOpacity:'0.3', strokeWidth:1, strokeDasharray:'3 4'}),
+      React.createElement('path', {d:area, fill:'url(#tfill)'}),
+      React.createElement('path', {d:line, stroke:tHex, strokeWidth:2, strokeLinecap:'round', strokeLinejoin:'round',
+        style:{strokeDasharray:900, strokeDashoffset:900, animation:'q-draw 900ms ease-out forwards'}}),
+      tp.map((v,i) => React.createElement('circle', {key:i, cx:x(i), cy:y(v), r: i === tp.length-1 ? 3.4 : 2,
+        fill: i === tp.length-1 ? tHex : T.surface, stroke:tHex, strokeWidth:1.6})),
+      React.createElement('text', {x:x(tp.length-1), y:y(tp[tp.length-1])-9, textAnchor:'end', fontSize:'17', fontWeight:'600',
+        fill:tHex, fontFamily:'IBM Plex Mono, monospace'}, String(aiFac.rating)));
+
+    // ── recent cases grid ──
+    const CASES = [
+      {mid:pol.prefix + '8840216', name:'Nashville Mental Health', status:'Paid', days:'34', charge:8420},
+      {mid:pol.prefix + '7712904', name:'Tennessee Behavioral Health', status:'At payer 112d', days:'112', charge:14980},
+      {mid:pol.prefix + '9035581', name:'Tennessee Behavioral Health', status:'Paid', days:'61', charge:6240},
+      {mid:pol.prefix + '4418723', name:'Pacific Coast Mental Health', status:'Denied — CO-197', days:'88', charge:3110},
+      {mid:pol.prefix + '6627140', name:'Lonestar Mental Health', status:'At payer 134d', days:'134', charge:22750},
+    ];
+    const headers = blind ? ['Member ID','Facility','Status','Days',''] : ['Member ID','Facility','Status','Days','Charge',''];
+    const caseCols = blind ? 'minmax(140px,1fr) minmax(180px,1.6fr) minmax(140px,1.2fr) 80px 120px' : 'minmax(140px,1fr) minmax(180px,1.6fr) minmax(140px,1.2fr) 80px 110px 120px';
+    const caseCells = [];
+    const HB = '#FBF8F4';
+    headers.forEach((h, i) => caseCells.push({
+      text: h, isText: true, isReveal: false, bg: HB, font: 'Inter, sans-serif', size: '10.5px', weight: '700',
+      transform: 'uppercase', spacing: '.1em', color: T.ink400, align: (h === 'Days' || h === 'Charge') ? 'right' : 'left',
+    }));
+    CASES.forEach((c, ri) => {
+      const shown = !!s.revealed[ri];
+      caseCells.push({text: shown ? c.mid : '••••••••', isText:true, isReveal:false, bg:T.surface,
+        font:"'IBM Plex Mono',ui-monospace,monospace", size:'12.5px', weight: shown ? '500' : '400',
+        transform:'none', spacing: shown ? '.02em' : '.14em', color: shown ? T.ink900 : T.ink400, align:'left'});
+      caseCells.push({text:c.name, isText:true, isReveal:false, bg:T.surface, font:'Inter, sans-serif', size:'12.5px', weight:'500', transform:'none', spacing:'-.006em', color:T.ink900, align:'left'});
+      caseCells.push({text:c.status, isText:true, isReveal:false, bg:T.surface, font:'Inter, sans-serif', size:'12.5px', weight:'400', transform:'none', spacing:'-.006em', color: c.status === 'Paid' ? T.ok : c.status.indexOf('Denied') === 0 ? T.danger : T.warn, align:'left'});
+      caseCells.push({text:c.days, isText:true, isReveal:false, bg:T.surface, font:"'IBM Plex Mono',ui-monospace,monospace", size:'12.5px', weight:'400', transform:'none', spacing:'0', color:T.ink600, align:'right'});
+      if(!blind) caseCells.push({text:usd0(c.charge), isText:true, isReveal:false, bg:T.surface, font:"'IBM Plex Mono',ui-monospace,monospace", size:'12.5px', weight:'500', transform:'none', spacing:'0', color:T.ink900, align:'right'});
+      caseCells.push({text: shown ? 'logged' : 'Reveal', isText:false, isReveal:true, bg:T.surface, font:'Inter, sans-serif', size:'12.5px', weight:'400', transform:'none', spacing:'-.006em', color:T.ink600, align:'left',
+        reveal: () => this.setState(st => ({revealed: Object.assign({}, st.revealed, {[ri]: true})}))});
+    });
+
+    const revealedCount = Object.keys(s.revealed).length;
+
+    // The headline is the policy average; the flanks are the facilities that set the range on
+    // that same metric, measured on the same scoped set — so a card can never average figures
+    // it does not also bracket. Per-facility collection rates are re-centred on the policy's
+    // own paid ratio for the same reason.
+    const spreadSet = pol.facs.filter(f => f.rating !== null && f.allowed !== null && f.billed && f.paidRatio !== null);
+    const paidOf = (f) => f.paidRatio;
+    const METRIC = {
+      'allowed of billed': f => (f.allowed / f.billed) * 100,
+      'paid of allowed': f => paidOf(f) * 100,
+      'paid of billed': f => (f.allowed / f.billed) * paidOf(f) * 100,
+    };
+    const spreadFor = (key) => {
+      if(scoped || spreadSet.length < 2) return null;
+      const fn = METRIC[key];
+      const sorted = spreadSet.slice().sort((a,b) => fn(a) - fn(b));
+      const lo = sorted[0], hi = sorted[sorted.length - 1];
+      return [
+        {label:'Worst', value: Math.round(fn(lo)) + '%', who: lo.name, hex: T.danger},
+        {label:'Best',  value: Math.round(fn(hi)) + '%', who: hi.name, hex: T.ok},
+      ];
+    };
+
+    const kpiVals = (hasAmounts ? [
+      {k:'allowed of billed', v:Number(pctOf(scopeAllowed, scopeBilled)), tail:'reliable allowed ÷ billed'},
+      {k:'paid of allowed', v:Math.round(scopePaidRatio * 100), tail:'payer paid ÷ allowed'},
+      {k:'paid of billed', v:Math.round((scopeAllowed / scopeBilled) * scopePaidRatio * 100), tail:'net realization'},
+    ].map(r => {
+      const range = spreadFor(r.k);
+      return {
+        label: '% ' + r.k, value: String(r.v), suffix: '%',
+        bg: wash(r.v), color: hexOf(r.v),
+        range: range || [], hasRange: !!range,
+        caption: range
+          ? `${scopeLabel} average across ${spreadSet.length} facilities · ${win}-day window`
+          : `${scopeLabel} · ${win}-day window · ${r.tail}`,
+      };
+    }) : [
+      // No rateable amounts for this scope: show the absence, never a payer-wide stand-in.
+      {label:'% allowed of billed', value:'—', suffix:'', bg:T.neutralWash, color:T.neutral, caption:`${scopeLabel} · ${scopePatients} patients — below the floor to compute a rate`},
+      {label:'% paid of allowed', value:'—', suffix:'', bg:T.neutralWash, color:T.neutral, caption:`${scopeLabel} · no resolved payments on file in this window`},
+      {label:'% paid of billed', value:'—', suffix:'', bg:T.neutralWash, color:T.neutral, caption:`${scopeLabel} · nothing to divide — ask a biller`},
+    ]).map((k, i) => Object.assign({range:[], hasRange:false}, k, {delay:(Math.min(i,3)*60)+'ms'}));
+
+    const locLens = [
+      {id:'all', label:'All', title:'Inpatient and outpatient together'},
+      {id:'IP',  label:'IP',  title:'Inpatient claim lines only'},
+      {id:'OP',  label:'OP',  title:'Outpatient claim lines only'},
+    ].map(l => ({
+      label: l.label,
+      title: l.title,
+      border: s.loc === l.id ? T.teal500 : 'transparent',
+      bg: s.loc === l.id ? '#fff' : 'transparent',
+      color: s.loc === l.id ? T.teal700 : T.ink600,
+      pick: () => this.setState({loc:l.id}),
+    }));
+
+    const anyOpen = Object.keys(s.open).some(k => s.open[k]);
+
+
+    const q = s.facilityQuery.trim().toLowerCase();
+    const suggestList = pol.facs
+      .filter(fx2 => !q || fx2.name.toLowerCase().indexOf(q) !== -1)
+      .map(fx2 => ({
+        name: fx2.name,
+        place: fx2.place || 'no location on file',
+        rating: fx2.rating === null ? '—' : String(fx2.rating),
+        hex: hexOf(fx2.rating),
+        pick: () => this.setState({facility: fx2.key, facilityQuery: fx2.name, suggestOpen: false, selected: fx2.key}),
+      }));
+
+    return {
+      // header role toggle
+      roleFullBg: blind ? 'transparent' : '#fff',
+      roleFullColor: blind ? 'rgba(255,255,255,.7)' : T.teal900,
+      roleBlindBg: blind ? '#fff' : 'transparent',
+      roleBlindColor: blind ? T.teal900 : 'rgba(255,255,255,.7)',
+      setRoleFull: () => this.setState({role:'biller'}),
+      setRoleBlind: () => this.setState({role:'blind'}),
+
+      // ticker + compose
+      tickerRange: `trailing ${win} days`,
+      ticker: tickerSet,
+      prefix: s.prefix,
+      onPrefix: (e) => this.setState({prefix: e.target.value.toUpperCase().slice(0,5)}),
+      onSubmitKey: (e) => { if(e.key === 'Enter'){ this.setState({suggestOpen:false}); this.runResolve(); } },
+      onQualify: () => { this.setState({suggestOpen:false}); this.runResolve(); },
+      qualifyLabel: 'Search',
+
+      facilityQuery: s.facilityQuery,
+      facilityBorder: s.facility ? T.teal500 : T.teal200,
+      onFacilityQuery: (e) => {
+        const v = e.target.value;
+        const hit = FACILITIES.find(f => f.name.toLowerCase() === v.trim().toLowerCase());
+        this.setState({facilityQuery: v, facility: hit ? hit.key : null, suggestOpen: v.trim().length > 0 && !hit});
+      },
+      onFacilityFocus: () => { if(!s.facility) this.setState({suggestOpen:true}); },
+      suggestOpen: s.suggestOpen,
+      suggestions: suggestList,
+      noSuggestions: s.suggestOpen && suggestList.length === 0,
+
+      showCards: scoped,
+      showPolicyScore: view === 'results' && !scoped,
+      showPolicyTags: view === 'results' && !scoped,
+      polRating: pol.rating === null ? '—' : String(pol.rating),
+      polVerdict: pol.rating === null ? 'Not rated' : pol.rating >= 50 ? 'Strong' : pol.rating >= 30 ? 'Watch' : 'Weak',
+      polHex: pol.rating === null ? 'rgba(255,255,255,.72)' : pol.rating >= 50 ? '#5FC9BE' : pol.rating >= 30 ? '#E9B44C' : '#F0917C',
+      polPillBg: pol.rating === null ? 'rgba(255,255,255,.1)' : pol.rating >= 50 ? 'rgba(95,201,190,.16)' : pol.rating >= 30 ? 'rgba(233,180,76,.16)' : 'rgba(240,145,124,.16)',
+      polScoreBasis: pol.rating === null
+        ? 'no facility clears the sample floor'
+        : `${pol.payerShort} · prefix ${pol.prefix}`,
+      polTags: CTX_FIELDS.map(cf => {
+        const raw = pol[cf.key];
+        const missing = raw === null || raw === undefined;
+        return {
+          label: cf.label,
+          value: missing ? 'not on file' : String(raw),
+          title: `${cf.label} · ${missing ? 'not on file' : raw} · on file behind prefix ${pol.prefix}`,
+          font: cf.mono ? "'IBM Plex Mono',ui-monospace,monospace" : 'Inter,system-ui,sans-serif',
+          color: missing ? 'rgba(255,255,255,.5)' : '#fff',
+          border: missing ? 'rgba(255,255,255,.18)' : 'rgba(183,218,213,.45)',
+        };
+      }),
+
+      // The band on each example is the DERIVED rating, not an authored one — the buttons
+      // cannot advertise a number the search then contradicts.
+      examplePolicies: Object.keys(POLICIES).map(k => {
+        const p = polFor(k);
+        return {
+          prefix: p.prefix,
+          who: `${p.employer} · ${p.payerShort} ${p.network} ${p.policy}`,
+          band: p.rating === null ? 'Not rated' : p.rating >= 50 ? `Strong · ${p.rating}` : p.rating >= 30 ? `Watch · ${p.rating}` : `Weak · ${p.rating}`,
+          hex: hexOf(p.rating),
+          pick: () => { this.setState({prefix: p.prefix, facility: null, facilityQuery: '', chip: null, cursor: 0}); this.runResolve(); },
+        };
+      }),
+
+      ctxResolved: !!ctx,
+      ctxPending: !ctx,
+      ctxTitle: ctx ? 'Autofilled from the record' : 'Fills itself once a facility is named',
+      ctxTitleColor: ctx ? T.teal700 : T.ink400,
+      ctxNote: ctx
+        ? 'Already on file — the rep does not type any of this.'
+        : 'Prefix alone ranks the top 5 facilities instead; name one and these resolve.',
+      ctxFields: ctx ? CTX_FIELDS.map(cf => {
+        const raw = ctx[cf.key];
+        const missing = raw === null || raw === undefined;
+        return {
+          label: cf.label,
+          value: missing ? 'Not on file' : raw,
+          color: missing ? T.ink400 : T.ink900,
+          font: cf.mono ? "'IBM Plex Mono',ui-monospace,monospace" : 'Inter, sans-serif',
+          border: missing ? T.line : T.teal200,
+          bg: missing ? T.neutralWash : T.teal50,
+        };
+      }) : [],
+      ctxLabels: CTX_FIELDS.map((cf, i) => ({label: cf.label, w: [64,86,58,72,44,40] [i] + 'px'})),
+
+      // readout bar
+      matchCount: view === 'empty' ? '—' : scopeLines.toLocaleString('en-US'),
+      readoutPips: pipRow(view === 'empty' ? 0 : scopePatients, true),
+      patientTotal: view === 'empty' ? '0 clients' : `${scopePatients} clients`,
+      evidenceVerdict: view === 'empty' ? 'no matches yet' : tierFor(scopePatients) === 'full' ? 'enough to rate' : tierFor(scopePatients) === 'thin' ? 'directional only' : 'not enough to rate',
+      showBilled: !blind && view !== 'empty' && scopeBilled !== null,
+      billedTotal: usd0(scopeBilled || 0),
+      locLens,
+
+      // states
+      isEmpty: view === 'empty',
+      isResolving: view === 'resolving',
+      isResults: view === 'results',
+      windowSteps: steps,
+
+      // window disclosure
+      resolvedWindow: String(win),
+      windowReason: s.manualWindow
+        ? `Forced by you — ${scopePatients} distinct patients at ${scoped ? 'this facility' : 'payer level'} in this window.`
+        : scoped
+          ? (tierFor(scopePatients) === 'full'
+              ? `${scopePatients} distinct patients at this facility — clear of the threshold of 10.`
+              : `Reached back this far and still only found ${scopePatients} distinct patients at this facility — under the threshold of 10.`)
+          : tierFor(scopePatients) === 'full'
+            ? `${scopePatients} distinct patients on this policy — clear of the threshold of 10.`
+            : `Reached back the full ${win} days and still only found ${scopePatients} distinct patients on this policy — under the threshold of 10.`,
+      // WINDOW IS SYSTEM-RESOLVED, NOT USER-SELECTABLE.
+      // The ladder (30→60→90→180→365, stop at the first window with 10+ distinct
+      // patients) picks the window, and the bar states both the value and why it was
+      // needed. The old "Change window" override was removed on purpose: forcing a
+      // shorter window is the one interaction that lets a rep manufacture a flattering
+      // rating out of two claims, which defeats the sample floor the score depends on.
+      // If a genuine need for a manual window appears, it belongs behind a
+      // biller/admin role — not on the rep's default surface.
+
+      kpis: kpiVals,
+
+      // scorecards
+      cards,
+      toggleAll: () => this.setState(() => {
+        const next = {};
+        if(!anyOpen) FACILITIES.forEach(f => { next[f.key] = true; });
+        return {open: next};
+      }),
+      expandAllLabel: anyOpen ? 'Collapse all reasoning' : 'Expand all reasoning',
+
+      // AI
+      aiScopeNote: `${scoped ? aiFac.name : `${pol.prefix} · ${pol.payer}`} · trailing ${win} days${blind ? ' · amounts withheld for this role' : ''}`,
+      chips,
+      aiIdle: !s.chip,
+      aiOn: !!s.chip,
+      aiTldr, aiSignals, aiRisks, aiFooter, aiDone, caretTldr,
+      aiRanks, ranksTitle,
+      hasRanks: aiRanks.length > 0,
+      hasSignals: aiSignals.length > 0,
+      hasRisks: aiRisks.length > 0,
+
+      // trend
+      trendName: aiFac.name,
+      trendSubtitle: noSeries ? 'no rateable series' : `last ${aiFac.points.length} periods`,
+      hasSeries: !noSeries,
+      trendChart,
+      streamRef: (el) => { this.streamEl = el; },
+      trendFirstLabel: PERIODS[0],
+      trendLastLabel: PERIODS[PERIODS.length - 1],
+
+      // cases
+      casesNote: `5 of ${scopeLines.toLocaleString('en-US')} lines · identifiers masked${blind ? ' · amounts withheld for this role' : ''}`,
+      caseCols,
+      caseCells,
+      revealNote: revealedCount > 0 ? `${revealedCount} reveal${revealedCount === 1 ? '' : 's'} written to the audit log` : '',
+    };
+  }
+}
+</script>
+</body>
+</html>

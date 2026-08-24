@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Weekly Billable Days — Treat Mental Health</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..600&family=Hanken+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<style>
+:root{
+  --tmh-teal-900:#0E3A3A; --tmh-teal-700:#135E5A; --tmh-teal-500:#1C8B82;
+  --tmh-teal-200:#B7DAD5; --tmh-teal-50:#EAF4F2;
+  --tmh-coral-600:#E2674F; --tmh-coral-400:#F0917C; --tmh-coral-50:#FCEDE8;
+  --tmh-ground:#FBF8F4; --tmh-surface:#FFFFFF;
+  --tmh-ink-900:#1B2B2A; --tmh-ink-600:#4A5C5A; --tmh-ink-400:#859794;
+  --tmh-line:#E4E9E6;
+  --tmh-ok:#2E8B6F; --tmh-warn:#C9881E; --tmh-danger:#C0453B;
+  --tmh-info:#2D7393; --tmh-neutral:#6B7B79;
+  --tmh-radius-sm:6px; --tmh-radius:10px; --tmh-radius-lg:16px;
+  --tmh-shadow-sm:0 1px 2px rgba(27,43,42,.05),0 1px 1px rgba(27,43,42,.04);
+  --tmh-shadow:0 4px 16px -6px rgba(14,58,58,.12);
+  --tmh-shadow-lg:0 18px 40px -12px rgba(14,58,58,.18);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--tmh-ground);color:var(--tmh-ink-900);
+  font-family:'Hanken Grotesk',system-ui,sans-serif;font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}
+h1,h2,h3{font-family:'Fraunces',Georgia,serif;font-weight:500;margin:0}
+.mono{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums}
+button{font:inherit}
+
+.topbar{height:56px;background:var(--tmh-teal-900);color:#fff;display:flex;align-items:center;gap:22px;padding:0 20px;position:sticky;top:0;z-index:60}
+.wordmark{font-family:'Fraunces',serif;font-weight:500;font-size:16px;display:flex;align-items:center;gap:9px}
+.hexmark{width:20px;height:22px;flex:none}
+.facility-switch{background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.16);color:#fff;border-radius:var(--tmh-radius-sm);padding:5px 10px;font-size:12.5px;font-weight:500}
+.facility-switch option{color:#1B2B2A}
+.topbar .spacer{flex:1}
+.topnav{display:flex;gap:2px}
+.topnav a{color:rgba(255,255,255,.62);text-decoration:none;font-size:13px;font-weight:500;padding:6px 11px;border-radius:var(--tmh-radius-sm)}
+.topnav a.on{color:#fff;background:rgba(255,255,255,.11)}
+.avatar{width:28px;height:28px;border-radius:50%;background:var(--tmh-teal-500);color:#fff;display:grid;place-items:center;font-size:11px;font-weight:700}
+
+.wrap{max-width:1720px;margin:0 auto;padding:20px 20px 72px}
+.pagehead{display:flex;align-items:flex-end;gap:18px;margin-bottom:4px;flex-wrap:wrap}
+.pagehead h1{font-size:26px;letter-spacing:-.01em}
+.sub{color:var(--tmh-ink-600);font-size:13px}
+.pagehead .spacer{flex:1}
+
+.btn{font-weight:600;font-size:13px;border-radius:var(--tmh-radius);padding:8px 15px;border:1px solid transparent;cursor:pointer;transition:.15s;display:inline-flex;align-items:center;gap:7px}
+.btn-primary{background:var(--tmh-coral-600);color:#fff;box-shadow:var(--tmh-shadow-sm)}
+.btn-primary:hover{background:#CF5B44}
+.btn-secondary{background:var(--tmh-teal-50);color:var(--tmh-teal-700);border-color:var(--tmh-teal-200)}
+.btn-secondary:hover{background:var(--tmh-teal-200)}
+.btn-ghost{background:#fff;color:var(--tmh-ink-600);border-color:var(--tmh-line)}
+.btn-ghost:hover{background:var(--tmh-teal-50);color:var(--tmh-teal-700)}
+.btn-sm{padding:5px 10px;font-size:12px;border-radius:var(--tmh-radius-sm)}
+.btn-xs{padding:3px 8px;font-size:11.5px;border-radius:var(--tmh-radius-sm)}
+
+.controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0 12px}
+.weekpick{display:flex;align-items:center;gap:8px;background:#fff;border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);padding:5px 6px 5px 12px;box-shadow:var(--tmh-shadow-sm)}
+.weekpick label{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tmh-ink-400)}
+.weekpick select{border:none;background:transparent;font:inherit;font-weight:600;font-size:13.5px;padding:3px 4px;cursor:pointer;outline:none}
+.stepbtn{width:26px;height:26px;border-radius:var(--tmh-radius-sm);border:1px solid var(--tmh-line);background:#fff;color:var(--tmh-ink-600);display:grid;place-items:center;cursor:pointer}
+.stepbtn:hover{background:var(--tmh-teal-50);color:var(--tmh-teal-700)}
+.stepbtn:disabled{opacity:.35;cursor:default}
+.segs{display:flex;gap:4px;background:#fff;border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);padding:4px;box-shadow:var(--tmh-shadow-sm)}
+.seg{border:none;background:transparent;border-radius:var(--tmh-radius-sm);padding:5px 11px;font-size:12.5px;font-weight:600;color:var(--tmh-ink-600);cursor:pointer;display:flex;align-items:center;gap:6px}
+.seg:hover{background:var(--tmh-ground)}
+.seg.on{background:var(--tmh-teal-700);color:#fff}
+.seg .cnt{font-size:11px;font-weight:700;padding:0 5px;border-radius:999px;background:rgba(0,0,0,.07);min-width:18px;text-align:center;font-variant-numeric:tabular-nums}
+.seg.on .cnt{background:rgba(255,255,255,.2)}
+.search{display:flex;align-items:center;gap:7px;background:#fff;border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);padding:0 11px;box-shadow:var(--tmh-shadow-sm);height:38px}
+.search input{border:none;outline:none;font:inherit;font-size:13px;width:170px;background:transparent}
+.controls .spacer{flex:1}
+.locfilter{height:38px;background:#fff;border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);padding:0 10px;font:inherit;font-size:13px;font-weight:500;box-shadow:var(--tmh-shadow-sm);cursor:pointer}
+
+.strip{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr 1fr;gap:12px;margin-bottom:14px}
+.tile{background:#fff;border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);padding:13px 16px;box-shadow:var(--tmh-shadow-sm)}
+.tile.hero{border-top:2px solid var(--tmh-teal-700)}
+.tile.alarm{border-top:2px solid var(--tmh-coral-600)}
+.tile.good{border-top:2px solid var(--tmh-ok)}
+.tile .lab{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tmh-ink-400)}
+.tile .val{font-family:'Fraunces',serif;font-size:29px;font-weight:500;line-height:1.15;font-variant-numeric:tabular-nums;margin-top:2px}
+.tile.hero .val{font-size:37px}
+.tile .ctx{font-size:12px;color:var(--tmh-ink-600);margin-top:1px}
+.tile .ctx b{color:var(--tmh-ink-900);font-variant-numeric:tabular-nums}
+.tile.alarm .val{color:var(--tmh-coral-600)}
+.tile.good .val{color:var(--tmh-ok)}
+.bar{height:5px;border-radius:3px;background:var(--tmh-line);overflow:hidden;margin-top:7px}
+.bar i{display:block;height:100%;background:var(--tmh-ok);border-radius:3px}
+
+.card{background:#fff;border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);box-shadow:var(--tmh-shadow-sm);overflow:hidden;margin-bottom:16px}
+.card.urgent{border-top:2px solid var(--tmh-coral-600)}
+.cardhead{display:flex;align-items:center;gap:11px;padding:13px 16px;border-bottom:1px solid var(--tmh-line)}
+.cardhead h2{font-size:16.5px;letter-spacing:-.01em}
+.cardhead .hint{font-size:12.5px;color:var(--tmh-ink-600);max-width:660px}
+.cardhead .spacer{flex:1}
+.cnt-badge{font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;background:var(--tmh-coral-50);color:var(--tmh-coral-600);font-variant-numeric:tabular-nums}
+
+table{border-collapse:separate;border-spacing:0;width:100%}
+thead th{background:var(--tmh-teal-50);color:var(--tmh-ink-600);font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;text-align:left;padding:9px 12px;border-bottom:1px solid var(--tmh-line);white-space:nowrap}
+table.grid thead th{position:sticky;top:56px;z-index:20}
+thead th.day{text-align:center;width:94px}
+thead th.day .dow{display:block;font-size:10.5px}
+thead th.day .dt{display:block;font-size:11px;font-weight:500;color:var(--tmh-ink-400);letter-spacing:0;text-transform:none;font-variant-numeric:tabular-nums}
+thead th.r{text-align:right}
+thead th.c{text-align:center}
+tbody td{padding:0 12px;border-bottom:1px solid var(--tmh-line);height:54px;vertical-align:middle}
+tbody tr:hover{background:var(--tmh-teal-50)}
+tbody tr.flag td:first-child{box-shadow:inset 3px 0 0 var(--tmh-coral-600)}
+tbody tr.billed{background:#F7FAF8}
+tbody tr.billed td:first-child{box-shadow:inset 3px 0 0 var(--tmh-ok)}
+tbody tr.billed:hover{background:#EFF6F2}
+tbody tr.billed .cli .nm{color:var(--tmh-ink-600)}
+tbody tr:last-child td{border-bottom:none}
+
+.cli{display:flex;flex-direction:column;gap:1px;min-width:180px}
+.cli .nm{font-weight:600;font-size:13.5px;color:var(--tmh-teal-700);cursor:pointer;display:inline-flex;align-items:center;gap:5px;width:fit-content}
+.cli .nm:hover{text-decoration:underline}
+.cli .meta{font-size:11.5px;color:var(--tmh-ink-400);font-variant-numeric:tabular-nums}
+.locpill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;letter-spacing:.03em;padding:2px 8px;border-radius:999px;background:var(--tmh-teal-50);color:var(--tmh-teal-700);white-space:nowrap}
+.locpill.op{background:#EAF1F5;color:var(--tmh-info)}
+.payer{font-size:12px;color:var(--tmh-ink-600);white-space:nowrap}
+.authno{font-size:11px;color:var(--tmh-ink-400)}
+.apill{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.apill::before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor}
+.a-ok{background:#E6F2EC;color:var(--tmh-ok)}
+.a-soon{background:#FBF3E2;color:var(--tmh-warn)}
+.a-past{background:var(--tmh-coral-50);color:var(--tmh-coral-600)}
+.a-none{background:#F2F4F3;color:var(--tmh-neutral)}
+.aend{font-size:11px;color:var(--tmh-ink-400);font-variant-numeric:tabular-nums;margin-top:2px}
+
+/* ---- cells: now hold 1..3 codes ---- */
+td.cell{text-align:center;padding:0;position:relative}
+.cellbox{display:flex;align-items:center;justify-content:center;gap:3px;height:38px;cursor:pointer;position:relative;border-radius:var(--tmh-radius-sm);transition:.12s;margin:0 4px}
+.cellbox:hover{background:rgba(19,94,90,.06)}
+.cellbox.locked{cursor:not-allowed}
+.cellbox.locked:hover{background:transparent}
+.chip{height:32px;border-radius:var(--tmh-radius-sm);display:grid;place-items:center;font-size:12.5px;font-weight:700;
+  border:1px solid transparent;font-variant-numeric:tabular-nums;padding:0 7px;min-width:34px}
+.chip.solo{min-width:52px;font-size:13px}
+.c-I{background:#E4F1EC;color:#1F6F58;border-color:#C3E1D7}
+.c-G{background:#E9F1F6;color:#215F7C;border-color:#CBE0EA}
+.c-T{background:#EDEBF7;color:#4B4694;border-color:#D8D4EE}
+.c-BPS{background:#F3EEF9;color:#6B4A93;border-color:#E2D8EF;font-size:10px}
+.c-NB{background:#F7F0EF;color:#A03F35;border-color:#EBD8D5;font-size:10px}
+.c-HRS{background:#FBF3E2;color:#95650F;border-color:#F0E1C2}
+.c-DC{background:#F2F4F3;color:#596967;border-color:#E2E7E5;font-size:10px}
+.c-none{color:var(--tmh-ink-400);font-weight:400;font-size:15px;background:transparent;border-color:transparent}
+.cellbox .ovr{position:absolute;top:1px;right:2px;width:5px;height:5px;border-radius:50%;background:var(--tmh-coral-600)}
+.cellbox .past{position:absolute;bottom:-3px;left:0;right:0;font-size:8.5px;font-weight:700;color:#95650F;opacity:.85}
+td.oow{background:repeating-linear-gradient(45deg,transparent,transparent 5px,rgba(201,136,30,.07) 5px,rgba(201,136,30,.07) 10px)}
+td.tot{text-align:right;font-variant-numeric:tabular-nums;font-weight:600;font-size:13.5px}
+td.tot .sm{display:block;font-size:11px;font-weight:500;color:var(--tmh-ink-400)}
+td.status{text-align:center}
+.billpill{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:3px 9px;border-radius:999px;background:#E6F2EC;color:var(--tmh-ok);white-space:nowrap}
+.billpill::before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor}
+.billmeta{font-size:10.5px;color:var(--tmh-ink-400);margin-top:2px;font-variant-numeric:tabular-nums}
+
+tr.pend td{height:auto;padding-top:11px;padding-bottom:11px}
+tr.pend.done{opacity:.55}
+.wkchip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:var(--tmh-teal-50);color:var(--tmh-teal-700);cursor:pointer;border:1px solid var(--tmh-teal-200)}
+.wkchip:hover{background:var(--tmh-teal-200)}
+.wkchip.cur{background:var(--tmh-teal-700);color:#fff;border-color:var(--tmh-teal-700)}
+.datelist{display:flex;flex-wrap:wrap;gap:5px}
+.dchip{font-size:11.5px;font-weight:600;padding:2px 7px;border-radius:var(--tmh-radius-sm);background:#FBF3E2;color:#95650F;border:1px solid #F0E1C2;font-variant-numeric:tabular-nums}
+.dchip .k{opacity:.65;font-weight:500;margin-left:3px}
+.pastbig{font-family:'IBM Plex Mono',monospace;font-size:16px;font-weight:500;color:var(--tmh-coral-600);font-variant-numeric:tabular-nums}
+.pastbig .u{font-size:11px;color:var(--tmh-ink-400);font-family:'Hanken Grotesk',sans-serif}
+.acts{display:flex;gap:6px;justify-content:flex-end}
+.resolved{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;color:var(--tmh-ok)}
+.retroform{background:var(--tmh-ground);border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);padding:11px 13px;margin-top:9px;display:flex;gap:9px;align-items:flex-end;flex-wrap:wrap}
+.fld{display:flex;flex-direction:column;gap:3px}
+.fld label{font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--tmh-ink-400)}
+.fld input{border:1px solid var(--tmh-line);border-radius:var(--tmh-radius-sm);padding:6px 9px;font:inherit;font-size:12.5px;outline:none;background:#fff}
+.fld input:focus{border-color:var(--tmh-teal-500)}
+
+.legend{display:flex;align-items:center;gap:15px;flex-wrap:wrap;padding:11px 14px;border-top:1px solid var(--tmh-line);background:var(--tmh-ground)}
+.lg{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--tmh-ink-600)}
+.lg .sw{height:20px;border-radius:4px;display:grid;place-items:center;font-size:10px;font-weight:700;border:1px solid transparent;padding:0 6px;min-width:24px}
+.legend .note{margin-left:auto;font-size:11.5px;color:var(--tmh-ink-400);display:flex;align-items:center;gap:6px}
+
+.empty{padding:44px 20px 56px;text-align:center;position:relative;overflow:hidden}
+.empty svg.wave{position:absolute;left:0;right:0;bottom:0;width:100%;height:66px;opacity:.35}
+.empty h3{font-size:16px;margin-bottom:4px}
+.empty p{color:var(--tmh-ink-600);font-size:13px;margin:0}
+.empty .ic{color:var(--tmh-teal-500);margin-bottom:8px}
+
+.pop{position:absolute;z-index:80;background:#fff;border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);box-shadow:var(--tmh-shadow-lg);width:262px;padding:12px;display:none}
+.pop.on{display:block}
+.pop .ph{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tmh-ink-400)}
+.pop .pd{font-size:13px;font-weight:600;margin-bottom:9px}
+.pop .auto{font-size:11.5px;color:var(--tmh-ink-600);background:var(--tmh-ground);border:1px solid var(--tmh-line);border-radius:var(--tmh-radius-sm);padding:6px 8px;margin-bottom:9px;line-height:1.4}
+.pop .mshint{font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--tmh-ink-400);margin-bottom:5px}
+.pop .opts{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:9px}
+.pop .opt{height:30px;border-radius:var(--tmh-radius-sm);border:1px solid var(--tmh-line);background:#fff;font-size:11.5px;font-weight:700;cursor:pointer;color:var(--tmh-ink-600)}
+.pop .opt:hover{border-color:var(--tmh-teal-500);color:var(--tmh-teal-700)}
+.pop .opt.sel{background:var(--tmh-teal-700);color:#fff;border-color:var(--tmh-teal-700)}
+.pop input.hrs{width:100%;border:1px solid var(--tmh-line);border-radius:var(--tmh-radius-sm);padding:6px 8px;font:inherit;font-size:12.5px;margin-bottom:9px;outline:none}
+.pop .pf{display:flex;gap:6px}
+.pop .pf button{flex:1;font-size:12px;padding:6px 0}
+.pop .lockmsg{font-size:12px;color:#7A540C;background:#FBF3E2;border:1px solid #F0E1C2;border-radius:var(--tmh-radius-sm);padding:8px 10px;line-height:1.4}
+
+.scrim{position:fixed;inset:0;background:rgba(14,58,58,.28);opacity:0;pointer-events:none;transition:.2s;z-index:90}
+.scrim.on{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:680px;max-width:94vw;background:var(--tmh-ground);box-shadow:var(--tmh-shadow-lg);transform:translateX(100%);transition:transform .22s cubic-bezier(.4,0,.2,1);z-index:95;display:flex;flex-direction:column}
+.drawer.on{transform:none}
+.dhead{background:#fff;border-bottom:1px solid var(--tmh-line);padding:16px 20px}
+.dhead .row1{display:flex;align-items:flex-start;gap:12px}
+.dhead h2{font-size:20px}
+.dhead .spacer{flex:1}
+.closebtn{width:30px;height:30px;border-radius:var(--tmh-radius-sm);border:1px solid var(--tmh-line);background:#fff;color:var(--tmh-ink-600);display:grid;place-items:center;cursor:pointer}
+.closebtn:hover{background:var(--tmh-teal-50)}
+.facts{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:13px}
+.fact .fl{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tmh-ink-400)}
+.fact .fv{font-size:13px;font-weight:500;margin-top:1px;font-variant-numeric:tabular-nums}
+.dbody{flex:1;overflow-y:auto;padding:16px 20px 32px}
+.daygroup{background:#fff;border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);margin-bottom:10px;overflow:hidden}
+.daygroup .dg-h{display:flex;align-items:center;gap:8px;padding:9px 14px;background:var(--tmh-teal-50);border-bottom:1px solid var(--tmh-line)}
+.daygroup .dg-h .dd{font-size:12.5px;font-weight:700}
+.daygroup .dg-h .spacer{flex:1}
+.daygroup .dg-h .hh{font-size:12px;color:var(--tmh-ink-600);font-variant-numeric:tabular-nums}
+.sess{display:flex;align-items:flex-start;gap:10px;padding:9px 14px;border-bottom:1px solid var(--tmh-line);font-size:12.5px}
+.sess:last-child{border-bottom:none}
+.sess .ic{color:var(--tmh-ink-400);margin-top:2px;flex:none}
+.sess .body{flex:1;min-width:0}
+.sess .tp{font-weight:600}
+.sess .mt{font-size:11.5px;color:var(--tmh-ink-400);font-variant-numeric:tabular-nums}
+.sess .dur{font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.sess.absent{opacity:.5}
+.sess.absent .dur{text-decoration:line-through}
+.badge{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:1px 6px;border-radius:999px;background:var(--tmh-ground);color:var(--tmh-ink-600);border:1px solid var(--tmh-line)}
+.badge.eval{background:#F3EEF9;color:#6B4A93;border-color:#E2D8EF}
+.warnrow{display:flex;gap:9px;align-items:flex-start;background:#FBF3E2;border:1px solid #F0E1C2;color:#7A540C;border-radius:var(--tmh-radius);padding:10px 13px;font-size:12.5px;margin-bottom:12px;line-height:1.45}
+.warnrow.assume{background:var(--tmh-coral-50);border-color:#F3D6CD;color:#8E3A2A}
+.warnrow.locked{background:#E6F2EC;border-color:#C3E1D7;color:#1F6F58}
+.dsec{font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--tmh-ink-400);margin:16px 0 7px}
+.authseg{display:flex;align-items:center;gap:9px;background:#fff;border:1px solid var(--tmh-line);border-radius:var(--tmh-radius);padding:9px 13px;margin-bottom:6px;font-size:12.5px}
+.authseg .sp{flex:1}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="wordmark">
+    <svg class="hexmark" viewBox="0 0 20 22" fill="none"><path d="M10 1l7.8 4.5v9L10 19l-7.8-4.5v-9L10 1z" stroke="#7FD4C6" stroke-width="1.6"/><path d="M10 6.2l3.3 1.9v3.8L10 13.8 6.7 11.9V8.1L10 6.2z" fill="#E2674F"/></svg>
+    Treat Mental Health
+  </span>
+  <select class="facility-switch">
+    <option>Treat California — Costa Mesa</option><option>Treat Mental Health Washington</option><option>Treat Texas — Dallas</option>
+  </select>
+  <nav class="topnav"><a href="#">Admissions</a><a href="#">Clinical</a><a href="#" class="on">Billing &amp; UR</a><a href="#">Compliance</a></nav>
+  <span class="spacer"></span><div class="avatar">AB</div>
+</div>
+
+<div class="wrap">
+  <div class="pagehead">
+    <div><h1>Weekly Billable Days</h1>
+      <div class="sub">Group &amp; therapy hours tallied against authorized level of care · synced from Kipu</div></div>
+    <span class="spacer"></span>
+    <button class="btn btn-ghost" id="btnBillAll"><i data-lucide="check-check" style="width:14px;height:14px"></i>Mark all shown billed</button>
+    <button class="btn btn-primary"><i data-lucide="file-down" style="width:14px;height:14px"></i>Export week</button>
+  </div>
+
+  <div class="controls">
+    <div class="weekpick">
+      <label>Bill week</label>
+      <button class="stepbtn" id="prevWk"><i data-lucide="chevron-left" style="width:15px;height:15px"></i></button>
+      <select id="weekSel"></select>
+      <button class="stepbtn" id="nextWk"><i data-lucide="chevron-right" style="width:15px;height:15px"></i></button>
+    </div>
+    <div class="segs" id="segs"></div>
+    <span class="spacer"></span>
+    <select class="locfilter" id="locSel">
+      <option value="">All levels of care</option><option value="MH IOP 3 Adult">MH IOP 3 Adult</option>
+      <option value="MH OP 4 Adult">MH OP 4 Adult</option><option value="MH OP 2 Adult">MH OP 2 Adult</option>
+    </select>
+    <div class="search"><i data-lucide="search" style="width:15px;height:15px;color:#859794"></i>
+      <input id="q" placeholder="Client or auth #"></div>
+  </div>
+
+  <div class="strip" id="strip"></div>
+
+  <div class="card">
+    <div id="tableHost"></div>
+    <div class="legend">
+      <span class="lg"><span class="sw c-I">I</span> IOP day — 3.0 hrs programming</span>
+      <span class="lg"><span class="sw c-G">G</span> Group</span>
+      <span class="lg"><span class="sw c-T">T</span> Therapy</span>
+      <span class="lg"><span class="sw c-BPS">BPS</span> Biopsychosocial</span>
+      <span class="lg"><span class="sw c-BPS">BPS</span><span class="sw c-I">I</span> stacked — both billable</span>
+      <span class="lg"><span class="sw c-HRS">1.5</span> Hours only</span>
+      <span class="lg"><span class="sw c-NB">N/B</span> Over cap</span>
+      <span class="lg"><span class="sw c-DC">D/C</span> Discharged</span>
+      <span class="note"><span style="width:6px;height:6px;border-radius:50%;background:var(--tmh-coral-600);display:inline-block"></span> override · <b style="color:#95650F">+Nd</b> past auth</span>
+    </div>
+  </div>
+
+  <div class="card urgent" id="pendCard"></div>
+</div>
+
+<div class="pop" id="pop"></div>
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer"></aside>
+
+<script>
+/* ===== LOC CONFIG — the editable mapping billing owns ===== */
+const LOC_CONFIG={
+  'MH IOP 3 Adult':{track:'IOP',capDays:3,minHours:3.0},
+  'MH IOP 4 Adult':{track:'IOP',capDays:4,minHours:3.0},
+  // ⚠ UNRESOLVED: OP level, or IOP-4 by another name? Flip track:'OP' to re-mark as G/T.
+  'MH OP 4 Adult': {track:'IOP',capDays:4,minHours:3.0,ambiguous:true},
+  'MH OP 2 Adult': {track:'OP', capDays:2,minHours:0}
+};
+/* ASSUMPTIONS
+   A1 chronological over-cap tie-break        A2 evals count only when billable===true
+   A3 hours-but-no-code → show hours          A4 "No Auth Required" always in-window
+   A5 D/C now STACKS with billable codes (changed in v3 — was: D/C overrode everything)
+   A6 days-past-auth measured from latest auth end
+   A7 BPS stacks with I/G/T and does NOT consume a cap day
+   A8 IOP track never emits a bare G or T — individual therapy hours roll into the I threshold */
+const BILLABLE=new Set(['I','G','T','BPS']);
+const CODE_ORDER=['BPS','I','G','T','N/B','HRS','D/C'];
+const CHIPCLS={I:'c-I',G:'c-G',T:'c-T',BPS:'c-BPS','N/B':'c-NB',HRS:'c-HRS','D/C':'c-DC'};
+
+const WEEKS=[
+  {id:'2026-08-10',label:'Aug 10 – Aug 16, 2026',start:'2026-08-10'},
+  {id:'2026-08-03',label:'Aug 3 – Aug 9, 2026',  start:'2026-08-03'},
+  {id:'2026-07-27',label:'Jul 27 – Aug 2, 2026', start:'2026-07-27'},
+  {id:'2026-07-20',label:'Jul 20 – Jul 26, 2026',start:'2026-07-20'}];
+const DOW=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+const G=(dt,topic,prov,st,en,hrs,present=true)=>({date:dt,kind:'group',topic,provider:prov,start:st,end:en,hrs,present});
+const E=(dt,topic,prov,st,en,hrs,billable=true)=>({date:dt,kind:'therapy',topic,provider:prov,start:st,end:en,hrs,present:true,billable});
+const B=(dt,topic,prov,st,en,hrs)=>({date:dt,kind:'bps',topic,provider:prov,start:st,end:en,hrs,present:true,billable:true});
+
+/* SYNTHETIC — mirrors the Kipu report structure; all identities fabricated. */
+const CLIENTS=[
+ {id:'c1',name:'Jordan Maren',mrn:'TC-40118',admit:'2026-07-29',discharge:'2026-08-13',loc:'MH IOP 3 Adult',payer:'Anthem CA',
+  auths:[{no:'UM103xxxxx42',start:'2026-07-29',end:'2026-10-26',freq:'3 Day (M/W/F)'}],
+  sessions:[G('2026-08-12','Self-Esteem: Walking through Fear','J. Edwards, Group Facilitator','08:00 AM','09:30 AM',1.5),
+            G('2026-08-12','Life Skills and Self Care','A. Buckley, RADT','09:30 AM','11:00 AM',1.5),
+            G('2026-08-13','Closure & Aftercare Planning','K. Arger, LMFT','09:00 AM','10:30 AM',1.5),
+            G('2026-08-13','Community Meeting','A. Buckley, RADT','10:30 AM','12:00 PM',1.5)]},
+
+ {id:'c2',name:'Jamie Kessler',mrn:'TC-40233',admit:'2026-08-03',discharge:null,loc:'MH IOP 3 Adult',payer:"Western Grower's Ins.",
+  auths:[{no:'20260806-0000xx',start:'2026-08-03',end:'2026-08-17',freq:'3 Day (M/W/F)'}],
+  sessions:[
+   B('2026-08-03','Biopsychosocial Assessment','K. Arger, LMFT','09:00 AM','11:00 AM',2.0),
+   G('2026-08-03','Orientation Group','L. Rayburn, Group Facilitator','01:00 PM','02:30 PM',1.5),
+   G('2026-08-05','Grounding Skills','L. Rayburn, Group Facilitator','08:00 AM','09:30 AM',1.5),
+   G('2026-08-05','Process Group','A. Buckley, RADT','09:30 AM','11:00 AM',1.5),
+   G('2026-08-07','Relapse Prevention','J. Mims, LPCC','06:00 PM','07:30 PM',1.5),
+   G('2026-08-07','Emotion Regulation','M. Lalande, Group Facilitator','07:30 PM','09:00 PM',1.5),
+   G('2026-08-10','Monday Mental, Emotional & Physical Check-In','M. Lalande, Group Facilitator','08:00 AM','09:30 AM',1.5),
+   G('2026-08-10','Changing the Narrative','J. Mims, LPCC','06:00 PM','07:30 PM',1.5),
+   G('2026-08-10','CBT Triangle — Where did my thoughts get in the way','S. Mukerji, APCC','07:30 PM','09:00 PM',1.5),
+   E('2026-08-10','New Progress Note','B. Jeskey, AMFT','01:00 PM','02:00 PM',1.0,true),
+   G('2026-08-11','Self-Esteem: Developing self-worth','J. Edwards, Group Facilitator','06:00 PM','07:30 PM',1.5),
+   G('2026-08-11','Life Skills: Self Care','J. Mims, LPCC','07:30 PM','09:00 PM',1.5),
+   G('2026-08-12','Obscure Mental Health Support Ideas','L. Rayburn, Group Facilitator','08:00 AM','09:30 AM',1.5),
+   G('2026-08-12','Shadow Work: Hurt Feelings','M. Lalande, Group Facilitator','06:00 PM','07:30 PM',1.5),
+   G('2026-08-12','Peer Support Group','A. Buckley, RADT','07:30 PM','09:00 PM',1.5),
+   G('2026-08-13','Loss of self through loss and transitions','S. Mukerji, APCC','08:00 AM','09:30 AM',1.5),
+   E('2026-08-13','Mental Health Concurrent Review','B. Jeskey, AMFT','09:44 AM','10:04 AM',0.33,false)]},
+
+ {id:'c3',name:'Iris Rowan',mrn:'TC-39877',admit:'2026-03-25',discharge:null,loc:'MH OP 4 Adult',payer:'Anthem Blue Cross of CA',
+  auths:[{no:'No Auth Required',start:'2026-07-30',end:'2026-09-24',freq:''}],
+  sessions:[
+   G('2026-08-10','Changing the Narrative','J. Mims, LPCC','06:00 PM','07:30 PM',1.5),
+   G('2026-08-10','CBT Triangle — Where did my thoughts get in the way','S. Mukerji, APCC','07:30 PM','09:00 PM',1.5),
+   G('2026-08-11','Self-Esteem: Developing self-worth','J. Edwards, Group Facilitator','06:00 PM','07:30 PM',1.5),
+   G('2026-08-11','Life Skills: Self Care','J. Mims, LPCC','07:30 PM','09:00 PM',1.5),
+   G('2026-08-12','Shadow Work: Hurt Feelings','M. Lalande, Group Facilitator','06:00 PM','07:30 PM',1.5),
+   G('2026-08-12','Peer Support Group','A. Buckley, RADT','07:30 PM','09:00 PM',1.5),
+   E('2026-08-13','New Progress Note','K. Arger, LMFT','03:00 PM','03:50 PM',0.83,true)]},
+
+ {id:'c4',name:'Amir Desai',mrn:'TC-39640',admit:'2026-03-18',discharge:null,loc:'MH OP 2 Adult',payer:'Cigna',
+  auths:[{no:'No Auth Required',start:'2026-08-04',end:'2026-09-28',freq:''}],
+  sessions:[
+   E('2026-08-11','New Progress Note','B. Jeskey, AMFT','05:00 PM','06:00 PM',1.0,true),
+   E('2026-08-11','PNS Psychiatric Consultation & Follow Up','M. Hutchinson, PA','12:00 AM','',0,true),
+   G('2026-08-12','Peer Support Group','A. Buckley, RADT','06:00 PM','07:30 PM',1.5),
+   E('2026-08-12','Individual Therapy — Progress Note','B. Jeskey, AMFT','04:00 PM','05:00 PM',1.0,true)]},
+
+ {id:'c5',name:'Casey Trent',mrn:'TC-40301',admit:'2026-07-14',discharge:null,loc:'MH IOP 3 Adult',payer:'Carelon',
+  auths:[{no:'U2610xxxxU',start:'2026-07-14',end:'2026-09-01',freq:'3 Day (M/W/F)'}],
+  sessions:[
+   G('2026-08-10','Grounding & Distress Tolerance','L. Rayburn, Group Facilitator','08:00 AM','09:30 AM',1.5),
+   G('2026-08-10','Process Group','A. Buckley, RADT','09:30 AM','11:00 AM',1.5),
+   G('2026-08-11','Relapse Prevention','J. Mims, LPCC','06:00 PM','07:30 PM',1.5),
+   G('2026-08-11','Emotion Regulation','M. Lalande, Group Facilitator','07:30 PM','09:00 PM',1.5),
+   G('2026-08-12','Interpersonal Effectiveness','S. Mukerji, APCC','08:00 AM','09:30 AM',1.5),
+   G('2026-08-12','Values & Committed Action','J. Edwards, Group Facilitator','09:30 AM','11:00 AM',1.5),
+   G('2026-08-13','Art as Expression','J. Mims, LPCC','06:00 PM','07:30 PM',1.5,false),
+   G('2026-08-14','Mindfulness Practice','L. Rayburn, Group Facilitator','08:00 AM','09:30 AM',1.5),
+   G('2026-08-14','Community Meeting','A. Buckley, RADT','09:30 AM','11:00 AM',1.5)]},
+
+ {id:'c6',name:'Priya Sandoval',mrn:'TC-40355',admit:'2026-06-30',discharge:null,loc:'MH IOP 3 Adult',payer:'UMR',
+  auths:[{no:'U2609xxxxK',start:'2026-07-06',end:'2026-08-09',freq:'3 Day (M/W/F)'}],
+  sessions:[
+   G('2026-08-04','Shame Resilience','M. Lalande, Group Facilitator','06:00 PM','07:30 PM',1.5),
+   G('2026-08-04','Peer Support Group','A. Buckley, RADT','07:30 PM','09:00 PM',1.5),
+   G('2026-08-06','Distress Tolerance','J. Mims, LPCC','06:00 PM','07:30 PM',1.5),
+   G('2026-08-06','Process Group','L. Rayburn, Group Facilitator','07:30 PM','09:00 PM',1.5),
+   G('2026-08-11','Shame Resilience','M. Lalande, Group Facilitator','06:00 PM','07:30 PM',1.5),
+   G('2026-08-11','Peer Support Group','A. Buckley, RADT','07:30 PM','09:00 PM',1.5),
+   B('2026-08-13','Biopsychosocial Assessment','K. Arger, LMFT','01:00 PM','03:00 PM',2.0)]},
+
+ {id:'c7',name:'Marcus Okonkwo',mrn:'TC-40190',admit:'2026-06-22',discharge:null,loc:'MH IOP 3 Adult',payer:'Aetna',
+  auths:[{no:'AE7741xxxx',start:'2026-07-06',end:'2026-07-31',freq:'3 Day (M/W/F)'}],
+  sessions:[
+   G('2026-08-03','Coping Ahead','L. Rayburn, Group Facilitator','08:00 AM','09:30 AM',1.5),
+   G('2026-08-03','Process Group','A. Buckley, RADT','09:30 AM','11:00 AM',1.5),
+   G('2026-08-05','Radical Acceptance','J. Mims, LPCC','08:00 AM','09:30 AM',1.5),
+   G('2026-08-05','Anger & Boundaries','M. Lalande, Group Facilitator','09:30 AM','11:00 AM',1.5),
+   G('2026-08-07','Relapse Prevention','S. Mukerji, APCC','08:00 AM','09:30 AM',1.5),
+   G('2026-08-07','Community Meeting','J. Edwards, Group Facilitator','09:30 AM','11:00 AM',1.5),
+   G('2026-08-10','Grounding Skills','L. Rayburn, Group Facilitator','08:00 AM','09:30 AM',1.5),
+   G('2026-08-10','Peer Support Group','A. Buckley, RADT','09:30 AM','11:00 AM',1.5)]},
+
+ {id:'c8',name:'Nadia Farrell',mrn:'TC-40412',admit:'2026-08-11',discharge:null,loc:'MH IOP 3 Adult',payer:'Blue Shield of CA',
+  auths:[{no:'BS2608xxxx',start:'2026-08-11',end:'2026-09-08',freq:'3 Day (M/W/F)'}],
+  sessions:[
+   B('2026-08-11','Biopsychosocial Assessment','K. Arger, LMFT','09:00 AM','11:00 AM',2.0),
+   G('2026-08-11','Orientation Group','L. Rayburn, Group Facilitator','01:00 PM','02:30 PM',1.5),
+   G('2026-08-12','Grounding Skills','J. Edwards, Group Facilitator','08:00 AM','09:30 AM',1.5),
+   G('2026-08-12','Process Group','A. Buckley, RADT','09:30 AM','11:00 AM',1.5),
+   G('2026-08-13','Emotion Regulation','M. Lalande, Group Facilitator','06:00 PM','07:30 PM',1.5),
+   G('2026-08-13','Peer Support Group','J. Mims, LPCC','07:30 PM','09:00 PM',1.5)]}
+];
+
+const overrides={};                                  // "cid:ISOdate" -> {codes:[],hrs}
+const writeoffs={};                                  // "cid:weekId"  -> true
+const billed={'c1:2026-08-03':{at:'2026-08-11',by:'AB'}};   // "cid:weekId" -> {at,by}
+let curWeek=WEEKS[0].id, seg='all', qStr='', locStr='', openRetro=null;
+
+const iso=(s,d)=>{const t=new Date(s+'T00:00:00');t.setDate(t.getDate()+d);return t.toISOString().slice(0,10);};
+const dayDiff=(a,b)=>Math.round((new Date(a+'T00:00:00')-new Date(b+'T00:00:00'))/86400000);
+const fmtShort=s=>{const t=new Date(s+'T00:00:00');return (t.getMonth()+1)+'/'+t.getDate();};
+const fmtLong=s=>{const t=new Date(s+'T00:00:00');return t.toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'});};
+const covering=(c,d)=>c.auths.find(a=>a.no==='No Auth Required'?d>=a.start:(d>=a.start&&d<=a.end));
+const latestEnd=c=>c.auths.reduce((m,a)=>a.end>m?a.end:m,'0000-00-00');
+const daysPast=(c,d)=>covering(c,d)?0:Math.max(0,dayDiff(d,latestEnd(c)));
+const isBilled=(cid,wid)=>!!billed[cid+':'+wid];
+
+/* ================= rules engine — multi-code ================= */
+function computeRow(c,weekStart){
+  const cfg=LOC_CONFIG[c.loc]||{track:'OP',capDays:7,minHours:0};
+  const days=[];
+  for(let i=0;i<7;i++){
+    const date=iso(weekStart,i);
+    const sess=c.sessions.filter(s=>s.date===date);
+    const counted=sess.filter(s=>s.present&&(s.kind==='group'||s.billable===true));   // A2
+    const hrs=+counted.reduce((a,s)=>a+s.hrs,0).toFixed(2);
+    days.push({i,date,sess,hrs,
+      hasGroup:counted.some(s=>s.kind==='group'),
+      hasTherapy:counted.some(s=>s.kind==='therapy'),
+      hasBps:counted.some(s=>s.kind==='bps'),
+      oow:hrs>0&&!covering(c,date),
+      past:daysPast(c,date),
+      dc:c.discharge===date});
+  }
+  // Cap applies to IOP days (IOP track) or attended G/T days (OP track). BPS rides free (A7).
+  const qual=days.filter(d=>!d.oow&&d.hrs>0&&
+      (cfg.track==='IOP' ? d.hrs>=cfg.minHours : (d.hasGroup||d.hasTherapy))).sort((a,b)=>a.i-b.i);
+  const keep=new Set(qual.slice(0,cfg.capDays).map(d=>d.i));
+  const over=new Set(qual.slice(cfg.capDays).map(d=>d.i));
+
+  days.forEach(d=>{
+    const codes=[];
+    if(d.hrs>0&&!d.oow){
+      if(d.hasBps)codes.push('BPS');                                   // A7 — stacks, no cap cost
+      if(keep.has(d.i)){
+        if(cfg.track==='IOP')codes.push('I');                          // A8 — no bare G/T on IOP
+        else{ if(d.hasGroup)codes.push('G'); if(d.hasTherapy)codes.push('T'); }
+      } else if(over.has(d.i)) codes.push('N/B');
+    }
+    if(d.hrs>0&&d.oow)codes.push('HRS');                               // outside auth window
+    if(d.hrs>0&&!codes.length)codes.push('HRS');                       // A3 — below threshold
+    if(d.dc)codes.push('D/C');                                         // A5 — now stacks
+    d.codes=codes.sort((a,b)=>CODE_ORDER.indexOf(a)-CODE_ORDER.indexOf(b));
+    const ov=overrides[c.id+':'+d.date];
+    if(ov){d.codes=ov.codes.slice();d.ovHrs=ov.hrs;d.overridden=true;}
+  });
+
+  const billableDays=days.filter(d=>d.codes.some(x=>BILLABLE.has(x))).length;
+  const iopDays=days.filter(d=>d.codes.includes('I')).length;
+  const total=+days.reduce((a,d)=>a+d.hrs,0).toFixed(2);
+  const maxPast=days.reduce((m,d)=>d.hrs>0&&d.past>m?d.past:m,0);
+  const flag=days.some(d=>d.codes.includes('N/B')||d.codes.includes('HRS'))||cfg.ambiguous;
+  return {days,billableDays,iopDays,total,cfg,flag,maxPast,capDays:cfg.capDays};
+}
+
+function pendingItems(){
+  const out=[];
+  CLIENTS.forEach(c=>WEEKS.forEach(w=>{
+    const r=computeRow(c,w.start);
+    const hits=r.days.filter(d=>d.oow&&d.hrs>0&&!d.overridden);
+    if(!hits.length)return;
+    out.push({c,w,r,hits,hours:+hits.reduce((a,d)=>a+d.hrs,0).toFixed(2),
+      maxPast:hits.reduce((m,d)=>Math.max(m,d.past),0),
+      writtenOff:!!writeoffs[c.id+':'+w.id], billed:isBilled(c.id,w.id)});
+  }));
+  return out.sort((a,b)=>b.maxPast-a.maxPast);
+}
+
+/* ================= render ================= */
+function render(){
+  const ws=WEEKS.find(w=>w.id===curWeek).start;
+  const all=CLIENTS.map(c=>({c,r:computeRow(c,ws)})).filter(x=>x.r.total>0||x.r.days.some(d=>d.dc));
+  const nFlag=all.filter(x=>x.r.flag).length;
+  const nOvr=all.filter(x=>x.r.days.some(d=>d.overridden)).length;
+  const nPast=all.filter(x=>x.r.maxPast>0).length;
+  const nBilled=all.filter(x=>isBilled(x.c.id,curWeek)).length;
+
+  document.getElementById('segs').innerHTML=[
+    ['all','All',all.length],['unbilled','Unbilled',all.length-nBilled],['billed','Billed',nBilled],
+    ['flag','Needs review',nFlag],['past','Past auth',nPast],['ovr','Overridden',nOvr]
+  ].map(([k,l,n])=>`<button class="seg ${seg===k?'on':''}" data-seg="${k}">${l}<span class="cnt">${n}</span></button>`).join('');
+
+  const pend=pendingItems(), openPend=pend.filter(p=>!p.writtenOff);
+  const billDays=all.reduce((a,x)=>a+x.r.billableDays,0);
+  const totHrs=+all.reduce((a,x)=>a+x.r.total,0).toFixed(1);
+  const pendHrs=+openPend.reduce((a,p)=>a+p.hours,0).toFixed(1);
+  const worstPast=openPend.reduce((m,p)=>Math.max(m,p.maxPast),0);
+  const pct=all.length?Math.round(nBilled/all.length*100):0;
+
+  document.getElementById('strip').innerHTML=`
+    <div class="tile hero"><div class="lab">Billable days this week</div><div class="val">${billDays}</div>
+      <div class="ctx"><b>${all.length}</b> clients with activity · ${fmtShort(ws)}–${fmtShort(iso(ws,6))}</div></div>
+    <div class="tile good"><div class="lab">Billed off</div><div class="val">${nBilled}<span style="font-size:16px;color:var(--tmh-ink-400)">/${all.length}</span></div>
+      <div class="ctx">${pct}% of the week closed</div><div class="bar"><i style="width:${pct}%"></i></div></div>
+    <div class="tile"><div class="lab">Attended hours</div><div class="val">${totHrs}</div>
+      <div class="ctx">present only, evals gated on billable</div></div>
+    <div class="tile alarm"><div class="lab">Awaiting auth</div><div class="val">${pendHrs}</div>
+      <div class="ctx"><b>${openPend.length}</b> client-weeks in lookback</div></div>
+    <div class="tile alarm"><div class="lab">Furthest past auth</div><div class="val">${worstPast}<span style="font-size:15px;color:var(--tmh-ink-400)">d</span></div>
+      <div class="ctx">${worstPast>7?'escalate to UR':'within one week'}</div></div>`;
+
+  const data=all.filter(({c,r})=>{
+    if(locStr&&c.loc!==locStr)return false;
+    if(qStr){const q=qStr.toLowerCase();
+      if(!(c.name.toLowerCase().includes(q)||c.auths.some(a=>a.no.toLowerCase().includes(q))||c.mrn.toLowerCase().includes(q)))return false;}
+    if(seg==='flag')return r.flag;
+    if(seg==='past')return r.maxPast>0;
+    if(seg==='ovr')return r.days.some(d=>d.overridden);
+    if(seg==='billed')return isBilled(c.id,curWeek);
+    if(seg==='unbilled')return !isBilled(c.id,curWeek);
+    return true;});
+
+  document.getElementById('tableHost').innerHTML=!data.length
+    ?emptyState('No clients match this view','Clear the filters, or pick a different bill week.')
+    :`<table class="grid"><thead><tr>
+      <th>Client</th><th>Level of care</th><th>Payer</th><th>Auth status</th>
+      ${DOW.map((d,i)=>`<th class="day"><span class="dow">${d}</span><span class="dt">${fmtShort(iso(ws,i))}</span></th>`).join('')}
+      <th class="r">Hrs</th><th class="r">Days</th><th class="c">Week status</th>
+    </tr></thead><tbody>
+    ${data.map(({c,r})=>{const bl=isBilled(c.id,curWeek);return `<tr class="${bl?'billed':(r.flag?'flag':'')}">
+      <td><div class="cli"><span class="nm" data-client="${c.id}">${c.name}<i data-lucide="chevron-right" style="width:13px;height:13px"></i></span>
+        <span class="meta">${c.mrn} · adm ${fmtShort(c.admit)}${c.discharge?` · d/c ${fmtShort(c.discharge)}`:''}</span></div></td>
+      <td><span class="locpill ${r.cfg.track==='OP'?'op':''}">${c.loc}</span>
+        ${r.cfg.ambiguous?`<div class="authno" style="color:var(--tmh-coral-600);margin-top:2px">⚠ track unconfirmed</div>`:''}</td>
+      <td><div class="payer">${c.payer}</div></td>
+      <td>${authPill(c,ws,r)}</td>
+      ${r.days.map(d=>cellHtml(c,d,bl)).join('')}
+      <td class="tot">${r.total.toFixed(1)}</td>
+      <td class="tot">${r.billableDays}<span class="sm">${r.cfg.track==='IOP'?`${r.iopDays} IOP / ${r.capDays}`:`cap ${r.capDays}`}</span></td>
+      <td class="status">${bl
+        ?`<span class="billpill">Billed</span><div class="billmeta">${fmtShort(billed[c.id+':'+curWeek].at)} · ${billed[c.id+':'+curWeek].by}</div>
+          <button class="btn btn-ghost btn-xs" style="margin-top:4px" data-unbill="${c.id}">Reopen</button>`
+        :`<button class="btn btn-secondary btn-sm" data-bill="${c.id}"><i data-lucide="check" style="width:13px;height:13px"></i>Mark billed</button>`}</td>
+    </tr>`}).join('')}</tbody></table>`;
+
+  renderPending(pend);
+  lucide.createIcons(); wire();
+}
+
+function authPill(c,ws,r){
+  const wkEnd=iso(ws,6), a=c.auths[c.auths.length-1];
+  let pill;
+  if(a.no==='No Auth Required')pill=`<span class="apill a-none">No auth req</span>`;
+  else if(r.maxPast>0)pill=`<span class="apill a-past">+${r.maxPast}d past auth</span>`;
+  else{const left=dayDiff(latestEnd(c),wkEnd);
+    pill=left<0?`<span class="apill a-past">expired ${-left}d</span>`
+       :left<=7?`<span class="apill a-soon">ends in ${left}d</span>`
+               :`<span class="apill a-ok">active</span>`;}
+  return pill+`<div class="aend mono">${a.no} · thru ${fmtShort(a.end)}</div>`;
+}
+
+function chips(codes,hrs,solo){
+  if(!codes||!codes.length)return `<span class="chip c-none ${solo?'solo':''}">·</span>`;
+  return codes.map(k=>`<span class="chip ${CHIPCLS[k]} ${codes.length===1?'solo':''}">${k==='HRS'?hrs.toFixed(1):k}</span>`).join('');
+}
+function cellHtml(c,d,locked){
+  const hrs=d.ovHrs??d.hrs;
+  return `<td class="cell ${d.oow?'oow':''}">
+    <div class="cellbox ${locked?'locked':''}" data-c="${c.id}" data-d="${d.date}"
+      title="${d.hrs.toFixed(1)} hrs${d.past?' · '+d.past+' days past auth':''}${locked?' · week billed — reopen to edit':''}">
+      ${chips(d.codes,hrs)}${d.overridden?'<span class="ovr"></span>':''}${d.oow&&d.past?`<span class="past">+${d.past}d</span>`:''}
+    </div></td>`;
+}
+
+function renderPending(pend){
+  const open=pend.filter(p=>!p.writtenOff), done=pend.filter(p=>p.writtenOff);
+  document.getElementById('pendCard').innerHTML=`
+    <div class="cardhead">
+      <i data-lucide="calendar-clock" style="width:18px;height:18px;color:var(--tmh-coral-600)"></i>
+      <div><h2>Attended outside auth window</h2>
+        <div class="hint">Group or therapy delivered on days no authorization covers. When UR lands a retro auth, apply it here — every affected week re-marks itself automatically.</div></div>
+      <span class="spacer"></span>${open.length?`<span class="cnt-badge">${open.length} open</span>`:''}
+    </div>
+    ${!pend.length?emptyState('Nothing outside an auth window','Every attended day in the lookback is covered.',true):`
+    <table><thead><tr><th>Client</th><th>Level of care</th><th>Auth on file</th><th>Bill week</th>
+      <th>Unauthorized days</th><th class="r">Hrs</th><th class="r">Past auth</th><th class="r">Action</th></tr></thead><tbody>
+    ${[...open,...done].map(p=>{const a=p.c.auths[p.c.auths.length-1],key=p.c.id+':'+p.w.id;
+      return `<tr class="pend ${p.writtenOff?'done':''}">
+      <td><div class="cli"><span class="nm" data-client="${p.c.id}">${p.c.name}</span>
+        <span class="meta">${p.c.mrn} · ${p.c.payer}</span></div></td>
+      <td><span class="locpill ${LOC_CONFIG[p.c.loc]?.track==='OP'?'op':''}">${p.c.loc}</span></td>
+      <td><div class="mono" style="font-size:12px">${a.no}</div><div class="authno">thru ${fmtShort(a.end)}</div></td>
+      <td><span class="wkchip ${p.w.id===curWeek?'cur':''}" data-jump="${p.w.id}">
+        ${p.w.id===curWeek?'viewing':'go to'} ${fmtShort(p.w.start)}<i data-lucide="arrow-right" style="width:12px;height:12px"></i></span>
+        ${p.billed?'<div class="billmeta" style="color:var(--tmh-ok)">week already billed</div>':''}</td>
+      <td><div class="datelist">${p.hits.map(d=>`<span class="dchip">${DOW[d.i]} ${fmtShort(d.date)}<span class="k">${d.hasBps?'BPS':(d.hasTherapy&&!d.hasGroup?'T':'G')}</span></span>`).join('')}</div></td>
+      <td class="tot">${p.hours.toFixed(1)}</td>
+      <td class="tot"><span class="pastbig">+${p.maxPast}<span class="u">d</span></span></td>
+      <td><div class="acts">${p.writtenOff
+        ?`<span class="resolved"><i data-lucide="archive" style="width:14px;height:14px"></i>Written off</span>
+          <button class="btn btn-ghost btn-sm" data-undo="${key}">Undo</button>`
+        :`<button class="btn btn-ghost btn-sm" data-wo="${key}">Write off</button>
+          <button class="btn btn-secondary btn-sm" data-retro="${key}"><i data-lucide="file-check-2" style="width:13px;height:13px"></i>Apply retro auth</button>`}</div>
+      ${openRetro===key?retroForm(p):''}</td></tr>`;}).join('')}</tbody></table>`}`;
+}
+
+function retroForm(p){
+  const last=p.hits[p.hits.length-1].date, a=p.c.auths[p.c.auths.length-1];
+  return `<div class="retroform">
+    <div class="fld"><label>New auth #</label><input id="raNo" placeholder="e.g. U2611xxxxR" style="width:150px"></div>
+    <div class="fld"><label>Covers from</label><input id="raFrom" type="date" value="${iso(a.end,1)}"></div>
+    <div class="fld"><label>Through</label><input id="raThru" type="date" value="${iso(last,14)}"></div>
+    <button class="btn btn-primary btn-sm" data-save="${p.c.id}">Apply</button>
+    <button class="btn btn-ghost btn-sm" data-cancel="1">Cancel</button>
+    <div style="flex-basis:100%;font-size:11.5px;color:var(--tmh-ink-600);margin-top:2px">
+      Adds an auth segment. Any week whose attendance falls inside it re-marks from <b>#hours</b> to a billing code.
+      ${p.billed?'<b style="color:var(--tmh-coral-600)"> That week is already billed — this will require a rebill.</b>':''}</div></div>`;
+}
+
+const emptyState=(h,p,wave)=>`<div class="empty">
+  <i data-lucide="${wave?'check-circle-2':'search-x'}" class="ic" style="width:26px;height:26px"></i>
+  <h3>${h}</h3><p>${p}</p>
+  ${wave?`<svg class="wave" viewBox="0 0 1200 70" preserveAspectRatio="none"><path d="M0,42 C220,8 380,66 620,38 C840,12 1000,58 1200,30 L1200,70 L0,70 Z" fill="#EAF4F2"/></svg>`:''}</div>`;
+
+/* ================= override popover (multi-select) ================= */
+const pop=document.getElementById('pop'); let popCtx=null;
+function openPop(el,cid,date){
+  const c=CLIENTS.find(x=>x.id===cid);
+  if(isBilled(cid,curWeek)){
+    pop.innerHTML=`<div class="ph">${c.name}</div><div class="pd">${fmtLong(date)}</div>
+      <div class="lockmsg"><b>This week is marked billed.</b> Reopen the row before editing any cell.</div>`;
+    place(el); return;
+  }
+  const ws=WEEKS.find(w=>w.id===curWeek).start;
+  const d=computeRow(c,ws).days.find(x=>x.date===date);
+  popCtx={cid,date,sel:new Set(d.codes),hrs:(d.ovHrs??d.hrs)};
+  const codes=['I','G','T','BPS','N/B','HRS','D/C'];
+  pop.innerHTML=`<div class="ph">${c.name}</div><div class="pd">${fmtLong(date)}</div>
+    <div class="auto"><b>Auto:</b> ${d.codes.join(' + ')||'no activity'} · ${d.hrs.toFixed(1)} hrs${d.oow?` · <b>${d.past} days past auth</b>`:''}</div>
+    <div class="mshint">Codes — tap to stack</div>
+    <div class="opts">${codes.map(k=>`<button class="opt ${popCtx.sel.has(k)?'sel':''}" data-k="${k}">${k==='HRS'?'#':k}</button>`).join('')}
+      <button class="opt" data-k="__clear" style="grid-column:span 4;height:26px;font-size:11px">Clear all</button></div>
+    <input class="hrs" id="popHrs" type="number" step="0.25" value="${popCtx.hrs}" placeholder="Hours (for # cells)">
+    <div class="pf"><button class="btn btn-ghost" data-act="revert">Revert to auto</button>
+      <button class="btn btn-primary" data-act="save">Apply</button></div>`;
+  place(el);
+}
+function place(el){const b=el.getBoundingClientRect();
+  pop.style.left=Math.min(b.left+window.scrollX-104,window.innerWidth-278)+'px';
+  pop.style.top=(b.bottom+window.scrollY+7)+'px'; pop.classList.add('on');}
+pop.addEventListener('click',e=>{
+  const o=e.target.closest('.opt');
+  if(o&&popCtx){
+    if(o.dataset.k==='__clear')popCtx.sel.clear();
+    else popCtx.sel.has(o.dataset.k)?popCtx.sel.delete(o.dataset.k):popCtx.sel.add(o.dataset.k);
+    [...pop.querySelectorAll('.opt')].forEach(x=>x.classList.toggle('sel',popCtx.sel.has(x.dataset.k)));
+    return;}
+  const a=e.target.closest('[data-act]'); if(!a||!popCtx)return;
+  const key=popCtx.cid+':'+popCtx.date;
+  if(a.dataset.act==='revert')delete overrides[key];
+  else overrides[key]={codes:[...popCtx.sel].sort((x,y)=>CODE_ORDER.indexOf(x)-CODE_ORDER.indexOf(y)),
+                       hrs:parseFloat(document.getElementById('popHrs').value)||0};
+  pop.classList.remove('on'); render();
+});
+
+/* ================= drawer ================= */
+function openDrawer(cid){
+  const c=CLIENTS.find(x=>x.id===cid);
+  const ws=WEEKS.find(w=>w.id===curWeek).start;
+  const r=computeRow(c,ws), bl=isBilled(cid,curWeek);
+  const kindIcon={group:'users',therapy:'user',bps:'clipboard-list'};
+  const active=r.days.filter(d=>d.sess.length);
+  document.getElementById('drawer').innerHTML=`
+    <div class="dhead"><div class="row1">
+      <div><h2>${c.name}</h2><div class="sub mono" style="font-size:12px">${c.mrn} · ${c.payer}</div></div>
+      <span class="spacer"></span>
+      ${bl?'<span class="billpill">Billed</span>':''}
+      <button class="closebtn" id="dClose"><i data-lucide="x" style="width:16px;height:16px"></i></button></div>
+      <div class="facts">
+        <div class="fact"><div class="fl">Level of care</div><div class="fv">${c.loc}</div></div>
+        <div class="fact"><div class="fl">Latest auth thru</div><div class="fv">${fmtShort(latestEnd(c))}</div></div>
+        <div class="fact"><div class="fl">Days past auth</div><div class="fv" style="${r.maxPast?'color:var(--tmh-coral-600);font-weight:700':''}">${r.maxPast||'—'}</div></div>
+        <div class="fact"><div class="fl">Billable days</div><div class="fv">${r.billableDays}${r.cfg.track==='IOP'?` (${r.iopDays} IOP of ${r.capDays})`:` of ${r.capDays}`}</div></div>
+      </div></div>
+    <div class="dbody">
+      ${bl?`<div class="warnrow locked"><i data-lucide="lock" style="width:16px;height:16px;flex:none"></i>
+        <div><b>Week billed ${fmtShort(billed[cid+':'+curWeek].at)} by ${billed[cid+':'+curWeek].by}.</b> Cells are locked. Reopen from the grid to edit.</div></div>`:''}
+      ${r.cfg.ambiguous?`<div class="warnrow assume"><i data-lucide="alert-triangle" style="width:16px;height:16px;flex:none"></i>
+        <div><b>LOC track unconfirmed.</b> "${c.loc}" is mapped to the IOP track (${r.capDays}-day cap, ${r.cfg.minHours}h/day). If it's really OP, these days would stack as G/T.</div></div>`:''}
+      ${r.maxPast?`<div class="warnrow"><i data-lucide="calendar-x" style="width:16px;height:16px;flex:none"></i>
+        <div><b>${r.maxPast} days past the last authorization.</b> Attendance on those days shows raw hours until a retro auth is applied.</div></div>`:''}
+      <div class="dsec">Authorization history</div>
+      ${c.auths.map(a=>`<div class="authseg">
+        <i data-lucide="${a.retro?'file-check-2':'file-text'}" style="width:15px;height:15px;color:var(--tmh-ink-400)"></i>
+        <div><div class="mono" style="font-weight:600">${a.no}</div>
+          <div class="authno">${fmtShort(a.start)} – ${fmtShort(a.end)}${a.freq?' · '+a.freq:''}</div></div>
+        <span class="sp"></span>${a.retro?'<span class="badge">retro</span>':''}</div>`).join('')}
+      <div class="dsec">Attendance detail · week of ${fmtShort(ws)}</div>
+      ${active.length?active.map(d=>`
+        <div class="daygroup"><div class="dg-h"><span class="dd">${fmtLong(d.date)}</span><span class="spacer"></span>
+          ${d.past?`<span class="apill a-past">+${d.past}d</span>`:''}
+          <span class="hh">${d.hrs.toFixed(1)} hrs counted</span>
+          <span style="display:flex;gap:3px">${chips(d.codes,d.ovHrs??d.hrs)}</span></div>
+        ${d.sess.map(s=>`<div class="sess ${s.present?'':'absent'}">
+          <i data-lucide="${kindIcon[s.kind]}" class="ic" style="width:15px;height:15px"></i>
+          <div class="body"><div class="tp">${s.topic}
+            ${s.kind!=='group'?`<span class="badge eval">${s.kind==='bps'?'BPS':'Eval'}</span>`:''}
+            ${s.billable===false?'<span class="badge">not billable</span>':''}
+            ${!s.present?'<span class="badge">absent</span>':''}</div>
+            <div class="mt">${s.provider} · ${s.start}${s.end?' – '+s.end:''}</div></div>
+          <div class="dur">${s.hrs.toFixed(2)}</div></div>`).join('')}
+        </div>`).join(''):`<div class="warnrow"><i data-lucide="info" style="width:16px;height:16px;flex:none"></i>
+          <div>No attendance recorded during this week.</div></div>`}
+    </div>`;
+  lucide.createIcons();
+  document.getElementById('dClose').onclick=closeDrawer;
+  document.getElementById('drawer').classList.add('on');
+  document.getElementById('scrim').classList.add('on');
+}
+const closeDrawer=()=>{document.getElementById('drawer').classList.remove('on');document.getElementById('scrim').classList.remove('on');};
+
+/* ================= wiring ================= */
+const today=()=>new Date().toISOString().slice(0,10);
+function wire(){
+  document.querySelectorAll('.seg').forEach(b=>b.onclick=()=>{seg=b.dataset.seg;render();});
+  document.querySelectorAll('.cellbox[data-c]').forEach(m=>m.onclick=e=>{e.stopPropagation();openPop(m,m.dataset.c,m.dataset.d);});
+  document.querySelectorAll('.nm').forEach(n=>n.onclick=()=>openDrawer(n.dataset.client));
+  document.querySelectorAll('[data-jump]').forEach(b=>b.onclick=()=>{curWeek=b.dataset.jump;
+    document.getElementById('weekSel').value=curWeek;syncSteps();render();window.scrollTo({top:0,behavior:'smooth'});});
+  document.querySelectorAll('[data-retro]').forEach(b=>b.onclick=()=>{openRetro=b.dataset.retro;render();});
+  document.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=()=>{openRetro=null;render();});
+  document.querySelectorAll('[data-wo]').forEach(b=>b.onclick=()=>{writeoffs[b.dataset.wo]=true;render();});
+  document.querySelectorAll('[data-undo]').forEach(b=>b.onclick=()=>{delete writeoffs[b.dataset.undo];render();});
+  document.querySelectorAll('[data-bill]').forEach(b=>b.onclick=()=>{billed[b.dataset.bill+':'+curWeek]={at:today(),by:'AB'};render();});
+  document.querySelectorAll('[data-unbill]').forEach(b=>b.onclick=()=>{delete billed[b.dataset.unbill+':'+curWeek];render();});
+  document.querySelectorAll('[data-save]').forEach(b=>b.onclick=()=>{
+    const c=CLIENTS.find(x=>x.id===b.dataset.save);
+    const no=document.getElementById('raNo').value.trim()||'RETRO-PENDING';
+    const from=document.getElementById('raFrom').value, thru=document.getElementById('raThru').value;
+    if(!from||!thru)return;
+    c.auths.push({no,start:from,end:thru,freq:c.auths[0].freq||'',retro:true});
+    openRetro=null; render();});
+}
+document.addEventListener('click',e=>{if(!e.target.closest('.pop')&&!e.target.closest('.cellbox[data-c]'))pop.classList.remove('on');});
+document.getElementById('scrim').onclick=closeDrawer;
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeDrawer();pop.classList.remove('on');openRetro=null;render();}});
+
+const wsel=document.getElementById('weekSel');
+wsel.innerHTML=WEEKS.map(w=>`<option value="${w.id}">${w.label}</option>`).join('');
+wsel.onchange=()=>{curWeek=wsel.value;syncSteps();render();};
+function syncSteps(){const i=WEEKS.findIndex(w=>w.id===curWeek);
+  document.getElementById('nextWk').disabled=i<=0;document.getElementById('prevWk').disabled=i>=WEEKS.length-1;}
+document.getElementById('prevWk').onclick=()=>{const i=WEEKS.findIndex(w=>w.id===curWeek);if(i<WEEKS.length-1){curWeek=WEEKS[i+1].id;wsel.value=curWeek;syncSteps();render();}};
+document.getElementById('nextWk').onclick=()=>{const i=WEEKS.findIndex(w=>w.id===curWeek);if(i>0){curWeek=WEEKS[i-1].id;wsel.value=curWeek;syncSteps();render();}};
+document.getElementById('q').oninput=e=>{qStr=e.target.value;render();};
+document.getElementById('locSel').onchange=e=>{locStr=e.target.value;render();};
+document.getElementById('btnBillAll').onclick=()=>{
+  const ws=WEEKS.find(w=>w.id===curWeek).start;
+  CLIENTS.map(c=>({c,r:computeRow(c,ws)})).filter(x=>x.r.total>0||x.r.days.some(d=>d.dc))
+    .filter(({c})=>(!locStr||c.loc===locStr))
+    .forEach(({c})=>{if(!isBilled(c.id,curWeek))billed[c.id+':'+curWeek]={at:today(),by:'AB'};});
+  render();};
+
+syncSteps(); render();
+</script>
+</body>
+</html>

@@ -30,6 +30,7 @@ only committed docs belong in the table — untracked ones go under
 | Visual system — TreatHealthOS tokens and palette | `docs/archive/design-system.md` | 5 |
 | Qodo required-status-check contract + rename hazard | `docs/qodo-compliance-gate.md` | 6 |
 | Product orientation — what this app actually is | `README.md` | 7 |
+| AR build plan — the current CMD AR Automation work | `CMD AR Automation — Build Doc v2.md` | 8 |
 
 Read-order is a cold-start sequence, not a priority ranking. Path-scoped rules in
 `.claude/rules/` load automatically and are not listed here — see
@@ -67,11 +68,16 @@ than reading these as current. They are guarded (they must keep resolving) so a
 
 ### Uncommitted — not guarded
 
-These exist locally but are **untracked**, so the guard cannot assert them
-without going red on a fresh clone. `git add` each and promote it.
+**This list is EMPTY as of 2026-08-24, and the goal is to keep it that way.** Its
+one entry — `CMD AR Automation — Build Doc v2.md` — is now tracked and sits in
+the table above at read-order 8, so the guard asserts it like everything else.
 
-- `CMD AR Automation — Build Doc v2.md` (repo root) — the current AR build plan.
-  Promote into the table above once tracked.
+The instruction it carried ("`git add` each and promote it") stood unheeded from
+2026-08-03 to 2026-08-24, which is the real lesson: an untracked file in this
+repo has no lifecycle. It is not guarded, not on a clone, not reviewed, and
+nothing ever forces the decision. **A doc is either in the table above or it is
+deleted — "untracked" is not a third state.** The same drift put 3 source files
+and 63 passing tests (`src/kipu`) outside git entirely for days.
 
 `scripts/check-context-map.ts` and `test/contextMap.test.ts` were tracked on
 2026-08-03, so the enforcement claim at the top of this section is now true on a
@@ -675,9 +681,11 @@ in [Canonical Context Set](#canonical-context-set); that table wins:
   per-apply. **When it conflicts with anything here, it wins.** Surface the
   conflict in your output; never silently pick a side.
 - `docs/archive/design-system.md` — the TreatHealthOS visual system.
-- `CMD AR Automation — Build Doc v2.md` (repo root, **untracked**) — the current
-  AR build plan. Previously mis-cited here as `docs/CMD AR Automation — Build
-  Doc v2.md`, which has never existed.
+- `CMD AR Automation — Build Doc v2.md` (repo root, **tracked since 2026-08-24**)
+  — the current AR build plan, now read-order 8 in the table above. It was
+  untracked for three weeks while this file instructed that it be promoted.
+  Previously mis-cited here as `docs/CMD AR Automation — Build Doc v2.md`, which
+  has never existed.
 - `docs/archive/CLAUDE-2026-07-06.md` — the previous 914-line context file,
   frozen. Historical only; it is stale in ≥6 places and superseded by this file
   plus the rules above.

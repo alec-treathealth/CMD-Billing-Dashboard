@@ -1,0 +1,824 @@
+<title>Payer Behavior Lab — CMD claims & VOB ML analysis</title>
+<style>
+:root{
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10); --accent:#2a78d6;
+  --good:#006300; --bad:#b93434; --chip:#f0efec;
+  --other:#b9b7ae;
+}
+@media (prefers-color-scheme: dark){
+  :root:where(:not([data-theme="light"])){
+    --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+    --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10); --accent:#3987e5;
+    --good:#0ca30c; --bad:#e66767; --chip:#262624;
+    --other:#4e4d49;
+  }
+}
+:root[data-theme="dark"]{
+  --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10); --accent:#3987e5;
+  --good:#0ca30c; --bad:#e66767; --chip:#262624;
+  --other:#4e4d49;
+}
+*{box-sizing:border-box}
+body{background:var(--page);color:var(--ink);margin:0;
+  font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;}
+main{max-width:1100px;margin:0 auto;padding:40px 24px 80px;display:flex;flex-direction:column;gap:56px}
+header.masthead{display:flex;flex-direction:column;gap:14px;padding-top:8px}
+.eyebrow{font-size:11px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:34px;line-height:1.15;margin:0;font-weight:700;letter-spacing:-.015em;text-wrap:balance;max-width:26ch}
+.lede{color:var(--ink2);max-width:68ch;margin:0}
+.prov{display:flex;flex-wrap:wrap;gap:8px}
+.chip{background:var(--chip);border:1px solid var(--ring);border-radius:999px;
+  padding:3px 11px;font-size:12px;color:var(--ink2);white-space:nowrap}
+.chip b{color:var(--ink);font-weight:600}
+
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.tile{background:var(--surface);border:1px solid var(--ring);border-radius:10px;padding:14px 16px;
+  display:flex;flex-direction:column;gap:2px}
+.tile .lab{font-size:12px;color:var(--ink2)}
+.tile .val{font-size:27px;font-weight:650;letter-spacing:-.01em}
+.tile .sub{font-size:12px;color:var(--muted)}
+
+section{display:flex;flex-direction:column;gap:14px}
+section>h2{font-size:22px;margin:2px 0 0;font-weight:700;letter-spacing:-.01em;text-wrap:balance;max-width:56ch}
+section>p.exp{color:var(--ink2);max-width:72ch;margin:0}
+.cards{display:grid;gap:16px}
+.cards.two{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+.card{background:var(--surface);border:1px solid var(--ring);border-radius:12px;padding:16px 16px 10px;min-width:0}
+.card h3{margin:0 0 2px;font-size:14px;font-weight:600}
+.card .note{font-size:12px;color:var(--muted);margin:0 0 8px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--ink2);margin:6px 0 4px}
+.legend .it{display:inline-flex;align-items:center;gap:6px}
+.legend .sw{width:10px;height:10px;border-radius:3px;flex:none}
+.legend .ln{width:14px;height:2.5px;border-radius:2px;flex:none}
+figure{margin:0;min-width:0}
+svg{display:block;width:100%;height:auto}
+svg text{font:11px system-ui,-apple-system,"Segoe UI",sans-serif;fill:var(--muted)}
+svg .tick{font-variant-numeric:tabular-nums}
+svg .dl{font-weight:600;fill:var(--ink2);font-size:11px}
+details.tbl{margin:4px 0 6px}
+details.tbl summary{font-size:12px;color:var(--muted);cursor:pointer;padding:4px 0}
+details.tbl summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+.twrap{overflow-x:auto;max-height:340px;overflow-y:auto;border:1px solid var(--ring);border-radius:8px}
+table{border-collapse:collapse;font-size:12px;min-width:100%}
+th,td{padding:5px 10px;text-align:right;font-variant-numeric:tabular-nums;border-top:1px solid var(--grid);white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+thead th{border-top:0;position:sticky;top:0;background:var(--surface);color:var(--ink2);font-weight:600}
+.foot{font-size:12px;color:var(--muted);max-width:75ch}
+.bullets{margin:0;padding-left:18px;color:var(--ink2);max-width:75ch}
+.bullets li{margin:3px 0}
+.bullets b{color:var(--ink)}
+.delta-up{color:var(--good);font-weight:600}
+.delta-dn{color:var(--bad);font-weight:600}
+
+#tip{position:fixed;pointer-events:none;z-index:10;background:var(--surface);border:1px solid var(--ring);
+  border-radius:8px;box-shadow:0 4px 18px rgba(0,0,0,.14);padding:8px 11px;font-size:12px;display:none;max-width:280px}
+#tip .t-h{color:var(--muted);margin-bottom:4px}
+#tip .row{display:flex;align-items:center;gap:7px;margin:1.5px 0}
+#tip .k{width:12px;height:2.5px;border-radius:2px;flex:none}
+#tip .v{font-weight:650;font-variant-numeric:tabular-nums;color:var(--ink)}
+#tip .n{color:var(--ink2)}
+.heat-cell:focus-visible,.bar:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+footer{border-top:1px solid var(--grid);padding-top:22px;display:flex;flex-direction:column;gap:12px}
+footer h2{font-size:15px;margin:0}
+code{background:var(--chip);border-radius:4px;padding:1px 5px;font-size:12.5px}
+.libs{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:8px;padding-left:0;margin:0;list-style:none}
+.libs li{font-size:13px;color:var(--ink2)}
+.libs b{color:var(--ink)}
+</style>
+
+<main>
+<header class="masthead">
+  <div class="eyebrow">Payer Behavior Lab · read-only analysis · payer-level aggregates only (no PHI)</div>
+  <h1>How payers change: five ML lenses on 815k claim lines and 33.7k VOBs</h1>
+  <p class="lede">Change-point detection, drift measurement, code-mix analysis, character-level name clustering,
+  and forecasting — run over BXR (2023–2026) and Indigo (2018–2026) claims, BXR canonical claim lines,
+  one month of 835 remittances, and five years of VOB intake. Every number on this page is a payer-level
+  aggregate.</p>
+  <div class="prov">
+    <span class="chip"><b>646k</b> explorer charge rows</span>
+    <span class="chip"><b>151k</b> BXR claim lines</span>
+    <span class="chip"><b>33.7k</b> VOBs · 2021-12 → 2026-08</span>
+    <span class="chip"><b>3.0k</b> ERA CARC adjustments (1 month)</span>
+    <span class="chip">generated <b>2026-08-08</b></span>
+  </div>
+</header>
+
+<div class="kpis" id="kpis"></div>
+
+<section id="s-codemix">
+  <div class="eyebrow">Code-mix drift · share deltas + Jensen-Shannon divergence</div>
+  <h2>2024: the whole book walked from psychotherapy codes to per-diem codes — payer by payer, same quarters</h2>
+  <p class="exp">Quarterly CPT/HCPCS mix (share of charge lines). At BXR, group therapy <b>90853</b> fell
+  −45pp and <b>90837</b> −25pp while per-diem/residential codes <b>S9480</b>, <b>H0018</b> and <b>H0019</b>
+  took their place — and every major payer first saw S9480 in the same quarter (2024-Q2). Indigo ran the
+  mirror-image migration years earlier: <b>H0035</b> partial-hospitalization giving way to <b>H0018</b>/<b>H2018</b>.</p>
+  <div class="cards two" id="codemix-cards"></div>
+</section>
+
+<section id="s-mix">
+  <div class="eyebrow">Payer-mix drift · PSI + month-over-month JSD</div>
+  <h2>The payer mix rotated underneath the book: UnitedHealth took share from the Blues at BXR; Aetna gave way to regionals at Indigo</h2>
+  <p class="exp">Monthly share of charge volume by payer family. Early-window vs late-window share:</p>
+  <ul class="bullets" id="mix-movers"></ul>
+  <div class="cards two" id="mix-cards"></div>
+</section>
+
+<section id="s-vol">
+  <div class="eyebrow">Change-point detection · ruptures (PELT, RBF kernel)</div>
+  <h2>September–October 2024: a synchronized volume regime shift across four national payers at BXR</h2>
+  <p class="exp">Monthly charge volume with detected change points marked (│). PELT finds the same break month
+  — 2024-09/10 — independently in the Blues, UnitedHealth and Cigna series at BXR, and a second UnitedHealth
+  regime start at 2025-09. 67 change points were detected across all payer × metric series, including a
+  <b>paid-rate</b> regime shift for UnitedHealth (26% → 33% of charge, February 2025).</p>
+  <div class="cards two" id="vol-cards"></div>
+</section>
+
+<section id="s-flips">
+  <div class="eyebrow">Paid-rate flips · mature-window rates by year (≥120-day seasoned months only)</div>
+  <h2>Payers flip how they pay a code: Kaiser cut H0018 from 86% to 26%; Cigna went from ignoring S9480 to paying 55%</h2>
+  <p class="exp">Each row is one payer × code: insurance paid as a share of charges, first year → latest mature
+  year. These are the largest verified swings with at least 400 charge lines behind them.</p>
+  <div class="cards"><div class="card" id="flips-card"></div></div>
+</section>
+
+<section id="s-lag">
+  <div class="eyebrow">Payment velocity · BXR claim lines · median days from bill to primary payment</div>
+  <h2>Cigna got three weeks faster; Aetna got two-and-a-half weeks slower — each in a single quarter</h2>
+  <p class="exp">Median insurance payment lag by payment month. PELT dates the Cigna acceleration to
+  <b>December 2023</b> (37 → 14 days) and the Aetna slowdown to <b>July 2024</b> (15 → 33 days).
+  Medicaid halved its lag; Magellan drifted slower.</p>
+  <div class="cards two" id="lag-cards"></div>
+</section>
+
+<section id="s-carc">
+  <div class="eyebrow">Denial grammar · 835 CARC adjustment codes · July–August 2026 snapshot</div>
+  <h2>Same out-of-network book, different denial grammar: the Blues route write-downs to the patient (PR-45); Cigna and UnitedHealth book them as contractual (CO-45)</h2>
+  <p class="exp">Share of each payer family's adjustment dollars by group + reason code, from one month of
+  ERA data (the 835 pipeline is new). <b>PR-45</b> shifts fee-schedule overage to <em>patient
+  responsibility</em>; <b>CO-45</b> writes it off. Aetna leads with <b>CO-B13</b> (previously paid) and
+  Cigna shows <b>CO-147</b> (provider-level negotiated discount) — three different postures against the
+  same OON charges.</p>
+  <div class="cards"><div class="card" id="carc-card"></div></div>
+</section>
+
+<section id="s-fc">
+  <div class="eyebrow">Forecast · statsmodels Holt-Winters (additive trend/seasonality) · backtested</div>
+  <h2>Next four months of demand, with honesty labels: the Blues at BXR forecast within ±7% on backtest</h2>
+  <p class="exp">Monthly charge volume, dashed = 4-month forecast, band = ±1.28σ of residuals (~80%).
+  Only families whose 4-month holdout backtest beat 30% MAPE are shown. Expected insurance yield applies each
+  family's recent mature paid-rate to the demand forecast.</p>
+  <div class="cards two" id="fc-cards"></div>
+</section>
+
+<section id="s-anom">
+  <div class="eyebrow">Anomaly detection · rolling-median MAD z-scores on mature paid-rate</div>
+  <h2>Watchlist: months where a payer paid 3σ+ off its own pattern</h2>
+  <p class="exp">Magellan's March 2026 paid at <b>70%</b> of charges against a typical 18% (z = 12.5) —
+  worth finding what changed. GEHA had a one-month windfall in March 2025. Negative outliers mark months
+  to re-work.</p>
+  <div class="cards"><div class="card" id="anom-card"></div></div>
+</section>
+
+<section id="s-names">
+  <div class="eyebrow">Character-level drift · TF-IDF char n-grams + rapidfuzz edit distance + union-find</div>
+  <h2>1,500 payer spellings are really 911 payers — and new spellings of <em>known</em> payers now outnumber genuinely new payers 14-to-1</h2>
+  <p class="exp">Clustering every payer string across claims and VOB intake, character n-grams first,
+  edit-distance confirmation second. 258 payers carry more than one spelling; "Anthem BCBS of CA" alone has
+  <b>62</b>. The dominant character-level edits: a state qualifier appearing/disappearing, small typos, and
+  boilerplate (THE / INC / HEALTH…). The front door and the back door disagree too: <b>"UHC" appears 946×
+  in VOBs and never once in claims</b>, and 57 clusters map to more than one canonical payer id in the
+  crosswalk.</p>
+  <div class="cards two" id="names-cards"></div>
+</section>
+
+<section id="s-model">
+  <div class="eyebrow">Driver model · sklearn HistGradientBoosting + permutation importance</div>
+  <h2>What drives the paid-rate: the code you bill, then the payer, then <em>time itself</em></h2>
+  <p class="exp">A gradient-boosted model predicting paid-rate at the payer × code × quarter grain explains
+  <b>R² 0.33</b> on a random split — but scores <b>R² −0.74</b> when asked to predict the newest quarters
+  from history. That gap is the quantified punchline of this whole page: <b>payer behavior drifts faster
+  than history can predict it</b>. Time (t) ranking third in importance says the drift is systematic,
+  not noise.</p>
+  <div class="cards two" id="model-cards"></div>
+</section>
+
+<footer>
+  <h2>Method, reproduction & caveats</h2>
+  <ul class="libs">
+    <li><b>ruptures</b> — PELT change-point detection (RBF kernel) on per-payer monthly series</li>
+    <li><b>scipy</b> — Jensen-Shannon divergence for payer-mix and code-mix drift; PSI vs first-year baseline</li>
+    <li><b>scikit-learn</b> — char n-gram TF-IDF + cosine for name clustering; HistGradientBoosting + permutation importance</li>
+    <li><b>rapidfuzz</b> — C++-speed Levenshtein/token-sort confirmation of name merges</li>
+    <li><b>statsmodels</b> — Holt-Winters exponential smoothing with 4-month holdout backtests</li>
+    <li><b>pandas / numpy / psycopg3</b> — aggregate-only pulls as the read-only <code>claims_reader</code> role</li>
+  </ul>
+  <p class="foot">Scripts: <code>scripts/payer-ml/pull_aggregates.py</code> →
+  <code>analyze_behavior.py</code> + <code>analyze_names.py</code> → <code>export_viz_data.py</code>.
+  Caveats: paid-rates use only service months ≥120 days old (payments accrue late — trailing months
+  under-report); partial trailing months dropped; payer families come from the alias crosswalk plus a
+  token heuristic; the CARC panel is a one-month snapshot, not a trend; "(no CPT)" rows are uncoded
+  charge lines in the source reports and were excluded from paid-rate flips; the ERA payment pipeline
+  began 2026-07. Nothing here writes to the database.</p>
+</footer>
+</main>
+
+<div id="tip" role="status"></div>
+
+<script>
+const DATA = /*__DATA__*/;
+
+/* ── theme + palette (validated — see dataviz six checks) ────────────────── */
+const SLOTS_L = ['#2a78d6','#eb6834','#1baf7a','#eda100','#e87ba4','#008300','#4a3aa7','#e34948'];
+const SLOTS_D = ['#3987e5','#d95926','#199e70','#c98500','#d55181','#008300','#9085e9','#e66767'];
+const SEQ_L = ['#cde2fb','#b7d3f6','#9ec5f4','#86b6ef','#6da7ec','#5598e7','#3987e5','#2a78d6','#256abf','#1c5cab','#184f95','#104281','#0d366b'];
+const FAM_SLOT = {'Blues (BCBS/Anthem)':0,'UnitedHealth':1,'Aetna/CVS':2,'Cigna/Evernorth':3,
+  'Carelon/Beacon':4,'Kaiser':5,'Other/Regional':6,'Magellan':7};
+const mq = matchMedia('(prefers-color-scheme: dark)');
+function isDark(){
+  const t = document.documentElement.dataset.theme;
+  return t ? t === 'dark' : mq.matches;
+}
+const slot = i => (isDark()?SLOTS_D:SLOTS_L)[i%8];
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const famColor = f => f in FAM_SLOT ? slot(FAM_SLOT[f]) : cssVar('--other');
+
+/* ── utils (all text via textContent — labels are untrusted data) ────────── */
+const $ = s => document.querySelector(s);
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, parent){
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function div(cls, parent, text){
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  if (text !== undefined) d.textContent = text;
+  if (parent) parent.appendChild(d);
+  return d;
+}
+function span(cls, parent, text){
+  const s = document.createElement('span');
+  if (cls) s.className = cls;
+  if (text !== undefined) s.textContent = text;
+  if (parent) parent.appendChild(s);
+  return s;
+}
+function elh(tag, parent, text, cls){
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+const fmt$ = v => v >= 1e6 ? '$'+(v/1e6).toFixed(1)+'M' : v >= 1e3 ? '$'+(v/1e3).toFixed(0)+'K' : '$'+Math.round(v);
+const fmtPct = v => (v*100).toFixed(v*100 >= 10 ? 0 : 1)+'%';
+const shortQ = q => q.slice(0,4)+'·Q'+(Math.floor(+q.slice(5,7)/3)+1);
+const shortM = m => { const mo = +m.slice(5,7); return (mo===1 ? m.slice(0,4) : ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][mo]); };
+
+/* tooltip */
+const tip = $('#tip');
+function showTip(evt, headline, rows){
+  tip.replaceChildren();
+  if (headline) div('t-h', tip, headline);
+  for (const r of rows){
+    const row = div('row', tip);
+    if (r.color){ const k = div('k', row); k.style.background = r.color; }
+    span('v', row, r.value);
+    span('n', row, r.name);
+  }
+  tip.style.display = 'block';
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = evt.clientX + 14, y = evt.clientY + 12;
+  if (x + w > innerWidth - 8) x = evt.clientX - w - 12;
+  if (y + h > innerHeight - 8) y = evt.clientY - h - 12;
+  tip.style.left = x+'px'; tip.style.top = y+'px';
+}
+const hideTip = () => { tip.style.display = 'none'; };
+
+/* legend builder */
+function legend(parent, items, mark){
+  const lg = div('legend', parent);
+  for (const it of items){
+    const s = div('it', lg);
+    const sw = div(mark === 'line' ? 'ln' : 'sw', s);
+    sw.style.background = it.color;
+    s.appendChild(document.createTextNode(it.name));
+  }
+  return lg;
+}
+
+/* data-table twin (the no-hover / keyboard channel) */
+function tableTwin(parent, cols, rows, label){
+  const det = elh('details', parent); det.className = 'tbl';
+  elh('summary', det, label || 'Data table');
+  const wrap = div('twrap', det);
+  const t = elh('table', wrap);
+  const thead = elh('thead', t); const trh = elh('tr', thead);
+  for (const c of cols) elh('th', trh, c);
+  const tb = elh('tbody', t);
+  for (const r of rows){
+    const tr = elh('tr', tb);
+    for (const c of r) elh('td', tr, String(c));
+  }
+}
+
+/* axis helpers */
+function yTicks(max, n=4){
+  const raw = max/n, pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1,2,2.5,5,10].map(m=>m*pow).find(s=>s>=raw);
+  const out = []; for (let v=0; v<=max+1e-9; v+=step) out.push(v);
+  return out;
+}
+
+/* ── chart: multi-series line (crosshair + all-series tooltip) ───────────── */
+function lineChart(fig, cfg){
+  const W = 520, H = cfg.h || 240, ML = 46, MR = cfg.mr || 14, MT = 12, MB = 26;
+  const svg = el('svg', {viewBox:`0 0 ${W} ${H}`, role:'img', 'aria-label':cfg.label||''}, fig);
+  const iw = W-ML-MR, ih = H-MT-MB;
+  const xs = cfg.x, nx = xs.length;
+  const X = i => ML + (nx<2?0:i/(nx-1)*iw);
+  let max = cfg.max ?? Math.max(...cfg.series.flatMap(s=>s.vals.filter(v=>v!=null)));
+  if (cfg.band) max = Math.max(max, ...cfg.band.hi);
+  max *= 1.06;
+  const Y = v => MT + ih - v/max*ih;
+  const seenY = new Set();
+  for (const tv of yTicks(max)){
+    el('line',{x1:ML,x2:W-MR,y1:Y(tv),y2:Y(tv),stroke:'var(--grid)','stroke-width':1},svg);
+    const lab = String(cfg.fmtY ? cfg.fmtY(tv) : tv);
+    if (seenY.has(lab)) continue;
+    seenY.add(lab);
+    const t = el('text',{x:ML-6,y:Y(tv)+3.5,'text-anchor':'end',class:'tick'},svg);
+    t.textContent = lab;
+  }
+  el('line',{x1:ML,x2:W-MR,y1:Y(0),y2:Y(0),stroke:'var(--axis)','stroke-width':1},svg);
+  let lastYr = '';
+  xs.forEach((m,i)=>{
+    const yr = m.slice(0,4);
+    if (yr !== lastYr){ lastYr = yr;
+      const t = el('text',{x:X(i),y:H-8,'text-anchor':'middle',class:'tick'},svg); t.textContent = yr; }
+  });
+  if (cfg.band){
+    let d = '';
+    cfg.band.x.forEach((bx,i)=>{ d += (i?'L':'M')+X(xs.indexOf(bx))+' '+Y(cfg.band.hi[i])+' '; });
+    for (let i=cfg.band.x.length-1;i>=0;i--) d += 'L'+X(xs.indexOf(cfg.band.x[i]))+' '+Y(Math.max(0,cfg.band.lo[i]))+' ';
+    el('path',{d:d+'Z',fill:cfg.series[0].color,opacity:.12},svg);
+  }
+  for (const s of cfg.series){
+    let d = '', pen = false;
+    s.vals.forEach((v,i)=>{ if (v==null){pen=false;return;} d += (pen?'L':'M')+X(i)+' '+Y(v)+' '; pen = true; });
+    el('path',{d,fill:'none',stroke:s.color,'stroke-width':2,'stroke-linejoin':'round','stroke-linecap':'round',
+      ...(s.dash?{'stroke-dasharray':'5 4'}:{})},svg);
+  }
+  for (const b of (cfg.breaks||[])){
+    const i = xs.indexOf(b.month); if (i<0) continue;
+    el('line',{x1:X(i),x2:X(i),y1:MT,y2:MT+ih,stroke:'var(--axis)','stroke-width':1},svg);
+    const s = cfg.series.find(s=>s.name===b.family) || cfg.series[0];
+    const v = s.vals[i];
+    if (v!=null){
+      el('circle',{cx:X(i),cy:Y(v),r:4.5,fill:s.color,stroke:'var(--surface)','stroke-width':2},svg);
+    }
+  }
+  if (cfg.endLabels){
+    const ends = cfg.series.map(s=>{ let li=-1; s.vals.forEach((v,i)=>{if(v!=null)li=i;});
+      return {s, i:li, y: li>=0?Y(s.vals[li]):null}; }).filter(e=>e.y!=null)
+      .sort((a,b)=>a.y-b.y);
+    let prev = -99;
+    for (const e of ends){
+      let y = Math.max(e.y, prev+12); prev = y;
+      const t = el('text',{x:X(e.i)+5,y:y+3.5,class:'dl'},svg);
+      t.textContent = e.s.short || e.s.name;
+    }
+  }
+  const cross = el('line',{x1:0,x2:0,y1:MT,y2:MT+ih,stroke:'var(--axis)','stroke-width':1,opacity:0},svg);
+  const overlay = el('rect',{x:ML,y:MT,width:iw,height:ih,fill:'transparent'},svg);
+  overlay.addEventListener('pointermove', evt=>{
+    const r = svg.getBoundingClientRect();
+    const px = (evt.clientX - r.left)/r.width*W;
+    const i = Math.max(0, Math.min(nx-1, Math.round((px-ML)/iw*(nx-1))));
+    cross.setAttribute('x1',X(i)); cross.setAttribute('x2',X(i)); cross.setAttribute('opacity',.7);
+    showTip(evt, cfg.xTip ? cfg.xTip(xs[i]) : xs[i].slice(0,7),
+      cfg.series.filter(s=>s.vals[i]!=null).map(s=>({color:s.color,
+        value: (cfg.fmtTip||cfg.fmtY||(v=>v))(s.vals[i]), name: s.name})));
+  });
+  overlay.addEventListener('pointerleave', ()=>{ cross.setAttribute('opacity',0); hideTip(); });
+  return svg;
+}
+
+/* ── chart: stacked columns (100% or absolute) ───────────────────────────── */
+function stackedCols(fig, cfg){
+  const W = 520, H = cfg.h || 250, ML = 40, MR = 8, MT = 10, MB = 26;
+  const svg = el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':cfg.label||''},fig);
+  const iw = W-ML-MR, ih = H-MT-MB;
+  const n = cfg.x.length;
+  const bw = Math.min(24, Math.max(3, iw/n - 2));
+  const X = i => ML + (i+.5)/n*iw;
+  const pct = cfg.pct !== false;
+  const totals = cfg.x.map((_,i)=>cfg.series.reduce((a,s)=>a+(s.vals[i]||0),0));
+  const max = pct ? 1 : Math.max(...totals)*1.06;
+  const Y = v => MT + ih - v/max*ih;
+  const tks = pct ? [0,.25,.5,.75,1] : yTicks(max);
+  const seenY = new Set();
+  for (const tv of tks){
+    el('line',{x1:ML,x2:W-MR,y1:Y(tv),y2:Y(tv),stroke:'var(--grid)','stroke-width':1},svg);
+    const lab = pct ? Math.round(tv*100)+'%' : String((cfg.fmtY||(v=>v))(tv));
+    if (seenY.has(lab)) continue;
+    seenY.add(lab);
+    const t = el('text',{x:ML-6,y:Y(tv)+3.5,'text-anchor':'end',class:'tick'},svg);
+    t.textContent = lab;
+  }
+  cfg.x.forEach((q,i)=>{
+    let lab;
+    if (cfg.xLabel){ lab = cfg.xLabel(q, i); if (lab == null) return; }
+    else { if (cfg.xEvery && i%cfg.xEvery) return; lab = cfg.xFmt ? cfg.xFmt(q) : q; }
+    const t = el('text',{x:X(i),y:H-8,'text-anchor':'middle',class:'tick'},svg);
+    t.textContent = lab;
+  });
+  cfg.x.forEach((q,i)=>{
+    let acc = 0; const tot = totals[i] || 1;
+    cfg.series.forEach(s=>{
+      const raw = s.vals[i]||0; if (!raw) return;
+      const v = pct ? raw/tot : raw;
+      const y1 = Y(acc+v), y0 = Y(acc);
+      const rect = el('rect',{x:X(i)-bw/2, y:y1, width:bw, height:Math.max(0,y0-y1-2),
+        rx:2, fill:s.color, class:'bar', tabindex:0},svg);
+      const show = e=>showTip(e, (cfg.xFmt?cfg.xFmt(q):q),
+        [{color:s.color, value: pct ? fmtPct(raw/tot) : raw.toLocaleString(), name:s.name}]);
+      rect.addEventListener('pointermove',show);
+      rect.addEventListener('focus',()=>{const r=rect.getBoundingClientRect();show({clientX:r.x+r.width/2,clientY:r.y});});
+      rect.addEventListener('pointerleave',hideTip); rect.addEventListener('blur',hideTip);
+      acc += v;
+    });
+  });
+  el('line',{x1:ML,x2:W-MR,y1:Y(0),y2:Y(0),stroke:'var(--axis)','stroke-width':1},svg);
+  return svg;
+}
+
+/* ── chart: dumbbell (1 hue, 2 shades — before → after) ──────────────────── */
+function dumbbell(fig, rows){
+  const W = 900, RH = 30, ML = 300, MR = 130, MT = 24;
+  const H = MT + rows.length*RH + 30;
+  const wrap = div('twrap', fig); wrap.style.border = 'none'; wrap.style.maxHeight = 'none';
+  const svg = el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':'Paid-rate shifts'},wrap);
+  svg.style.minWidth = '820px';
+  const iw = W-ML-MR;
+  const X = v => ML + v*iw;
+  for (const tv of [0,.25,.5,.75,1]){
+    el('line',{x1:X(tv),x2:X(tv),y1:MT-6,y2:H-24,stroke:'var(--grid)','stroke-width':1},svg);
+    const t = el('text',{x:X(tv),y:H-8,'text-anchor':'middle',class:'tick'},svg);
+    t.textContent = Math.round(tv*100)+'%';
+  }
+  const from = isDark() ? '#6da7ec' : '#86b6ef';
+  const to = isDark() ? '#3987e5' : '#1c5cab';
+  rows.forEach((r,ri)=>{
+    const y = MT + ri*RH + RH/2;
+    const lab = el('text',{x:0,y:y+3.5,class:'dl'},svg);
+    lab.textContent = `${r.entity === 'BXR' ? 'BXR' : 'Indigo'} · ${r.family} · ${r.code}`;
+    el('line',{x1:X(r.rate_from),x2:X(r.rate_to),y1:y,y2:y,stroke:'var(--axis)','stroke-width':2},svg);
+    el('circle',{cx:X(r.rate_from),cy:y,r:5,fill:from,stroke:'var(--surface)','stroke-width':2},svg);
+    el('circle',{cx:X(r.rate_to),cy:y,r:6,fill:to,stroke:'var(--surface)','stroke-width':2},svg);
+    const up = r.rate_to > r.rate_from;
+    const d = el('text',{x:W-MR+10,y:y+3.5,class:'dl'},svg);
+    d.textContent = `${(r.rate_from*100).toFixed(0)}% → ${(r.rate_to*100).toFixed(0)}%  ${up?'▲':'▼'}`;
+    d.style.fill = up ? 'var(--good)' : 'var(--bad)';
+    const hit = el('rect',{x:0,y:y-RH/2,width:W,height:RH,fill:'transparent',class:'bar',tabindex:0},svg);
+    const show = e=>showTip(e, `${r.family} · ${r.code} (${r.entity})`,
+      [{color:from,value:(r.rate_from*100).toFixed(1)+'%',name:`paid-rate ${r.year_from}`},
+       {color:to,value:(r.rate_to*100).toFixed(1)+'%',name:`paid-rate ${r.year_to}`},
+       {value:r.lines.toLocaleString(),name:'charge lines'}]);
+    hit.addEventListener('pointermove',show);
+    hit.addEventListener('focus',()=>{const b=hit.getBoundingClientRect();show({clientX:b.x+b.width/2,clientY:b.y+8});});
+    hit.addEventListener('pointerleave',hideTip); hit.addEventListener('blur',hideTip);
+  });
+  const cap = el('text',{x:ML,y:12,class:'dl'},svg);
+  cap.textContent = 'earlier year ○ → latest mature year ●   (insurance paid ÷ charges)';
+  return svg;
+}
+
+/* ── chart: heatmap (single-hue sequential ramp) ─────────────────────────── */
+function heatmap(fig, cfg){
+  const cw = 62, chh = 34, ML = 170, MT = 30;
+  const codes = cfg.codes, fams = cfg.families;
+  const W = ML + codes.length*cw + 10, H = MT + fams.length*chh + 8;
+  const wrap = div('twrap', fig); wrap.style.border = 'none'; wrap.style.maxHeight = 'none';
+  const svg = el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':'CARC mix by payer'},wrap);
+  svg.style.minWidth = '760px';
+  const maxV = Math.max(...cfg.share.flat());
+  const ramp = v => {
+    if (v <= 0) return 'transparent';
+    const idx = Math.min(SEQ_L.length-1, Math.max(1, Math.round(v/maxV*(SEQ_L.length-1))));
+    return SEQ_L[idx];
+  };
+  codes.forEach((c,ci)=>{
+    const t = el('text',{x:ML+ci*cw+cw/2,y:MT-8,'text-anchor':'middle',class:'dl'},svg);
+    t.textContent = c;
+  });
+  fams.forEach((f,fi)=>{
+    const t = el('text',{x:ML-8,y:MT+fi*chh+chh/2+3.5,'text-anchor':'end',class:'dl'},svg);
+    t.textContent = f;
+    codes.forEach((c,ci)=>{
+      const v = cfg.share[fi][ci];
+      const x = ML+ci*cw+1, y = MT+fi*chh+1;
+      const cell = el('rect',{x,y,width:cw-2,height:chh-2,rx:3,fill:ramp(v),
+        class:'heat-cell',tabindex:0},svg);
+      if (v <= 0) cell.setAttribute('stroke','var(--grid)');
+      if (v >= 0.13){
+        const t2 = el('text',{x:x+(cw-2)/2,y:y+chh/2+3,'text-anchor':'middle'},svg);
+        t2.textContent = Math.round(v*100)+'%';
+        t2.style.fill = (v/maxV > .55) ? '#fff' : '#0b0b0b';
+        t2.style.fontWeight = 600; t2.style.pointerEvents = 'none';
+      }
+      const show = e=>showTip(e, `${f} · ${c}`,
+        [{value:(v*100).toFixed(1)+'%', name:'of adjustment $'},
+         ...(cfg.descs[c]?[{value:'',name:cfg.descs[c]}]:[])]);
+      cell.addEventListener('pointermove',show);
+      cell.addEventListener('focus',()=>{const b=cell.getBoundingClientRect();show({clientX:b.x+b.width/2,clientY:b.y});});
+      cell.addEventListener('pointerleave',hideTip); cell.addEventListener('blur',hideTip);
+    });
+  });
+  return svg;
+}
+
+/* ── chart: horizontal bars (single series → slot 1, no legend) ──────────── */
+function hbars(fig, rows, cfg={}){
+  const W = 520, RH = 26, ML = cfg.ml || 210, MR = 64, MT = 6;
+  const H = MT + rows.length*RH + 10;
+  const svg = el('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':cfg.label||''},fig);
+  const iw = W-ML-MR;
+  const max = Math.max(...rows.map(r=>r.v))*1.02;
+  rows.forEach((r,ri)=>{
+    const y = MT + ri*RH + 4, bh = Math.min(18, RH-8);
+    const lab = el('text',{x:0,y:y+bh/2+3.5,class:'dl'},svg);
+    lab.textContent = r.name;
+    const bw = Math.max(1.5, r.v/max*iw);
+    const bar = el('rect',{x:ML,y,width:bw,height:bh,rx:3,fill:slot(0),class:'bar',tabindex:0},svg);
+    const vt = el('text',{x:ML+bw+6,y:y+bh/2+3.5,class:'dl'},svg);
+    vt.textContent = cfg.fmt ? cfg.fmt(r.v) : r.v;
+    vt.style.fill = 'var(--ink)';
+    const show = e=>showTip(e, r.name, [{color:slot(0),value:cfg.fmt?cfg.fmt(r.v):String(r.v),name:cfg.unit||''},
+      ...(r.extra?[{value:r.extra,name:''}]:[])]);
+    bar.addEventListener('pointermove',show);
+    bar.addEventListener('focus',()=>{const b=bar.getBoundingClientRect();show({clientX:b.x+b.width,clientY:b.y});});
+    bar.addEventListener('pointerleave',hideTip); bar.addEventListener('blur',hideTip);
+  });
+  return svg;
+}
+
+/* ── assemble page ───────────────────────────────────────────────────────── */
+const charts = [];
+function card(parent, title, note){
+  const c = div('card', parent);
+  if (title) elh('h3', c, title);
+  if (note) div('note', c, note);
+  return c;
+}
+function fig(parent){ return elh('figure', parent); }
+function register(fn){ charts.push(fn); fn(); }
+
+function build(){
+  /* KPI tiles */
+  const K = DATA.kpis;
+  const tiles = [
+    {lab:'distinct payer spellings', val:K.spellings.toLocaleString(), sub:'claims + VOB, 2018→2026'},
+    {lab:'actual payers after clustering', val:String(K.clusters), sub:K.multi_variant+' carry >1 spelling'},
+    {lab:'change points detected', val:String(K.changepoints), sub:'PELT over payer × metric series'},
+    {lab:'anomalous payer-months', val:String(K.anomalies), sub:'|z| ≥ 3 vs own history'},
+    {lab:'paid-rate variance explained', val:'R² '+K.r2_random.toFixed(2), sub:'random split (payer × code × quarter)'},
+    {lab:'…but predicting the future', val:'R² '+K.r2_temporal.toFixed(2), sub:'temporal split — behavior drifts'},
+  ];
+  for (const t of tiles){
+    const d = div('tile', $('#kpis'));
+    div('lab', d, t.lab); div('val', d, t.val); div('sub', d, t.sub);
+  }
+
+  /* S1 code migration — codes share one fixed slot map across both panels */
+  const codeSlot = {}; let nextSlot = 0;
+  for (const cd of [...DATA.code_migration.BXR.codes, ...DATA.code_migration.INDIGO.codes])
+    if (!(cd in codeSlot) && cd !== 'Other') codeSlot[cd] = nextSlot++;
+  for (const ent of ['BXR','INDIGO']){
+    const cm = DATA.code_migration[ent];
+    const c = card($('#codemix-cards'), (ent==='BXR'?'BXR':'Indigo')+' — quarterly code mix',
+      'share of charge lines per quarter');
+    const f = fig(c);
+    register(()=>{ f.replaceChildren();
+      const series = cm.codes.map(cd=>({name:cd,
+        color: cd==='Other' ? cssVar('--other') : slot(codeSlot[cd]),
+        vals: cm.shares.map(r=>r[cm.codes.indexOf(cd)])}));
+      legend(f, series.map(s=>({name:s.name,color:s.color})));
+      stackedCols(f, {x:cm.quarters, series, xFmt:shortQ,
+        xLabel:q=>q.slice(5,7)==='01'?q.slice(0,4):null, label:ent+' code mix'});
+      tableTwin(f, ['quarter',...cm.codes],
+        cm.quarters.map((q,i)=>[shortQ(q), ...cm.shares[i].map(v=>fmtPct(v))]));
+    });
+  }
+
+  /* S2 payer mix */
+  const mv = $('#mix-movers');
+  for (const ent of ['BXR','INDIGO']){
+    for (const m of DATA.mix_movers[ent].slice(0,2)){
+      const li = elh('li', mv);
+      elh('b', li, `${ent==='BXR'?'BXR':'Indigo'} · ${m.family}`);
+      li.appendChild(document.createTextNode(
+        `: ${(m.share_early*100).toFixed(1)}% → ${(m.share_late*100).toFixed(1)}% `));
+      span(m.delta_pp>0?'delta-up':'delta-dn', li, (m.delta_pp>0?'+':'')+m.delta_pp+'pp');
+    }
+  }
+  const KEEP = ['Blues (BCBS/Anthem)','UnitedHealth','Aetna/CVS','Cigna/Evernorth','Carelon/Beacon','Kaiser','Other/Regional'];
+  for (const ent of ['BXR','INDIGO']){
+    const mx = DATA.mix[ent];
+    const c = card($('#mix-cards'), (ent==='BXR'?'BXR':'Indigo')+' — payer share of monthly charge volume',
+      'monthly; partial trailing month dropped');
+    const f = fig(c);
+    register(()=>{ f.replaceChildren();
+      const idx = {}; mx.families.forEach((fm,i)=>idx[fm]=i);
+      const series = KEEP.filter(fm=>fm in idx).map(fm=>({name:fm, color:famColor(fm),
+        vals: mx.shares.map(r=>r[idx[fm]])}));
+      const foldCols = mx.families.filter(fm=>!KEEP.includes(fm));
+      series.push({name:'Other', color:cssVar('--other'),
+        vals: mx.shares.map(r=>foldCols.reduce((a,fm)=>a+r[idx[fm]],0))});
+      legend(f, series.map(s=>({name:s.name,color:s.color})));
+      stackedCols(f, {x:mx.months, series, xFmt:shortM,
+        xLabel:m=>m.slice(5,7)==='01'?m.slice(0,4):null, h:260, label:ent+' payer mix'});
+      tableTwin(f, ['month',...series.map(s=>s.name)],
+        mx.months.map((m,i)=>[m.slice(0,7), ...series.map(s=>fmtPct(s.vals[i]))]));
+    });
+  }
+
+  /* S3 volume + breaks */
+  for (const ent of ['BXR','INDIGO']){
+    const V = DATA.volume[ent];
+    const c = card($('#vol-cards'), (ent==='BXR'?'BXR':'Indigo')+' — monthly charge volume by family',
+      'vertical line = PELT change point; dot marks the family whose regime shifts');
+    const f = fig(c);
+    register(()=>{ f.replaceChildren();
+      const fams = Object.keys(V.lines);
+      const months = V.lines[fams[0]].months;
+      const series = fams.map(fm=>({name:fm, short:fm.split(' ')[0], color:famColor(fm),
+        vals: V.lines[fm].charge}));
+      legend(f, series.map(s=>({name:s.name,color:s.color})), 'line');
+      lineChart(f, {x:months, series, breaks:V.breaks, fmtY:fmt$, fmtTip:fmt$, h:250, mr:20,
+        label:ent+' volume'});
+      tableTwin(f, ['month',...fams], months.map((m,i)=>[m.slice(0,7),...series.map(s=>fmt$(s.vals[i]??0))]));
+    });
+  }
+
+  /* S4 dumbbells */
+  { const c = $('#flips-card'); const f = fig(c);
+    register(()=>{ f.replaceChildren();
+      dumbbell(f, DATA.rate_shifts);
+      tableTwin(f, ['payer · code','book','from (year)','to (year)','Δ','lines'],
+        DATA.rate_shifts.map(r=>[`${r.family} · ${r.code}`, r.entity,
+          `${(r.rate_from*100).toFixed(1)}% (${r.year_from})`, `${(r.rate_to*100).toFixed(1)}% (${r.year_to})`,
+          ((r.rate_to-r.rate_from)*100).toFixed(1)+'pp', r.lines.toLocaleString()]));
+    });
+  }
+
+  /* S5 lag small multiples (single series per panel — title names it) */
+  for (const fm of Object.keys(DATA.lag)){
+    const L = DATA.lag[fm];
+    const dir = L.late_med > L.early_med ? 'slower' : 'faster';
+    const c = card($('#lag-cards'),
+      `${fm} — median payment lag: ${L.early_med}d → ${L.late_med}d (${dir})`,
+      L.breaks.length ? 'change point '+L.breaks.map(b=>b.break_month.slice(0,7)).join(', ') : 'no hard break — gradual drift');
+    const f = fig(c);
+    register(()=>{ f.replaceChildren();
+      lineChart(f, {x:L.months, series:[{name:'median days', color:slot(0), vals:L.med_lag}],
+        breaks:L.breaks.map(b=>({month:b.break_month, family:'median days'})),
+        fmtY:v=>Math.round(v)+'d', fmtTip:v=>v.toFixed(0)+' days', h:170, label:fm+' lag'});
+      tableTwin(f, ['month','median days'], L.months.map((m,i)=>[m.slice(0,7), L.med_lag[i]]));
+    });
+  }
+
+  /* S6 CARC heatmap */
+  { const c = $('#carc-card'); const f = fig(c);
+    const CC = DATA.carc;
+    const keep = CC.codes.map((cd,i)=>({cd,i,mx:Math.max(...CC.families.map((_,fi)=>CC.share[fi][i]))}))
+      .filter(o=>o.mx>=0.05);
+    register(()=>{ f.replaceChildren();
+      heatmap(f, {families:CC.families, codes:keep.map(o=>o.cd),
+        share:CC.families.map((_,fi)=>keep.map(o=>CC.share[fi][o.i])), descs:CC.descs});
+      tableTwin(f, ['family','total adj $',...keep.map(o=>o.cd)],
+        CC.families.map((fm,fi)=>[fm, fmt$(CC.totals[fm]), ...keep.map(o=>fmtPct(CC.share[fi][o.i]))]));
+    });
+    div('note', c, 'Code key: PR = patient responsibility · CO = contractual obligation · PI = payer-initiated. 45 = exceeds fee schedule; 131 = claim-specific negotiated discount; B13 = previously paid; 147 = provider negotiated rate; 242 = not provided by network provider; 252 = documentation requested; 97 = bundled.');
+  }
+
+  /* S7 forecasts */
+  for (const key of Object.keys(DATA.forecast)){
+    const F = DATA.forecast[key];
+    const c = card($('#fc-cards'), key.replace('INDIGO','Indigo'),
+      `backtest MAPE ${(F.backtest_mape*100).toFixed(0)}% · expected insurance yield next 4 months ≈ ${fmt$(F.expected_paid_next4)} (at ${(F.mature_paid_rate_recent*100).toFixed(0)}% recent paid-rate)`);
+    const f = fig(c);
+    register(()=>{ f.replaceChildren();
+      const x = [...F.months, ...F.forecast_months];
+      const hist = [...F.charge, ...F.forecast_months.map(()=>null)];
+      const fc = [...F.months.map(()=>null), ...F.forecast_charge];
+      fc[F.months.length-1] = F.charge[F.charge.length-1];
+      lineChart(f, {x,
+        series:[{name:'charge volume', color:slot(0), vals:hist},
+                {name:'forecast', color:slot(0), vals:fc, dash:true}],
+        band:{x:F.forecast_months, hi:F.forecast_charge.map(v=>v+F.band80), lo:F.forecast_charge.map(v=>Math.max(0,v-F.band80))},
+        fmtY:fmt$, fmtTip:fmt$, h:180, label:key+' forecast'});
+      tableTwin(f, ['month','charge','forecast'],
+        x.map((m,i)=>[m.slice(0,7), hist[i]!=null?fmt$(hist[i]):'', (fc[i]!=null&&i>=F.months.length)?fmt$(fc[i]):'']));
+    });
+  }
+
+  /* S8 anomalies table */
+  { const c = $('#anom-card');
+    const wrap = div('twrap', c);
+    const t = elh('table', wrap);
+    const thead = elh('thead', t); const trh = elh('tr', thead);
+    for (const h of ['book','payer family','service month','paid-rate','typical','z']) elh('th', trh, h);
+    const tb = elh('tbody', t);
+    for (const a of DATA.anomalies){
+      const tr = elh('tr', tb);
+      elh('td', tr, a.entity==='BXR'?'BXR':'Indigo');
+      elh('td', tr, a.family);
+      elh('td', tr, a.month.slice(0,7));
+      elh('td', tr, (a.pct_paid*100).toFixed(1)+'%');
+      elh('td', tr, (a.typical*100).toFixed(1)+'%');
+      elh('td', tr, (a.z>0?'+':'')+a.z.toFixed(1), a.z>0?'delta-up':'delta-dn');
+    }
+  }
+
+  /* S9 names */
+  { const N = DATA.names;
+    const c1 = card($('#names-cards'), 'When each spelling first appeared',
+      'first-seen year of every clustered spelling — a brand-new payer, or a new variant of a known one?');
+    const f1 = fig(c1);
+    const years = Object.keys(N.timeline).sort();
+    register(()=>{ f1.replaceChildren();
+      const series = [
+        {name:'first spelling of a new payer', color:slot(0), vals:years.map(y=>N.timeline[y]['new payer']||0)},
+        {name:'new variant of a known payer', color:slot(1), vals:years.map(y=>N.timeline[y]['new VARIANT of known payer']||0)},
+      ];
+      legend(f1, series.map(s=>({name:s.name,color:s.color})));
+      stackedCols(f1, {x:years, series, pct:false, xFmt:y=>y, fmtY:v=>v, h:210, label:'variant emergence'});
+      tableTwin(f1, ['year',...series.map(s=>s.name)], years.map((y,i)=>[y,...series.map(s=>s.vals[i])]));
+    });
+    const c2 = card($('#names-cards'), 'What kind of character-level change happens',
+      'classified merge pairs across all clusters');
+    const f2 = fig(c2);
+    register(()=>{ f2.replaceChildren();
+      hbars(f2, Object.entries(N.taxonomy).map(([k,v])=>({name:k, v})), {ml:230, label:'edit taxonomy', unit:'pairs'});
+      tableTwin(f2, ['edit type','pairs'], Object.entries(N.taxonomy));
+    });
+    const c3 = card($('#names-cards'), 'Most-drifted payer identities', 'spelling variants per clustered payer');
+    const f3 = fig(c3);
+    register(()=>{ f3.replaceChildren();
+      hbars(f3, N.drifty.map(d=>({name:d.label.length>30?d.label.slice(0,29)+'…':d.label, v:d.n,
+        extra:d.volume.toLocaleString()+' rows'})), {ml:230, label:'drifty payers', unit:'variants'});
+      tableTwin(f3, ['payer','variants','rows'], N.drifty.map(d=>[d.label, d.n, d.volume.toLocaleString()]));
+    });
+    const c4 = card($('#names-cards'), 'Front door vs back door', '');
+    const ul = elh('ul', c4); ul.className = 'bullets';
+    const li1 = elh('li', ul);
+    elh('b', li1, 'VOB-only names: ');
+    li1.appendChild(document.createTextNode(
+      N.vob_only.map(v=>`${v.label} (${v.volume})`).join(' · ') +
+      ' — intake spellings that never appear in claims; the crosswalk is what joins the two worlds.'));
+    const li2 = elh('li', ul);
+    elh('b', li2, `${N.conflicts} clusters map to more than one canonical payer id`);
+    li2.appendChild(document.createTextNode(
+      ' — mostly the Anthem/BlueCard tangle, where one spelling family legitimately spans state Blues plans. Findings for the alias-map review queue, not auto-merges.'));
+    if (N.gaps.length){
+      const li3 = elh('li', ul);
+      elh('b', li3, 'Unmapped at volume: ');
+      li3.appendChild(document.createTextNode(
+        N.gaps.map(g=>`${g.label} (${g.volume} rows, ${g.n_variants} spellings)`).join(' · ')));
+    }
+  }
+
+  /* S10 model */
+  { const M = DATA.model;
+    const NAME = {cpt_c:'CPT/HCPCS code', fam_c:'payer family', t:'time (quarter index)', entity:'book (BXR vs Indigo)'};
+    const c1 = card($('#model-cards'), 'Permutation importance (held-out fold)',
+      `HistGradientBoosting on ${M.n.toLocaleString()} payer × code × quarter aggregates, weighted by line count`);
+    const f1 = fig(c1);
+    register(()=>{ f1.replaceChildren();
+      hbars(f1, M.importance.map(r=>({name:NAME[r.feature]||r.feature, v:Math.max(0,r.importance)})),
+        {ml:170, fmt:v=>v.toFixed(2), label:'importance'});
+      tableTwin(f1, ['feature','importance'], M.importance.map(r=>[NAME[r.feature]||r.feature, r.importance]));
+    });
+    const c2 = card($('#model-cards'), 'Model-predicted paid-rate by payer family',
+      'weighted mean prediction on held-out rows — the payer ordering the model learned');
+    const f2 = fig(c2);
+    register(()=>{ f2.replaceChildren();
+      const rows = Object.entries(M.family_rate).filter(([k])=>k!=='OTHER_FAM')
+        .map(([k,v])=>({name:k, v})).sort((a,b)=>b.v-a.v);
+      hbars(f2, rows, {ml:170, fmt:v=>(v*100).toFixed(0)+'%', label:'predicted paid-rate'});
+      tableTwin(f2, ['family','predicted paid-rate'], rows.map(r=>[r.name, fmtPct(r.v)]));
+    });
+  }
+}
+
+build();
+function rerender(){ for (const fn of charts) fn(); }
+mq.addEventListener('change', rerender);
+new MutationObserver(rerender).observe(document.documentElement, {attributes:true, attributeFilter:['data-theme']});
+</script>
