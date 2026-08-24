@@ -64,6 +64,13 @@ export interface BillableDayRules {
   readonly zeroHourNeverBillable: boolean;
   /** A13 — how a week's cap regime is resolved for a day. */
   readonly capResolution: CapResolution;
+  /**
+   * Escape hatch for the location registry gate, DEFAULT FALSE so the build fails loud on
+   * a Kipu location nobody has mapped. Set true ONLY to probe a brand-new export before
+   * writing its registry entry — never in a reconciliation, because an unmapped label has
+   * no CMD customer and its days would be silently excluded from every per-customer total.
+   */
+  readonly allowUnmappedLocations: boolean;
 }
 
 export const DEFAULT_RULES: BillableDayRules = {
@@ -72,6 +79,7 @@ export const DEFAULT_RULES: BillableDayRules = {
   missedNeverBillable: true,
   zeroHourNeverBillable: true,
   capResolution: 'per-day-auth',
+  allowUnmappedLocations: false,
 };
 
 /** Convenience for tests and reconciliation experiments: override one rule at a time. */

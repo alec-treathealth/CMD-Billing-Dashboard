@@ -27,8 +27,10 @@ import {
   isBpsEvaluation,
   isMissedService,
 } from './assumptions.js';
+import { assertKnownLabels, locationFor } from './locations.js';
 
 export type { BillableDayRules, LocConfigEntry, LocConfigMap } from './assumptions.js';
+export type { KipuLocation } from './locations.js';
 
 export type CsvRow = Record<string, string>;
 
@@ -52,6 +54,14 @@ export interface KipuSession {
   readonly billable: boolean;
   readonly status: string;
   readonly srcId: string;
+  /**
+   * The session-container label this row came from, VERBATIM — the registry key.
+   * Present on GROUP rows only: the evaluations export has no `Session` column, so an
+   * evaluation cannot name its own location and inherits the client's (see
+   * `KipuClient.labels`). Carried per session rather than per client because two exports
+   * carry two labels each, so one client can legitimately span containers.
+   */
+  readonly label?: string;
 }
 
 export interface KipuClient {
@@ -63,7 +73,13 @@ export interface KipuClient {
   discharge: string | null;
   loc: string;
   payer: string;
+  /**
+   * First container label seen, kept for display and for callers that predate multi-label
+   * exports. Prefer `labels` for anything that must be correct when a client spans two.
+   */
   facility: string;
+  /** Every distinct container label this client's sessions came from, sorted. */
+  labels: string[];
   auths: KipuAuth[];
   sessions: KipuSession[];
   warn: string[];
@@ -378,6 +394,7 @@ export function buildFromCsv(
         loc: '',
         payer: '',
         facility: '',
+        labels: [],
         auths: [],
         sessions: [],
         warn: [],
@@ -429,12 +446,17 @@ export function buildFromCsv(
     }
     const en = usDateTime(r['Ended'] ?? '');
     const sessName = stripAttestation(r['Session'] ?? '');
-    // The facility is ONLY in the session container name ("Telehealth MH TX Group
-    // Sessions") — the export is per-facility and has no facility column.
-    const fac = sessName.replace(/\s*Group Sessions[\s\S]*$/i, '').trim();
+    // The location is ONLY in the session container name — the export has no facility
+    // column. Kept VERBATIM as the registry key: the previous
+    // `.replace(/\s*Group Sessions[\s\S]*$/i, '')` matched only the three telehealth
+    // labels and passed the other eight through unstripped, and no regex can place
+    // "Group Session 1" at all. Unknown labels are collected and thrown on below rather
+    // than inferred (see ./locations.ts).
+    const fac = sessName.trim();
     if (fac) {
       facilities.add(fac);
       if (!c.facility) c.facility = fac;
+      if (!c.labels.includes(fac)) c.labels.push(fac);
     }
     const status = (r['Status'] ?? '').trim();
     const ok = isBillableDocumentation(status, rules);
@@ -450,6 +472,7 @@ export function buildFromCsv(
       billable: ok,
       status,
       srcId: r['Session Id'] ?? '',
+      ...(fac ? { label: fac } : {}),
     });
     if (!ok) notes.push(`group session status "${status}" held out of billable (A10)`);
   }
@@ -503,7 +526,13 @@ export function buildFromCsv(
       const a = minsFromMidnight(sx.start);
       const b2 = minsFromMidnight(sx.end);
       const near = Math.min(a == null ? 9999 : a, b2 == null ? 9999 : b2);
-      if (near <= MIDNIGHT_GUARD_MIN) boundary.push({ loc: c.facility, topic: sx.topic, near, billable: sx.billable });
+      // The SESSION's own label, not the client's first one — a client spanning two
+      // containers would otherwise have its boundary hits attributed to whichever
+      // container happened to appear first, in a report whose whole purpose is per-location
+      // timezone exposure.
+      if (near <= MIDNIGHT_GUARD_MIN) {
+        boundary.push({ loc: sx.label ?? c.facility, topic: sx.topic, near, billable: sx.billable });
+      }
     }
   }
 
@@ -582,8 +611,41 @@ export function buildFromCsv(
   }
 
   const facilityList = [...facilities].sort();
+
+  // ── THE GATE. An unmapped container label stops the build. ────────────────────────
+  // Deliberately AFTER parsing so the error names every unknown label at once, and
+  // deliberately fatal: the alternatives are dropping a location's days silently or
+  // billing them to a neighbour, and both are worse than a failed run. Opt out with
+  // `allowUnmappedLocations` only for exploratory probing of a brand-new export.
+  const unmapped = facilityList.filter((f) => !locationFor(f));
+  if (unmapped.length > 0 && !rules.allowUnmappedLocations) assertKnownLabels(facilityList);
+  for (const u of unmapped) notes.push(`container label "${u}" is not in the location registry`);
+
+  // Zones come from the REGISTRY per label, not from inference on the label's text. The
+  // legacy name-derived `zoneFor` is kept only as the fallback for an unmapped label
+  // under `allowUnmappedLocations`, and `tzMismatch` still reports Kipu's declared zone
+  // as a diff — never a silent correction.
+  const zoneOf = (label: string): { iana: string; label: string } | null => {
+    const loc = locationFor(label);
+    return loc ? { iana: loc.iana, label: loc.zoneLabel } : zoneFor(label);
+  };
   const tzFlags = facilityList.map(tzMismatch).filter((f): f is TzFlag => f !== null);
-  const tzUnknown = facilityList.filter((f) => !zoneFor(f));
+  const tzUnknown = facilityList.filter((f) => !zoneOf(f));
+
+  // ── A client whose labels bill to DIFFERENT CMD customers is flagged, never picked. ──
+  // Texas and Virginia each ship two labels, so a client spanning two is expected; what
+  // is not tolerable is guessing which customer owns the day. Two labels under ONE
+  // customer (both Texas containers) is fine and stays unflagged.
+  for (const c of clients) {
+    if (c.labels.length < 2) continue;
+    const codes = [...new Set(c.labels.map((l) => locationFor(l)?.facilityCode ?? `?${l}`))];
+    if (codes.length > 1) {
+      c.warn.push(
+        `sessions span ${c.labels.length} container labels billing to ${codes.length} different CMD ` +
+          `customers (${codes.join(', ')}) — attribution not inferred, excluded from per-customer totals`,
+      );
+    }
+  }
 
   return {
     clients,

@@ -41,6 +41,7 @@ import {
   isBillableDocumentation,
   withRules,
 } from '../src/kipu/assumptions.js';
+import { locationFor } from '../src/kipu/locations.js';
 
 const BOM = '﻿';
 const ATTEST_LOC = ' - All encounters occur via real-time, interactive audio and video communication.';
@@ -384,13 +385,70 @@ test('auth segments are unioned across rows and deduped on (no, start, end, loc)
   assert.equal(c.auths.length, 2);
 });
 
-test('facility comes from the session container name — the export has no facility column', () => {
+test('the container label is kept VERBATIM as the registry key — no stripping, no inference', () => {
   const bundle = assembleBundle([{ name: 'x-Billable-Sessions.csv', text: csv(SESSIONS_HEADER, sessionRow({})) }]);
   const b = buildFromCsv(bundle, LOC_CONFIG_BASE);
-  assert.deepEqual(b.facilities, ['Telehealth MH TX']);
+  // Verbatim, attestation removed but "Group Sessions" INTACT. The old code stripped that
+  // suffix, which worked for exactly the three telehealth labels and mangled the other eight.
+  assert.deepEqual(b.facilities, ['Telehealth MH TX Group Sessions']);
   const c = b.clients[0];
   assert.ok(c);
-  assert.equal(c.facility, 'Telehealth MH TX');
+  assert.equal(c.facility, 'Telehealth MH TX Group Sessions');
+  assert.deepEqual(c.labels, ['Telehealth MH TX Group Sessions']);
+  // The label is carried on the SESSION too, which is what makes multi-label exports work.
+  assert.equal(c.sessions[0]?.label, 'Telehealth MH TX Group Sessions');
+  // And it resolves through the registry to the ONE telehealth CMD account.
+  assert.equal(locationFor(c.facility)?.facilityCode, 'TELEHEALTH_MH');
+});
+
+test('an unmapped container label FAILS THE BUILD rather than being inferred', () => {
+  const bundle = assembleBundle([
+    { name: 'x-Billable-Sessions.csv', text: csv(SESSIONS_HEADER, sessionRow({ session: 'Telehealth MH AZ Group Sessions' })) },
+  ]);
+  assert.throws(() => buildFromCsv(bundle, LOC_CONFIG_BASE), /Unmapped Kipu session-container label/);
+  // The escape hatch exists for probing a new export, and it must NOT be the default.
+  const b = buildFromCsv(bundle, LOC_CONFIG_BASE, withRules({ allowUnmappedLocations: true }));
+  assert.deepEqual(b.facilities, ['Telehealth MH AZ Group Sessions']);
+  assert.ok(b.notes.some((n) => /not in the location registry/.test(n)));
+});
+
+test('two labels under ONE customer are not flagged; two customers are', () => {
+  // Both Texas containers → TREAT_TX. Expected shape, no warning.
+  const sameCustomer = buildFromCsv(
+    assembleBundle([
+      {
+        name: 'x-Billable-Sessions.csv',
+        text: csv(
+          SESSIONS_HEADER,
+          sessionRow({ session: 'TX Group Session' }),
+          sessionRow({ session: 'Scott & Jenny Group Session TX', started: '08/11/2026 08:00 AM', ended: '08/11/2026 09:30 AM' }),
+        ),
+      },
+    ]),
+    LOC_CONFIG_BASE,
+  );
+  const same = sameCustomer.clients[0];
+  assert.ok(same);
+  assert.equal(same.labels.length, 2);
+  assert.ok(!same.warn.some((w) => /different CMD customers/.test(w)));
+
+  // Texas + Telehealth → two customers. Must be flagged, never picked.
+  const crossCustomer = buildFromCsv(
+    assembleBundle([
+      {
+        name: 'x-Billable-Sessions.csv',
+        text: csv(
+          SESSIONS_HEADER,
+          sessionRow({ session: 'TX Group Session' }),
+          sessionRow({ session: 'Telehealth MH TX Group Sessions', started: '08/11/2026 08:00 AM', ended: '08/11/2026 09:30 AM' }),
+        ),
+      },
+    ]),
+    LOC_CONFIG_BASE,
+  );
+  const cross = crossCustomer.clients[0];
+  assert.ok(cross);
+  assert.ok(cross.warn.some((w) => /different CMD customers/.test(w)), cross.warn.join(' | '));
 });
 
 test('MRN has no source in the export and stays blank — never faked', () => {
@@ -505,7 +563,7 @@ test('fixture: buildFromCsv reproduces the real export shape (harness-verified c
   assert.equal(n((s) => s.kind === 'bps'), 1);
   assert.equal(n((s) => s.billable === false), 31);
   assert.deepEqual(b.weeks.map((w) => w.id), ['2025-08-11']); // real 2026-08-10, −364d
-  assert.deepEqual(b.facilities, ['Telehealth MH TX']);
+  assert.deepEqual(b.facilities, ['Telehealth MH TX Group Sessions']);
   assert.equal(b.skipped.length, 0);
   assert.equal(
     b.clients.reduce((a, c) => a + c.auths.length, 0),
