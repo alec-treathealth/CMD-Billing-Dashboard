@@ -1,0 +1,74 @@
+-- 0107 — ordered covering index for the Collections grid's default sort.
+--
+-- ⚠ APPLIED TO PROD BEFORE THIS FILE WAS COMMITTED. Stated plainly rather than hidden: the index
+-- was created live on 2026-08-24 via autocommit `execute_sql` (Supabase MCP), verified
+-- `indisvalid = true`, and measured, and only then was this file written. That ordering is
+-- deliberate and it is the ONLY safe ordering for this migration, because
+-- `CREATE INDEX CONCURRENTLY` CANNOT run inside a transaction block and `apply_migration` wraps
+-- everything in one — the same discipline 0070, 0081 and 0092 record. If you are re-applying this
+-- to a fresh database, run the statement below with autocommit `execute_sql`, NOT `apply_migration`.
+--
+-- Because it was applied outside `apply_migration`, it left NO ledger row of its own; one was
+-- INSERTED BY HAND into supabase_migrations.schema_migrations (the 0101 precedent) so the next
+-- session does not re-issue 0107.
+--
+-- ── WHAT IT FIXES ───────────────────────────────────────────────────────────────────────────────
+-- The Collections grid (`buildCmdExplorerQuery`, src/collections/cmdExplorerQuery.ts) pages the
+-- rollup with `order by payment_received desc nulls last, id desc` and `limit 51`. No pre-existing
+-- index could supply that ordering: `cmd_charge_rollup_entity_payment` is
+-- `(business_entity_id, payment_received)` ASC with no `id` tiebreak, and Postgres's `DESC` default
+-- is NULLS FIRST, so neither scan direction matches `DESC NULLS LAST`. Every page load therefore
+-- read the whole tenant slice and top-N sorted it.
+--
+-- Measured on prod, 51 rows out, single-entity (bxr) view:
+--   before  Parallel Index Scan + Sort   61,296 buffers (479 MB)   157 ms – 8,562 ms
+--   after   Index Scan, NO Sort node          52 buffers (0.41 MB)   0.5 ms – 1.2 ms
+-- ~1,180x fewer buffers for identical rows. Actual index size: 24 MB (estimate was 15–25 MB; the
+-- `id` key is unique per row and so eliminates the B-tree deduplication that keeps the 2-key
+-- `cmd_charge_rollup_entity_payment` down to 4 MB — that is why this one is ~6x larger for one
+-- extra column).
+--
+-- ⚠ NULLS LAST IS LOAD-BEARING AND STAYS. `payment_received` carries 3,615 real NULLs out of
+-- 500,300 rows (measured 2026-08-24). Dropping `nulls last` from the query to match a plainer index
+-- would move those 3,615 charges from the END of the default grid to the FRONT of page 1 — a
+-- visible correctness regression, not a simplification. The index declares NULLS LAST to match.
+--
+-- ⚠ THE INDEX ALONE IS INERT. A ScalarArrayOp qual (`business_entity_id = any($1::uuid[])`) on the
+-- LEADING column stops a btree from returning rows in TRAILING-column order, so with the array form
+-- the planner still sorted — measured, on this very index, after ANALYZE. The companion change in
+-- `cmdExplorerBaseConds` emits plain `business_entity_id = $n::uuid` when the scope holds exactly
+-- ONE id, which is what lets this index be chosen. Index and caller ship together; neither works
+-- alone.
+--
+-- SCOPE OF THE BENEFIT: the single-entity views (bxr, indigo) only. The CONSOLIDATED view passes
+-- two ids, keeps the array form, and still plans as a Parallel Seq Scan (~707–1,070 ms, 169 MB).
+-- Making that index-servable needs a per-entity UNION ALL rewrite and is deliberately NOT attempted
+-- here.
+--
+-- ── ⚠ REBUILD DEPENDENCY: 0067 DESTROYS THIS INDEX ──────────────────────────────────────────────
+-- `collections.cmd_explorer_charge_rollup` is a MATERIALIZED VIEW whose current definition comes
+-- from 0059, and `0067_cmd_charge_rollup_patient_name_bidx.sql` DROPs and re-CREATEs it
+-- (create … _next, rename, drop old). A DROP + CREATE takes every index on the object with it —
+-- so applying 0067, or any future rebuild of this matview, SILENTLY DELETES
+-- `cmd_charge_rollup_entity_payment_id_desc` and silently reintroduces the full seq scan. Nothing
+-- errors; the grid just gets slow again.
+--
+-- CLAUDE.md already records that 0067 as authored drops 0068's covering index and 0069's MAINTAIN
+-- grant. This index now joins that list. 0067 IS NOT MODIFIED BY THIS MIGRATION (it is stale and
+-- unapplied, and editing it is out of scope) — but whoever revisits it must re-create this index in
+-- the same change. Re-running THIS file after a rebuild is safe and sufficient: it is
+-- `IF NOT EXISTS`, so it is a no-op when the index is present and a rebuild when it is not.
+--
+-- COST TO THE INGEST, recorded so it is a number and not a surprise: the hourly
+-- `/api/cron/refresh-charge-rollup` (:45) calls
+-- `collections.refresh_cmd_explorer_charge_rollup()`, which does
+-- `refresh materialized view CONCURRENTLY`. A concurrent refresh diffs into the matview with
+-- INSERT/UPDATE/DELETE and therefore MAINTAINS every index — now 14 of them, 368 MB total against a
+-- 167 MB heap. Reads are never blocked (CONCURRENTLY), and the refresh is not optimized here.
+--
+-- ROLES: no grant changes. `collections` objects are owned by `postgres` (never `claims_admin` —
+-- a `SET ROLE claims_admin` here would 42501), and the refresh definer runs as its owner, so it
+-- maintains the new index with no additional privilege.
+
+create index concurrently if not exists cmd_charge_rollup_entity_payment_id_desc
+  on collections.cmd_explorer_charge_rollup (business_entity_id, payment_received desc nulls last, id desc);

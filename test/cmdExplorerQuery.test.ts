@@ -58,10 +58,45 @@ test('likeContains escapes LIKE metacharacters and wraps in %…%', () => {
 
 test('page query: tenant scope is always the first bound param, no filters', () => {
   const { sql, params } = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
-  assert.match(sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
-  assert.deepEqual(params[0], ENTITY);
+  assert.match(sql, /where business_entity_id = \$1::uuid/);
+  assert.deepEqual(params[0], ENTITY[0]);
   assert.match(sql, /order by t\.payment_received desc nulls last, t\.id desc/);
   assertAllBound(sql, params);
+});
+
+// ── Tenant-predicate ARITY (migration 0107) ─────────────────────────────────────────────────────
+// The emitted tenant predicate depends on how many entity ids are in scope, and all three arities
+// are asserted here because the ONE-id case is a PERFORMANCE contract and the ZERO-id case is a
+// TENANCY one.
+//
+// WHY ONE ID IS SPECIAL: a ScalarArrayOp qual (`= any(...)`) on the LEADING btree column stops the
+// index from returning rows in TRAILING-column order, so the grid's
+// `order by payment_received desc nulls last, id desc` could not be index-served and every page
+// load sorted the whole tenant slice (measured 479 MB of buffers for 51 rows). Plain equality
+// restores the ordered Index Scan on cmd_charge_rollup_entity_payment_id_desc. If this assertion
+// ever flips back to `any(...)` for a single id, that index goes cold and nothing else fails.
+test('tenant predicate arity: 1 id emits plain equality, 2+ keeps the array, 0 stays fail-closed', () => {
+  // ONE id → `= $n::uuid`, and the bound value is the SCALAR, not a one-element array.
+  const one = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
+  assert.match(one.sql, /where business_entity_id = \$1::uuid/);
+  assert.doesNotMatch(one.sql, /business_entity_id = any/);
+  assert.equal(one.params[0], ENTITY[0]);
+
+  // TWO ids (the consolidated view) → unchanged array form, array value.
+  const two = buildCmdExplorerQuery(null, {}, SORT, 51, [...ENTITY, '141d459c-f371-4229-9a92-ace198e940bb']);
+  assert.match(two.sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
+  assert.deepEqual(two.params[0], [ENTITY[0], '141d459c-f371-4229-9a92-ace198e940bb']);
+
+  // ZERO ids → MUST stay on the array form. `= any(ARRAY[]::uuid[])` matches NOTHING, which is the
+  // fail-closed property this module relies on instead of assertEntityScope. Routing an empty scope
+  // through the `=` branch would bind an array to a uuid parameter — a type error, not a safe deny.
+  const none = buildCmdExplorerQuery(null, {}, SORT, 51, []);
+  assert.match(none.sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
+  assert.doesNotMatch(none.sql, /business_entity_id = \$1::uuid[^[]/);
+  assert.deepEqual(none.params[0], []);
+
+  // The predicate is emitted UNCONDITIONALLY at every arity — there is no path to an unscoped read.
+  for (const q of [one, two, none]) assert.match(q.sql, /where business_entity_id /);
 });
 
 test('substring search: OR across ONLY allowlisted columns, one shared pattern param', () => {
@@ -176,7 +211,7 @@ test('facility multi-select: EMPTY array is NO restriction (all facilities), not
     const { sql, params } = buildCmdExplorerQuery(null, { facility }, SORT, 51, ENTITY);
     assert.doesNotMatch(sql, /facility = any/, `facility=${JSON.stringify(facility)} must emit no facility clause`);
     // tenant scope is still the only WHERE predicate → identical to the no-filter query
-    assert.match(sql, /where business_entity_id = any\(\$1::uuid\[\]\) order by/);
+    assert.match(sql, /where business_entity_id = \$1::uuid order by/);
     assertAllBound(sql, params);
   }
 });
@@ -338,7 +373,7 @@ test('search summary: totals + 3 group queries, tenant-scoped, group cols are li
   const { totals, groups } = buildCmdSearchSummaryQueries(filter, ENTITY);
 
   assert.match(totals.sql, /count\(\*\)::int as total_count/);
-  assert.match(totals.sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
+  assert.match(totals.sql, /where business_entity_id = \$1::uuid/);
   assertAllBound(totals.sql, totals.params);
 
   for (const [key, col] of [
@@ -348,7 +383,7 @@ test('search summary: totals + 3 group queries, tenant-scoped, group cols are li
   ] as const) {
     const g = groups[key];
     assert.match(g.sql, new RegExp(`group by ${col} order by charge desc nulls last, count desc limit \\$\\d+`));
-    assert.match(g.sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
+    assert.match(g.sql, /where business_entity_id = \$1::uuid/);
     // topN is the LAST bound param
     assert.equal(g.params[g.params.length - 1], CMD_SEARCH_TOP_N);
     assertAllBound(g.sql, g.params);
@@ -396,7 +431,7 @@ test('PHI blind-index tokens add ANDed equality predicates, all bound (raw PHI n
 
 test('search summary carries the same PHI predicate, tenant-scoped', () => {
   const { totals, groups } = buildCmdSearchSummaryQueries({ phiIndex: { memberIdBidx: 'aa11' } }, ENTITY);
-  assert.match(totals.sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
+  assert.match(totals.sql, /where business_entity_id = \$1::uuid/);
   assert.match(totals.sql, /member_id_bidx = \$2/);
   assertAllBound(totals.sql, totals.params);
   assert.match(groups.facility.sql, /member_id_bidx = \$2/);
@@ -485,7 +520,7 @@ test('combo grouping: SQL is dollar-weighted ratio-of-SUMS, never avg-of-ratios 
 test('combo grouping: tenant-scoped, groups by BOTH keys, denominators guarded, topN bound last', () => {
   const { combo } = buildCmdSearchSummaryQueries({ q: 'BCBS', searchColumns: ['facility'] }, ENTITY);
   // same shared tenant scope as every other summary query (business_entity_id first)
-  assert.match(combo.sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
+  assert.match(combo.sql, /where business_entity_id = \$1::uuid/);
   // grouped by the two-key combination, ordered like the other groups, topN as the LAST bound param
   assert.match(combo.sql, /group by cpt_code, revenue_code order by charge desc nulls last, count desc limit \$\d+/);
   assert.equal(combo.params[combo.params.length - 1], CMD_SEARCH_TOP_N);
@@ -825,7 +860,7 @@ test('VOB market: employer + funding emit ONE member_id_bidx semi-join into memb
   assert.equal((sql.match(/vob\.member_benefits_latest/g) || []).length, 1);
   assert.doesNotMatch(sql, /join vob\.member_benefits_latest/i);
   // funding binds before employers (cond order); tenant is $1, limit is last.
-  assert.deepEqual(params, [ENTITY, ['Self-Funded'], ['BOEING', 'KAISER'], 51]);
+  assert.deepEqual(params, [ENTITY[0], ['Self-Funded'], ['BOEING', 'KAISER'], 51]);
 });
 
 test('VOB market: only funding present emits a semi-join with just the funding condition', () => {
@@ -835,7 +870,7 @@ test('VOB market: only funding present emits a semi-join with just the funding c
     /member_id_bidx in \(select member_id_bidx from vob\.member_benefits_latest where funding = any\(\$2::text\[\]\)\)/,
   );
   assert.doesNotMatch(sql, /employer_norm/);
-  assert.deepEqual(params, [ENTITY, ['Self-Funded', 'Fully Insured'], 51]);
+  assert.deepEqual(params, [ENTITY[0], ['Self-Funded', 'Fully Insured'], 51]);
 });
 
 test('VOB market: EMPTY / null employer+funding arrays are NO restriction (no semi-join, not zero rows)', () => {
