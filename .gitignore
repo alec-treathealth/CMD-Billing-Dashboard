@@ -21,7 +21,14 @@ Indigo Seed Data/
 # directory's README.md, and re-verify with a leak check before adding another).
 # Keep this exception directory-scoped. NEVER broaden it, and never place a raw
 # export here: real Kipu exports stay outside the repo.
-!test/fixtures/kipu-billing-report/*.csv
+#
+# ⚠ PREFIX-SCOPED ON PURPOSE (tightened 2026-08-24). This directory is precisely where
+# someone would drop a real export by mistake, and it was the ONE path the blanket *.csv
+# guard above did not cover. Every scrubbed file carries the `fixture-` prefix, so
+# narrowing the negation costs nothing and makes an accidental real export fall back
+# under the blanket guard instead of becoming committable. NEVER widen this back to
+# `*.csv`, and never rename a real export to `fixture-*`.
+!test/fixtures/kipu-billing-report/fixture-*.csv
 .env
 .env.*
 !.env.example
