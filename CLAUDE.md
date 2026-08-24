@@ -687,13 +687,20 @@ in [Canonical Context Set](#canonical-context-set); that table wins:
 These are wrong in the code today. Fix opportunistically; never copy them.
 
 - `app/lib/server.ts` (~L1688) says 36 Indigo customers and
-  `app/app/api/cron/indigo-explorer/route.ts` says 37. The roster is **30**
+  `app/app/api/cron/indigo-explorer/route.ts` says 37. The active roster is **29**
   (`src/collections/cmdCustomers.ts`) — 10036020 MADISON RECOVERY CENTER and
   10036030 MISSOURI BEHAVIORAL HEALTH were dropped 2026-08-02 for hard INVALID
-  CRITERIA. BXR is **15**.
+  CRITERIA, and 10035467 RESTORED HOPE RECOVERY retired 2026-08-06 (closed
+  CMD-side). This bullet itself said **30** until 2026-08-21, missing the third
+  retirement. BXR is **15**.
 - CMD report/filter pairings turn over fast; trust `app/lib/server.ts`, never
-  prose. Live as of 2026-08-03: BXR explorer **10093959 / 10148478**, Indigo
-  explorer **10092391 / 10148487**, payer rollup **10093971 / 10148488**.
+  prose. ⚠ Since **2026-08-15** the BXR explorer pair comes from **sensitive**
+  Vercel env vars (`CMD_EXPLORER_REPORT_ID` / `CMD_EXPLORER_FILTER_ID`) whose
+  values cannot be read back (`vercel env pull` prints `[SENSITIVE]`); it is the
+  employer-bearing 10094775-family report, verified 2026-08-21 from the data
+  (660 of 662 fresh BXR rows carry `employer_name`), and **10093959 / 10148478**
+  is now only the code FALLBACK. Still current: Indigo explorer
+  **10092391 / 10148487**, payer rollup **10093971 / 10148488**.
   DEAD — every pairing returns INVALID CRITERIA: **10091971 / 10147530** (lost
   2026-07-31), the older **10147499**, and **10091828 / 10147241** (the payer
   pair, confirmed dead 2026-08-02 by `scripts/dryrun-cmd-payer-refresh.ts`).
