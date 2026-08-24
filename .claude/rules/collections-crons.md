@@ -21,22 +21,66 @@ allows one report at a time per partner). Each cron carries a wall-clock guard;
 unfinished customers are picked up next run, which is safe because every writer
 is idempotent. `maxDuration = 300` (needs Vercel Pro+).
 
-Rosters live in `src/collections/cmdCustomers.ts`: **BXR = 15**, **Indigo = 32**.
-Code comments claiming 36 or 37 Indigo customers are stale — do not propagate.
+Rosters live in `src/collections/cmdCustomers.ts`: **BXR = 15 active**,
+**Indigo = 29 active** (32 in the file; 3 retired — MADISON and MISSOURI BH
+2026-08-02, RESTORED HOPE 2026-08-06). Prose counts rot fast — this file said
+32, CLAUDE.md said 30, and code comments say 36/37; count `INDIGO_CUSTOMERS`.
+
+**`customers 0/15 (… fresh-skipped 15)` in a census cron log is HEALTHY.** The
+census crons run hourly but re-pull a customer only once its data crosses the
+staleness threshold (`isCustomerFresh` in `cmdCensusCron.ts`), so most runs
+process nobody and the log line leads with `0/15`. Read the `fresh-skipped` and
+`failed` fields — and `collections.etl_run` — before calling it an outage.
+(Exactly this misread triggered a 2026-08-21 investigation; the explorer and
+census were both healthy throughout.)
 
 ## Report and filter ids
 
-The live BXR explorer cron uses report `10091971` / filter **`10147530`**
-(`app/lib/server.ts`), a rolling current-month window. Indigo uses report
-`10092391` / filter `10147669`.
+⚠ Never trust prose for the live ids — not even this file's (until 2026-08-21
+it named `10091971`/`10147530` as live, a pairing that died 2026-07-31). The
+live pair is the env var when set, else the code fallback in `app/lib/server.ts`.
+
+Since **2026-08-15** the BXR explorer pair is set by **sensitive** Vercel env
+vars (`CMD_EXPLORER_REPORT_ID` / `CMD_EXPLORER_FILTER_ID`) whose values cannot
+be read back — `vercel env pull` prints `[SENSITIVE]` even on the latest CLI.
+Verify which report is live from the DATA, not the env: the employer-bearing
+report (10094775 family) shows up as fresh `cmd_explorer_rows` carrying
+`employer_name` (2026-08-21: 660 of 662 new BXR rows), which the old 10093959
+projection cannot produce. `bxrExpectedColumnsFor()` keys the header contract
+off the same env var, so report and column contract move together.
+
+Code fallbacks, used only when the env var is unset or empty:
+
+- BXR explorer — report `10093959` / filter `10148478` (`cmdExplorerConfigFor`)
+- Indigo explorer — report `10092391` / filter `10148487`
+  (`CMD_INDIGO_REPORT_ID` / `CMD_INDIGO_FILTER_ID`, `cmdIndigoConfigFor`)
+- The census crons run SEPARATE, env-REQUIRED pairs with **no fallback**:
+  `CMD_BXR_CENSUS_REPORT_ID` / `CMD_BXR_CENSUS_FILTER_ID` and
+  `CMD_INDIGO_CENSUS_FILTER_ID`.
 
 Filter `10147499` appears in `src/collections/cmdExplorer.ts` comments and in the
-manual `cmdDailyBackfill.ts` CLI default — it is **not** what the live cron runs.
+manual `cmdDailyBackfill.ts` CLI — it is **not** what the live cron runs.
+
+**`10148862` and `10148863` are CANDIDATE filters that no code path uses.**
+`10148862` is the intended one-shot *backfill* window (Alec's note: the only way
+the ~$16.3M gap closes) and appears in this repo solely as a usage example at
+`scripts/probe-cmd-filter.ts:4`; `10148863` is a candidate *census* filter and
+appears **nowhere in the repo at all**. Neither is a live pairing, so do not cite
+either as one.
+
+⚠ **A 0-rows result from probing a candidate filter is NOT a production
+incident.** The open note "census filter 10148863 returns 0 rows for LSMH +
+NASH" describes a filter production does not run. Measured against
+`collections.cmd_census_run` on 2026-08-24, the live BXR census pulled **LSMH
+(10031977) and NASH (10030911) successfully every day for 10 days** — 1,434→1,568
+and 2,633→2,925 `rows_seen`, `status='ok'`, zero failures, alongside all 13 other
+BXR accounts. So that finding is a **pre-cutover defect in the replacement
+filter**, and cutting over to `10148863` would BREAK two healthy facilities.
+Fix its criteria in CMD before it is ever wired, and re-probe the whole roster.
 
 The filter **must** window on *payment-received* date, not charge date. A
 charge-date filter drops 2026 payments on pre-2026 charges and undercounts
-collections by roughly $6.9M. Report/filter/poll are tunable via `CMD_EXPLORER_*`
-env vars.
+collections by roughly $6.9M.
 
 ## Writers
 
