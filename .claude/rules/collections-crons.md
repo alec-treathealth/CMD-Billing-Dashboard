@@ -54,19 +54,37 @@ Code fallbacks, used only when the env var is unset or empty:
 - BXR explorer — report `10093959` / filter `10148478` (`cmdExplorerConfigFor`)
 - Indigo explorer — report `10092391` / filter `10148487`
   (`CMD_INDIGO_REPORT_ID` / `CMD_INDIGO_FILTER_ID`, `cmdIndigoConfigFor`)
-- The census crons run SEPARATE, env-REQUIRED pairs with **no fallback**:
-  `CMD_BXR_CENSUS_REPORT_ID` / `CMD_BXR_CENSUS_FILTER_ID` and
-  `CMD_INDIGO_CENSUS_FILTER_ID`.
+- The census crons run their OWN filters, and **the two tenants are not
+  symmetrical** — do not describe them as one rule:
+  - **BXR** (`cmdBxrCensusConfigFor`) — report AND filter are both env-required
+    with **no fallback**: `CMD_BXR_CENSUS_REPORT_ID` / `CMD_BXR_CENSUS_FILTER_ID`.
+  - **Indigo** (`cmdIndigoCensusConfigFor`) — only the FILTER is env-required
+    (`CMD_INDIGO_CENSUS_FILTER_ID`). The report id is **inherited by spreading
+    `cmdIndigoConfigFor`**, so it comes from `CMD_INDIGO_REPORT_ID` and falls
+    back to `10092391` — an Indigo census can therefore run on a defaulted
+    report, which the BXR census structurally cannot.
 
 Filter `10147499` appears in `src/collections/cmdExplorer.ts` comments and in the
 manual `cmdDailyBackfill.ts` CLI — it is **not** what the live cron runs.
 
 **`10148862` and `10148863` are CANDIDATE filters that no code path uses.**
 `10148862` is the intended one-shot *backfill* window (Alec's note: the only way
-the ~$16.3M gap closes) and appears in this repo solely as a usage example at
-`scripts/probe-cmd-filter.ts:4`; `10148863` is a candidate *census* filter and
-appears **nowhere in the repo at all**. Neither is a live pairing, so do not cite
-either as one.
+the ~$16.3M gap closes). `10148863` is a candidate *census* filter. **Neither is
+referenced by any code path, and on a fresh clone this rule file is the only
+place either id is written down** — so neither is a live pairing and neither
+should ever be cited as one.
+
+⚠ Two traps in verifying that claim, both hit while writing this section:
+
+- **Do not phrase it as "appears nowhere in the repo."** Writing the id here
+  makes that false the moment it is committed, so a reader who greps to check —
+  as this file tells them to — finds the doc and concludes the doc is wrong.
+  Say "no code path references it."
+- **`grep` in the primary worktree counts UNTRACKED files.** `10148862` does
+  appear in `scripts/probe-cmd-filter.ts`, as a usage example — but that script
+  is untracked, so it is absent from every worktree, every fresh clone, and CI.
+  A hit there is not a hit in the repo. Confirm with `git ls-files` before
+  citing a path.
 
 ⚠ **A 0-rows result from probing a candidate filter is NOT a production
 incident.** The open note "census filter 10148863 returns 0 rows for LSMH +
