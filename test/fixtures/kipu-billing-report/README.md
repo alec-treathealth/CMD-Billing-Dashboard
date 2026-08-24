@@ -2,7 +2,8 @@
 
 Derived from the real Kipu "Billable" Billing Report export of 2026-08-21
 (the Aug 10 week, `…Time-12-28am`) by a throwaway scrubber
-(`scripts/make-kipu-fixture.mjs`, untracked by repo convention):
+(`scripts/make-kipu-fixture.mjs`, now TRACKED — it is the audit trail for the
+PHI-free claim below, and an unauditable claim is not worth much):
 
 - **Patient names** → `Fixture Patient NN` (deterministic, order of first appearance).
 - **Provider / Signed By** → `Provider NN`.
