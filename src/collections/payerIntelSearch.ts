@@ -162,15 +162,48 @@ export interface PayerIntelDeclinerRow {
 /**
  * Per-facility % collected of billed, trailing window vs the window before it, DECLINERS ONLY.
  *
- * Two window CTEs (one scan each — the buildBookKpisQuery "split the scans" lesson: a combined
- * count(distinct)+sums aggregate over the whole book spilled to disk at 1.8s) joined on facility,
- * then thresholded. Floors apply to BOTH windows so a facility thin in either cannot fake a cliff.
- * The 'No Facility' placeholder is excluded — a rail naming a place nobody was treated is noise
- * (same ruling as the tape context query, 2026-08-12).
+ * Two window pairs (one scan each — the buildBookKpisQuery "split the scans" lesson) joined on
+ * facility, then thresholded. Floors apply to BOTH windows so a facility thin in either cannot
+ * fake a cliff. The 'No Facility' placeholder is excluded — a rail naming a place nobody was
+ * treated is noise (same ruling as the tape context query, 2026-08-12).
  *
  * The facilities/aliases crosswalk (the FACILITY_DIM_JOINS shape, restated — this module does not
  * import qualifyQuery.ts, same boundary qualifyRatingHistory.ts keeps) resolves care_setting for
  * the tick's IP/OP tag; unmapped facilities ride with null rather than being dropped.
+ *
+ * ── NESTED AGGREGATION, NOT count(distinct) (measured 2026-08-24) ────────────────────────────────
+ * Each window aggregates in TWO steps: `<alias>_m` groups to (facility, member_id_bidx), then
+ * `<alias>` rolls those groups up to facility. That is not stylistic. `count(distinct x)` has no
+ * hash path in Postgres, so it forced a GroupAggregate over input sorted by
+ * (facility, member_id_bidx) — note the sort carried a column the GROUP BY never used — and at the
+ * shipped work_mem BOTH windows spilled. Cross-tenant [BXR, INDIGO], the default 90d window:
+ *
+ *   BEFORE  Sort → `external merge  Disk: 5160kB` + `4424kB`, ~9.4 MB temp I/O per execution
+ *           4060 ms cold / 476 ms warm
+ *   AFTER   HashAggregate, `Batches: 1`, 2065 kB + 2193 kB, ZERO temp I/O
+ *           280 ms warm
+ *
+ * WHY the hash fits where the sort did not: a Sort gets `work_mem` (3500 kB measured), a
+ * HashAggregate gets `work_mem * hash_mem_multiplier` (2 → 7000 kB). The rewrite does not shrink
+ * the work, it moves it into the larger budget. Headroom at 90d is ~3.2x. Stress-measured past the
+ * reachable ceiling and still `Batches: 1` — 180d peaks at 2961 kB, 365d at 4369 kB (1.6x) — but
+ * PAYER_INTEL_WINDOW_DAYS_OPTIONS is [7, 14, 30, 90] and every caller clamps through
+ * clampPayerIntelWindowDays, so neither is reachable without a contract change. The 365-day clamp
+ * below is therefore defensive, not a live path.
+ *
+ * Equivalence to the previous shape was verified on live data — all 9 projected columns, both
+ * EXCEPT ALL directions empty, ordered sequence identical — and it also holds by construction:
+ * charge_amount is numeric(12,2) and insurance_payments is numeric, and numeric addition is exact
+ * and associative, so sum(sum(x)) === sum(x) with the single ::float8 cast still applied last.
+ *
+ * ⚠ `members` MUST KEEP ITS `filter (where member_id_bidx is not null)`. The guard is what makes
+ * the rewrite exact: `count(distinct x)` SKIPS nulls, but `count(*)` over the inner groups does
+ * NOT — a null member_id_bidx forms its own group and would be counted as a member, letting a
+ * facility clear the `members >= $5` floor one member early. And the filter belongs on the OUTER
+ * count ONLY: excluding null-member rows inside `<alias>_m` instead would also drop their
+ * charge_amount / insurance_payments / line count from the sums, silently changing billed, paid
+ * and lines. Measured 2026-08-24: 0 null member_id_bidx rows of 500,477, and the column is not
+ * declared NOT NULL — so this is a live invariant, not a schema guarantee.
  */
 export function buildFacilityDeclinersQuery(
   entityIds: string[],
@@ -180,24 +213,39 @@ export function buildFacilityDeclinersQuery(
   const windowDays = Math.min(Math.max(Math.trunc(opts?.windowDays ?? PAYER_INTEL_DECLINE_WINDOW_DAYS), 7), 365);
   const thresholdPts = Math.min(Math.max(opts?.thresholdPts ?? PAYER_INTEL_DECLINE_THRESHOLD_PTS, 0), 100);
   const limit = Math.min(Math.max(Math.trunc(opts?.limit ?? PAYER_INTEL_DECLINE_TOP_N), 1), 50);
-  const windowAgg = (alias: string, fromExpr: string, toExpr: string) =>
-    `${alias} as (` +
-    'select facility, ' +
-    'sum(charge_amount)::float8 as billed, ' +
-    'sum(insurance_payments)::float8 as paid, ' +
-    'count(*)::int as lines, ' +
-    'count(distinct member_id_bidx)::int as members ' +
+  // Inner: one row per (facility, member). This is the grain that lets `members` be a count(*).
+  const memberAgg = (alias: string, fromExpr: string, toExpr: string) =>
+    `${alias}_m as (` +
+    'select facility, member_id_bidx, ' +
+    'sum(charge_amount) as ca, ' +
+    'sum(insurance_payments) as ip, ' +
+    'count(*) as ln ' +
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
     'where business_entity_id = any($1::uuid[]) ' +
     `and payment_received >= ${fromExpr} and payment_received < ${toExpr} ` +
     "and facility is not null and btrim(facility) <> '' " +
     'and facility <> $3 ' +
+    'group by facility, member_id_bidx)';
+  // Outer: roll the member groups up to the facility. `members` counts GROUPS, not rows, and the
+  // null filter is what keeps that identical to the count(distinct) it replaced — see the header.
+  const windowAgg = (alias: string) =>
+    `${alias} as (` +
+    'select facility, ' +
+    'sum(ca)::float8 as billed, ' +
+    'sum(ip)::float8 as paid, ' +
+    'sum(ln)::int as lines, ' +
+    '(count(*) filter (where member_id_bidx is not null))::int as members ' +
+    `from ${alias}_m ` +
     'group by facility)';
   const sql =
     'with ' +
-    windowAgg('cur', "current_date - $2::int", 'current_date') +
+    memberAgg('cur', "current_date - $2::int", 'current_date') +
     ', ' +
-    windowAgg('prior', "current_date - ($2::int * 2)", 'current_date - $2::int') +
+    windowAgg('cur') +
+    ', ' +
+    memberAgg('prior', "current_date - ($2::int * 2)", 'current_date - $2::int') +
+    ', ' +
+    windowAgg('prior') +
     ', paired as (' +
     'select cur.facility, cur.billed, cur.lines, cur.members, ' +
     'case when cur.billed > 0 then round((cur.paid / cur.billed * 100)::numeric, 2)::float8 end as pct_current, ' +
