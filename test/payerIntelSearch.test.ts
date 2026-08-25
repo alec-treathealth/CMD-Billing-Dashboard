@@ -91,8 +91,8 @@ test('decliners: nested aggregation replaced count(distinct) — the shape that 
   // Each window aggregates twice: to (facility, member) first, then up to facility. count(distinct)
   // has no hash path, so it forced a GroupAggregate whose sort spilled to disk at the shipped
   // work_mem (builder header has the measured before/after).
-  assert.match(q.sql, /cur_m as \(select facility, member_id_bidx,[\s\S]*?group by facility, member_id_bidx\)/);
-  assert.match(q.sql, /prior_m as \(select facility, member_id_bidx,[\s\S]*?group by facility, member_id_bidx\)/);
+  assert.match(q.sql, /cur_m as \(select facility, business_entity_id, member_id_bidx,[\s\S]*?group by facility, business_entity_id, member_id_bidx\)/);
+  assert.match(q.sql, /prior_m as \(select facility, business_entity_id, member_id_bidx,[\s\S]*?group by facility, business_entity_id, member_id_bidx\)/);
   assert.doesNotMatch(q.sql, /count\(distinct/, 'count(distinct) is what forced the spilling sort');
 });
 

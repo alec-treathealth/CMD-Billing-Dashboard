@@ -216,7 +216,7 @@ export function buildFacilityDeclinersQuery(
   // Inner: one row per (facility, member). This is the grain that lets `members` be a count(*).
   const memberAgg = (alias: string, fromExpr: string, toExpr: string) =>
     `${alias}_m as (` +
-    'select facility, member_id_bidx, ' +
+    'select facility, business_entity_id, member_id_bidx, ' +
     'sum(charge_amount) as ca, ' +
     'sum(insurance_payments) as ip, ' +
     'count(*) as ln ' +
@@ -225,7 +225,7 @@ export function buildFacilityDeclinersQuery(
     `and payment_received >= ${fromExpr} and payment_received < ${toExpr} ` +
     "and facility is not null and btrim(facility) <> '' " +
     'and facility <> $3 ' +
-    'group by facility, member_id_bidx)';
+    'group by facility, business_entity_id, member_id_bidx)';
   // Outer: roll the member groups up to the facility. `members` counts GROUPS, not rows, and the
   // null filter is what keeps that identical to the count(distinct) it replaced — see the header.
   const windowAgg = (alias: string) =>
