@@ -9,9 +9,10 @@
  * server-side regardless).
  */
 import type { Metadata } from 'next';
+import { Suspense } from 'react';
 import { redirect } from 'next/navigation';
 import { CollectionsView } from '@/components/dashboard';
-import { DataFreshness } from '@/components/dashboard/data-freshness';
+import { DataFreshness, FreshnessLinePlaceholder } from '@/components/dashboard/data-freshness';
 import { TenantTabs } from '@/components/dashboard/tenant-tabs';
 import { PayerIntelPointerBanner } from '@/components/payer-intel/pointer-banner';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
@@ -67,7 +68,24 @@ export default async function CollectionsPage({
           CMD charge-line detail, filterable by facility and month. Patient identifiers are
           masked by default and revealed in bulk on an explicit, audited action.
         </p>
-        <DataFreshness view={view} />
+        {/* ⚠ THIS IS THE APP'S FIRST DATA-STREAMING SUSPENSE BOUNDARY, and it is not the same
+            mechanism as the four in app/layout.tsx. Those wrap CLIENT components that call
+            useSearchParams, with fallback={null} — a CSR bailout so the static routes sharing that
+            layout can still prerender; their fallback is a formality that never meaningfully paints.
+            THIS one wraps an ASYNC SERVER component that awaits a database read, so the fallback is
+            LOAD-BEARING: it is what the reader actually sees until the probe resolves, and it is
+            what holds the header's height while they see it. Do not "simplify" it to null — see the
+            reserved-box rationale on FreshnessLinePlaceholder.
+
+            WHY THE BOUNDARY EXISTS: DataFreshness is a freshness LABEL that was sitting on the
+            blocking shell path. Un-suspended, React cannot flush any of this page until its read
+            resolves, and that read is a single-connection pool with a 2s acquire budget and one
+            jittered retry (lib/dataFreshness.ts) — an envelope measured at up to ~4.4s in the
+            acquire-failure mode, which is observed failing in production. An annotation must not
+            be able to hold the grid it annotates. */}
+        <Suspense fallback={<FreshnessLinePlaceholder />}>
+          <DataFreshness view={view} />
+        </Suspense>
         {/* Facility Resolution's entry point MOVED to the Claims Desk header (Alec, 2026-08-17):
             the workbench changes claim attribution, which is desk work, not collections reporting.
             The old route still forwards, so nothing breaks — but this tab no longer advertises it,
