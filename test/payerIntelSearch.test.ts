@@ -85,6 +85,42 @@ test('decliners: empty tenant scope throws instead of reading every tenant', () 
   assert.throws(() => buildFacilityDeclinersQuery([]), /entity/i);
 });
 
+test('decliners: nested aggregation replaced count(distinct) — the shape that stopped the spill', () => {
+  const q = buildFacilityDeclinersQuery(ENTITY_IDS);
+  assertAllBound(q.sql, q.params);
+  // Each window aggregates twice: to (facility, member) first, then up to facility. count(distinct)
+  // has no hash path, so it forced a GroupAggregate whose sort spilled to disk at the shipped
+  // work_mem (builder header has the measured before/after).
+  assert.match(q.sql, /cur_m as \(select facility, member_id_bidx,[\s\S]*?group by facility, member_id_bidx\)/);
+  assert.match(q.sql, /prior_m as \(select facility, member_id_bidx,[\s\S]*?group by facility, member_id_bidx\)/);
+  assert.doesNotMatch(q.sql, /count\(distinct/, 'count(distinct) is what forced the spilling sort');
+});
+
+test('decliners: a NULL member cannot inflate `members` past the floor — the guard both windows carry', () => {
+  const q = buildFacilityDeclinersQuery(ENTITY_IDS);
+  // ⚠ THE INVARIANT. `count(distinct x)` SKIPS nulls. A bare `count(*)` over the inner groups does
+  // NOT: a null member_id_bidx forms its own (facility, null) group and would be counted as a
+  // member — letting a facility clear the members floor one member early. Both windows guard it.
+  const guarded = [...q.sql.matchAll(/\(count\(\*\) filter \(where member_id_bidx is not null\)\)::int as members/g)];
+  assert.equal(guarded.length, 2, 'both cur and prior must guard the member count');
+  // The floor being protected: `members` is compared to $5 on BOTH windows, and $5 binds the
+  // window-scaled client minimum (3 at the default 90d window).
+  assert.match(q.sql, /cur\.members >= \$5::int and prior\.members >= \$5::int/);
+  assert.equal(q.params[4], payerIntelMinClientsFor(90));
+});
+
+test('decliners: the NULL guard is on the OUTER count only — an inner WHERE would drop dollars', () => {
+  // Filtering null-member ROWS out of cur_m/prior_m would also strip their charge_amount,
+  // insurance_payments and line count from the sums, silently changing billed/paid/lines. The
+  // guard must never migrate into the inner CTE's WHERE clause.
+  const q = buildFacilityDeclinersQuery(ENTITY_IDS);
+  const inner = q.sql.slice(q.sql.indexOf('cur_m as ('), q.sql.indexOf('), cur as ('));
+  assert.doesNotMatch(inner, /member_id_bidx is not null/, 'null-member rows stay in the sums');
+  assert.match(inner, /sum\(charge_amount\) as ca/);
+  assert.match(inner, /sum\(insurance_payments\) as ip/);
+  assert.match(inner, /count\(\*\) as ln/);
+});
+
 // ── row_ids tri-state on every new aggregate path ────────────────────────────────────────────────
 
 const NEW_AGGREGATE_BUILDERS: {
