@@ -11,9 +11,10 @@
  * `?view=` so the URL, branding (brand-theme), and switcher all agree.
  */
 import type { Metadata } from 'next';
+import { Suspense } from 'react';
 import { redirect } from 'next/navigation';
 import { Dashboard } from '@/components/dashboard';
-import { DataFreshness } from '@/components/dashboard/data-freshness';
+import { DataFreshness, FreshnessLinePlaceholder } from '@/components/dashboard/data-freshness';
 import { TenantTabs } from '@/components/dashboard/tenant-tabs';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
@@ -62,7 +63,14 @@ export default async function DashboardPage({
           Aggregate, non-PHI metrics across all claims and collections. No patient data is loaded
           here.
         </p>
-        <DataFreshness view={view} />
+        {/* Suspended for the same reason, and IDENTICALLY to Collections — the note above about
+            the two pages not differing in this header applies to the freshness line too. The full
+            rationale (why the fallback is load-bearing, and why this is a different mechanism from
+            layout.tsx's four useSearchParams boundaries) is on the Collections site; do not let the
+            two drift. */}
+        <Suspense fallback={<FreshnessLinePlaceholder />}>
+          <DataFreshness view={view} />
+        </Suspense>
       </header>
       <Dashboard view={view} canEditForecast={access.access.role === 'super_admin'} />
       <footer className="mt-10 border-t pt-4 text-xs text-muted-foreground">

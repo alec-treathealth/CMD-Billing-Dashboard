@@ -95,6 +95,45 @@ export function FreshnessLine({ state, now = Date.now() }: { state: FreshnessSta
   );
 }
 
+/**
+ * Suspense fallback for <DataFreshness>. Reserves the line box; asserts nothing.
+ *
+ * WHY A RESERVED BOX RATHER THAN `fallback={null}`. DataFreshness is the LAST CHILD of the
+ * <header> on both render sites (/dashboard and /dashboard/collections), so the page body
+ * below it — <Dashboard> / <CollectionsView> — is laid out immediately beneath. A null
+ * fallback paints the header one line short and then shoves the whole page down when the
+ * probe resolves, which is a visible post-paint jump on every cold load. The class list here
+ * is byte-identical to FreshnessLine's wrapper <p> above (`mt-2 text-xs text-muted-foreground`
+ * — Tailwind's `text-xs` carries the line-height, so matching the class matches the metric),
+ * and the non-breaking space gives it the same single line box the real line occupies. The
+ * swap is height-neutral.
+ *
+ * IT DELIBERATELY REUSES NO FreshnessState WORDING. Not 'not yet loaded', not 'unavailable':
+ * both are REAL, EARNED outcomes of a COMPLETED read (see lib/dataFreshness.ts — 'unavailable'
+ * means the read failed with no cached value, and 'not yet loaded' means a SUCCESSFUL read
+ * returned null for this tenant). Rendering either one while the read is still in flight would
+ * state a data fact we do not have yet. A blank reserved line is the only honest fallback.
+ *
+ * aria-hidden because a screen reader should be handed nothing here rather than an empty
+ * paragraph; the real line is announced when it replaces this one.
+ *
+ * ⚠ RESIDUAL, KNOWN, AND ACCEPTED: this reserves exactly ONE line. The 'stale' variant is the
+ * longest string and can wrap to two lines on a narrow viewport, which would still shift by one
+ * line there. Reserving two lines instead would over-reserve and shift the common single-line
+ * case in the opposite direction, so one line is the right trade — not an oversight.
+ */
+export function FreshnessLinePlaceholder() {
+  // The <p>'s only child is U+00A0 (a non-breaking space), NOT a plain space. It is invisible in
+  // most editors, so, explicitly: HTML collapses ordinary whitespace, so a <p> whose only child
+  // is ' ' has no line box and reserves nothing at all. The nbsp is load-bearing — the test
+  // 'the placeholder reserves a NON-COLLAPSING line box' is what keeps it that way.
+  return (
+    <p className="mt-2 text-xs text-muted-foreground" aria-hidden="true">
+      {' '}
+    </p>
+  );
+}
+
 // `view` is the RBAC-clamped dashboard view resolved server-side by the page (both the overview
 // and collections pages gate an entity-less role BEFORE rendering this, so viewToEntityIds is a
 // safe, non-empty tenant scope). The freshness timestamp is scoped to that tenant, so an Indigo
