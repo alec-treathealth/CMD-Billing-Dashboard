@@ -461,7 +461,11 @@ test('pct band: the three cards ride in math order with their formula pills and 
 });
 
 test('pointer banner: links to /payer-intel and blocks nothing', () => {
-  const html = renderToStaticMarkup(<PayerIntelPointerBanner from="collections" />);
+  // `from="qualify"`, NOT "collections": the Collections call site was removed (2026-08-25) and
+  // Qualify is the only surface that still mounts this banner. Both variants share the link and the
+  // "nothing is going away" tail asserted below, so the coverage is unchanged — but exercising a
+  // prop value with no call site would be testing dead markup. Do not flip this back.
+  const html = renderToStaticMarkup(<PayerIntelPointerBanner from="qualify" />);
   assert.match(html, /href="\/payer-intel"/);
   assert.match(html, /Nothing here is going away/);
 });

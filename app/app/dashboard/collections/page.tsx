@@ -14,7 +14,6 @@ import { redirect } from 'next/navigation';
 import { CollectionsView } from '@/components/dashboard';
 import { DataFreshness, FreshnessLinePlaceholder } from '@/components/dashboard/data-freshness';
 import { TenantTabs } from '@/components/dashboard/tenant-tabs';
-import { PayerIntelPointerBanner } from '@/components/payer-intel/pointer-banner';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
 import { listGridViews, loadCmdReport } from '@/lib/actions';
@@ -91,10 +90,6 @@ export default async function CollectionsPage({
             The old route still forwards, so nothing breaks — but this tab no longer advertises it,
             deliberately. Do not re-add a link here. */}
       </header>
-      {/* Payer Intel pointer (2026-08-17) — non-blocking, and rendered ONLY for the one Collections
-          role that can actually open /payer-intel (super_admin; admin/user are denied there, and a
-          banner to a door that won't open is worse than none). DOM omission, never CSS-hidden. */}
-      {access.access.role === 'super_admin' ? <PayerIntelPointerBanner from="collections" /> : null}
       <CollectionsView
         view={view}
         canRevealPhi={access.access.canRevealPhi}
