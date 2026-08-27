@@ -63,13 +63,14 @@
  * probe exits on missing env. `tsx` is not on PATH in this repo — go through `npx`.
  *
  * Reads KIPU_TREAT_ACCESS_ID, KIPU_TREAT_SECRET_KEY and KIPU_TREAT_APP_ID — the names
- * carried in .env as of 2026-08-26, when the credential was re-provisioned per-company.
+ * carried in .env as of 2026-08-26, when the credential was re-issued as a matched triple.
  * Each falls back to the pre-rename unprefixed name (KIPU_ACCESS_ID / KIPU_SECRET_KEY /
  * KIPU_APP_API / KIPU_APP_ID) so an older .env still probes. Kipu calls the app id value
- * `app_id` / `recipient_id`; see the naming note at the bottom of this file.
+ * `app_id` / `recipient_id`; see the ENV NAMING note at the bottom of this file.
  *
- * The KIPU_TREAT_ prefix is the per-company scoping the naming note at the bottom of this
- * file recommends — one credential set per Kipu instance, not one global set.
+ * The KIPU_TREAT_ prefix scopes the triple to a Kipu INSTANCE, not to a company — one
+ * instance holds every Treat location, and mixing halves of two instances is what caused
+ * the 403s this file was built to diagnose. Read the bottom note before touching the env.
  */
 import { createHmac, createHash } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -83,8 +84,10 @@ const DIAGNOSE = process.argv.includes('--diagnose');
 type Creds = { accessId: string; secretKey: string; appId: string };
 
 function creds(): Creds {
-  // KIPU_TREAT_* is the current per-company spelling; the unprefixed names are the
+  // KIPU_TREAT_* is the current per-INSTANCE spelling; the unprefixed names are the
   // pre-2026-08-26 globals, kept as a fallback so an older .env still probes.
+  // ⚠ All three must come from the SAME Kipu instance. A triple assembled from two
+  // instances 403s with the same body as a disabled client — see the bottom note.
   const accessId = process.env.KIPU_TREAT_ACCESS_ID ?? process.env.KIPU_ACCESS_ID;
   const secretKey = process.env.KIPU_TREAT_SECRET_KEY ?? process.env.KIPU_SECRET_KEY;
   // Kipu's own name for this is app_id (aka recipient_id). The retired global .env spelled
@@ -526,10 +529,18 @@ async function main() {
     `  total: ${rows.length} location(s); /locations Accept version honored: ` +
       `${honoredVersion ?? 'NONE — every attempt failed, so the v3-vs-v4 question is still open'}`,
   );
-  console.log('  ▶ THE FORK: if the Treat companies (CA / WA / TX / NV / TN) all appear above,');
-  console.log('    one instance holds them and scoping = a location_id allowlist. If only one');
-  console.log('    company appears, each company is its own instance and we need one credential');
-  console.log('    set (access_id + secret_key + app_id) per company.');
+  // The ONE-INSTANCE-vs-ONE-PER-COMPANY fork this block used to pose is CLOSED (resolved
+  // 2026-08-27 out of band, from Kipu API Management and the webhook location picker: one
+  // instance, 11 locations, one app_id). What is still OPEN is narrower and only this call
+  // can answer it — whether THIS API client is scoped to all 11, and whether Kipu's 11
+  // locations are the same eleven as the 11 labels in src/kipu/locations.ts. See the
+  // "TWO ELEVENS" note at the bottom of this file.
+  console.log('  ▶ TOPOLOGY IS ALREADY KNOWN: one instance, 11 locations, one app_id');
+  console.log('    (Kipu API Management, 2026-08-27). This call answers the NARROWER');
+  console.log('    question: is this API client scoped to all 11, and do those 11 match the');
+  console.log('    11 labels in src/kipu/locations.ts? Those labels came from a NINE-export');
+  console.log('    corpus, so a location listed above with no label there is UNMAPPED and');
+  console.log('    will throw in assertKnownLabels the first time it produces a session.');
 
   console.log('\n=== CARE LEVELS (this replaces the mock\'s hardcoded LOC_CONFIG) ===');
   const lv = levels?.care_levels ?? [];
@@ -567,13 +578,54 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 }
 
 /*
- * NAMING NOTE (worth fixing before any real code lands):
- * .env spells this `KIPU_APP_API`, but Kipu — and every reference, client, and error
- * message you will hit — calls it `app_id` (aka `recipient_id`). A future reader greps
- * KIPU_APP_ID, finds nothing, and assumes it was never provisioned. Recommend renaming to
- * KIPU_APP_ID in .env + Vercel, or keeping both with a one-line comment in .env.example.
+ * ENV NAMING (current as of 2026-08-27):
+ *   KIPU_TREAT_ACCESS_ID / KIPU_TREAT_SECRET_KEY / KIPU_TREAT_APP_ID
  *
- * ALSO: if the fork above lands on "one instance per company," the env shape has to become
- * per-company (e.g. KIPU_TREAT_CA_APP_ID / _ACCESS_ID / _SECRET_KEY) rather than one
- * global triple. Decide that BEFORE writing the poller, not after.
+ * `creds()` reads these first and falls back to the unprefixed KIPU_ACCESS_ID /
+ * KIPU_SECRET_KEY / KIPU_APP_API / KIPU_APP_ID so an older .env still probes. Drop the
+ * fallbacks once no environment carries them — check Vercel before deleting.
+ *
+ * VERCEL CARRIES NO KIPU VARIABLE AT ALL, measured 2026-08-27 (`vercel env ls`, 73 rows,
+ * zero case-insensitive `kipu` matches in ANY spelling — prefixed or retired). Two
+ * consequences. (1) Nothing deployed depends on the unprefixed fallbacks, so they are
+ * droppable whenever the last local .env is renamed; the only remaining consumer is an
+ * older checkout on another machine. (2) KIPU IS LOCAL-ONLY TODAY — there is no deployed
+ * Kipu code path, so shipping the poller means adding the triple to Vercel as a NEW
+ * secret, not re-pointing an existing one. Do not assume it is already there.
+ *
+ * WHY THE PREFIX EXISTS, because it is not cosmetic: an unprefixed triple belonging to a
+ * DIFFERENT Kipu instance sat in .env and was assumed to be Treat's. The app_id was
+ * Treat's, the access_id and secret were not, and the mixed triple produced a week of
+ * 403s that read as a provisioning failure. KIPU_TREAT_ scopes to the INSTANCE, so a
+ * second instance's credentials can never be mistaken for these.
+ *
+ * ⚠ THAT MISMATCH IS WHAT THE A–F MATRIX WAS MEASURING, and it is why the matrix looked
+ * contradictory. A == B says the SIGNATURE is rejected; C and E each answer differently
+ * from A, which says Kipu recognises our app_id AND our access_id. Read as one instance
+ * that is the paradox the commit message called "identity is not the problem." Read as
+ * TWO instances it is simply consistent: each half was a real credential, so each was
+ * recognised on its own, and the HMAC could never verify because the secret belonged to
+ * the other instance. The matrix was right; the single-instance premise was wrong.
+ *
+ * PER-INSTANCE, NOT PER-COMPANY. The topology fork is resolved: ONE Kipu instance holds
+ * every Treat location (11 as of 2026-08-27, confirmed from API Management and the
+ * webhook location picker), all under one app_id. So one triple covers all of them, and
+ * per-location scoping is a location_id allowlist — see src/kipu/locations.ts. Do NOT
+ * introduce KIPU_TREAT_CA_* / _TX_* style per-company variables; that was a contingency
+ * for a fork that did not happen.
+ *
+ * ⚠ THE TWO ELEVENS ARE NOT KNOWN TO BE THE SAME ELEVEN. Kipu's API Management shows 11
+ * LOCATIONS. src/kipu/locations.ts holds 11 session-container LABELS — a different kind
+ * of thing, measured from a NINE-export corpus, and its own header says two of them
+ * ("Scott & Jenny Group Session TX", "Group Session 1") are containers rather than
+ * locations and that there are "nine locations." The registry is explicitly N:1, so the
+ * counts matching is not evidence the sets match. If Kipu has 11 locations and we have
+ * observed 9 exports, up to two locations may never have appeared in our corpus — and
+ * `assertKnownLabels` THROWS on an unmapped label, so the first session either of them
+ * produces stops the pipeline by design. Only a successful GET /api/locations closes
+ * this, which is exactly what the 403 has been blocking. Do not reconcile the two
+ * numbers by editing either one.
+ *
+ * Kipu calls the app_id value `app_id`, aka `recipient_id`. .env.example carries the
+ * three names with no values, so a fresh clone knows they are required.
  */
