@@ -33,9 +33,14 @@
  * `--env-file=.env` is REQUIRED: root scripts do not auto-load .env, and without it the
  * probe exits on missing env. `tsx` is not on PATH in this repo — go through `npx`.
  *
- * Reads KIPU_ACCESS_ID, KIPU_SECRET_KEY, and the app id from KIPU_APP_API (the name used
- * in .env today) falling back to KIPU_APP_ID. Kipu calls this value `app_id` /
- * `recipient_id`; see the naming note at the bottom of this file.
+ * Reads KIPU_TREAT_ACCESS_ID, KIPU_TREAT_SECRET_KEY and KIPU_TREAT_APP_ID — the names
+ * carried in .env as of 2026-08-26, when the credential was re-provisioned per-company.
+ * Each falls back to the pre-rename unprefixed name (KIPU_ACCESS_ID / KIPU_SECRET_KEY /
+ * KIPU_APP_API / KIPU_APP_ID) so an older .env still probes. Kipu calls the app id value
+ * `app_id` / `recipient_id`; see the naming note at the bottom of this file.
+ *
+ * The KIPU_TREAT_ prefix is the per-company scoping the naming note at the bottom of this
+ * file recommends — one credential set per Kipu instance, not one global set.
  */
 import { createHmac, createHash } from 'node:crypto';
 
@@ -46,15 +51,18 @@ const AS_JSON = process.argv.includes('--json');
 type Creds = { accessId: string; secretKey: string; appId: string };
 
 function creds(): Creds {
-  const accessId = process.env.KIPU_ACCESS_ID;
-  const secretKey = process.env.KIPU_SECRET_KEY;
-  // Kipu's own name for this is app_id (aka recipient_id). .env currently spells it
-  // KIPU_APP_API; accept both so this probe works before/after any rename.
-  const appId = process.env.KIPU_APP_API ?? process.env.KIPU_APP_ID;
+  // KIPU_TREAT_* is the current per-company spelling; the unprefixed names are the
+  // pre-2026-08-26 globals, kept as a fallback so an older .env still probes.
+  const accessId = process.env.KIPU_TREAT_ACCESS_ID ?? process.env.KIPU_ACCESS_ID;
+  const secretKey = process.env.KIPU_TREAT_SECRET_KEY ?? process.env.KIPU_SECRET_KEY;
+  // Kipu's own name for this is app_id (aka recipient_id). The retired global .env spelled
+  // it KIPU_APP_API; accept every spelling so this probe works before/after the rename.
+  const appId =
+    process.env.KIPU_TREAT_APP_ID ?? process.env.KIPU_APP_API ?? process.env.KIPU_APP_ID;
   const missing = [
-    !accessId && 'KIPU_ACCESS_ID',
-    !secretKey && 'KIPU_SECRET_KEY',
-    !appId && 'KIPU_APP_API (or KIPU_APP_ID)',
+    !accessId && 'KIPU_TREAT_ACCESS_ID (or KIPU_ACCESS_ID)',
+    !secretKey && 'KIPU_TREAT_SECRET_KEY (or KIPU_SECRET_KEY)',
+    !appId && 'KIPU_TREAT_APP_ID (or KIPU_APP_API / KIPU_APP_ID)',
   ].filter(Boolean);
   if (missing.length) {
     // Never echo a value — only which name is absent.
