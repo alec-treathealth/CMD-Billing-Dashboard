@@ -56,8 +56,26 @@ export type CapResolution = 'per-day-auth' | 'current-ur-loc';
 export interface BillableDayRules {
   /** A9 guard — warn when an import file does not carry the -Billable- marker. */
   readonly requireBillableVariant: boolean;
-  /** A10 (PROVISIONAL) — documentation statuses treated as billable. */
+  /**
+   * A10 — documentation statuses the CARE TEAM treats as complete. Retained because the
+   * status is still worth SHOWING, but see `statusGatesBillable`: it no longer decides
+   * whether a service is billable.
+   */
   readonly billableStatuses: ReadonlySet<string>;
+  /**
+   * A10, RULED BY ALEC 2026-08-27 AND THE DEFAULT IS `false`.
+   *
+   * ⚠ `Status != 'Complete'` DOES NOT MEAN NOT BILLABLE. The documentation status is a
+   * CARE-TEAM signal — it tracks whether a clinician has finished their note, not whether
+   * the service happened or may be submitted. Attendance is what bills, so an hour counts
+   * on `present === true` alone.
+   *
+   * This was `true` in effect from the first build until the ruling, which is why the
+   * reconciliation reported A10 as UNTESTED on every customer-week: all 18 had zero
+   * non-`Complete` GROUP rows, so the gate never actually fired there and the recon numbers
+   * are unaffected by the flip. Setting this back to `true` can only ever REMOVE hours.
+   */
+  readonly statusGatesBillable: boolean;
   /** A12 — 'Missed …' service rows are never billable. */
   readonly missedNeverBillable: boolean;
   /** A12 — 0.00-hour rows are date-only placeholders, not services. */
@@ -76,6 +94,7 @@ export interface BillableDayRules {
 export const DEFAULT_RULES: BillableDayRules = {
   requireBillableVariant: true,
   billableStatuses: new Set(['Complete']),
+  statusGatesBillable: false,
   missedNeverBillable: true,
   zeroHourNeverBillable: true,
   capResolution: 'per-day-auth',
@@ -119,15 +138,32 @@ export type LocConfigMap = Record<string, LocConfigEntry>;
  * The hand-kept PROGRAM-cap config (A11's stopgap source — see the record above).
  * Kipu's Levels of Care config supersedes this the moment it is readable.
  *
- * ⚠ 'MH OP 4 Adult' has been ambiguous since v3: in Kipu's config as IOP/4, but the
- * name says OP. Kipu's `consider_as` resolves it — unanswered until /api/care_levels
- * activates or the LOC config screen is transcribed. Deliberately ABSENT: 'MH OP 3
- * Adult' and 'MH OP 5 Adult' (in real data, no config entry, no parseable auth Freq)
- * stay uncapped and flagged rather than guessed — a guessed cap is a wrong claim.
+ * ⚠ THE OP LADDER IS `OP-N = N BILLABLE DAYS PER WEEK, ON THE OP TRACK` — RULED BY ALEC
+ * 2026-08-27, superseding the "leave them uncapped" posture below. The OP track bills a
+ * day on ANY attended group or individual therapy (G or T); there is no per-day hours
+ * threshold, which is what separates it from IOP. `MH OP 1/3/5 Adult` are added on that
+ * rule; they were previously absent and therefore uncapped-and-flagged.
+ *
+ * ⚠ 'MH OP 4 Adult' IS RECLASSIFIED IOP/4 -> OP/4 BY THE SAME RULING. It had been
+ * ambiguous since v3 (Kipu's config said IOP/4, the name says OP) and carried
+ * `ambiguous: true`. It now follows the OP ladder like its siblings, which is a REAL
+ * BEHAVIOUR CHANGE: it no longer requires 3 hours in a day to bill one, it bills any G/T
+ * day up to 4. If /api/care_levels ever activates and its `consider_as` disagrees, that is
+ * a fresh ruling — do not silently revert this one.
+ *
+ * These caps came from a verbal ruling, NOT from Kipu's own config, because
+ * /api/care_levels still 403s (the API client is not enabled). That is the authoritative
+ * source the moment it is readable.
  */
 export const LOC_CONFIG_BASE: LocConfigMap = {
+  // IOP: a day bills only when it reaches minHours (3.0) of attended service; BPS hours
+  // count toward that total, and the weekly cap is the ladder number.
   'MH IOP 3 Adult': { track: 'IOP', capDays: 3, minHours: 3.0 },
   'MH IOP 4 Adult': { track: 'IOP', capDays: 4, minHours: 3.0 },
-  'MH OP 4 Adult': { track: 'IOP', capDays: 4, minHours: 3.0, ambiguous: true },
+  // OP: any attended G or T day bills, up to the ladder number. No hours threshold.
+  'MH OP 1 Adult': { track: 'OP', capDays: 1, minHours: 0 },
   'MH OP 2 Adult': { track: 'OP', capDays: 2, minHours: 0 },
+  'MH OP 3 Adult': { track: 'OP', capDays: 3, minHours: 0 },
+  'MH OP 4 Adult': { track: 'OP', capDays: 4, minHours: 0 },
+  'MH OP 5 Adult': { track: 'OP', capDays: 5, minHours: 0 },
 };

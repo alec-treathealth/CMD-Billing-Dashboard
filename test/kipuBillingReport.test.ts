@@ -572,7 +572,14 @@ test('fixture: buildFromCsv reproduces the real export shape (harness-verified c
   assert.equal(b.clients.filter((c) => c.warn.length > 0).length, 3);
 });
 
-test('fixture: LOC config synthesis matches the harness — two LOCs left uncapped and flagged', () => {
+test('fixture: LOC config synthesis — the OP ladder is configured, only a MISSING LOC is uncapped', () => {
+  // ⚠ THIS TEST ASSERTED 'OP/7?' FOR MH OP 3 AND MH OP 5 UNTIL 2026-08-27. Those two had no
+  // config entry and no parseable auth Freq, so they fell back to uncapped-and-flagged
+  // rather than being guessed. Alec ruled the OP ladder (OP-N = N billable days on the OP
+  // track), so they are now real config and the fallback no longer fires for them.
+  //
+  // What SHOULD still fall back is a client with no level of care in the export at all:
+  // that is missing DATA, not a missing rule, and no ruling can supply it.
   const b = buildFromCsv(loadFixture(), LOC_CONFIG_BASE);
   const cap = (loc: string) => {
     const e = b.locCfg[loc];
@@ -581,10 +588,13 @@ test('fixture: LOC config synthesis matches the harness — two LOCs left uncapp
   };
   assert.equal(cap('MH IOP 3 Adult'), 'IOP/3');
   assert.equal(cap('MH IOP 4 Adult'), 'IOP/4');
-  assert.equal(cap('MH OP 5 Adult'), 'OP/7?');
-  assert.equal(cap('MH OP 3 Adult'), 'OP/7?');
+  assert.equal(cap('MH OP 5 Adult'), 'OP/5');
+  assert.equal(cap('MH OP 3 Adult'), 'OP/3');
   assert.equal(cap(NO_LOC), 'OP/7?');
-  assert.ok(b.locFlags.filter((f) => /left UNCAPPED/.test(f)).length >= 2);
+  // Exactly one uncapped LOC now, and it is the no-level-of-care sentinel.
+  const uncapped = b.locFlags.filter((f) => /UNCAPPED|uncapped/.test(f));
+  assert.equal(uncapped.length, 1);
+  assert.match(uncapped[0]!, /no level of care/i);
 });
 
 test('fixture: harness invariants hold — attestations stripped, auth windows parsed, tz mapped', () => {
