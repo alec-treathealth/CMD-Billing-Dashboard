@@ -114,7 +114,9 @@ export function computeRow(
     // finished their note, and a non-`Complete` note does not make a delivered service
     // unbillable. `statusGatesBillable` restores the old behaviour if that is ever
     // reversed, and defaults to false — see assumptions.ts.
-    const counted = sess.filter((s) => s.present && (!rules.statusGatesBillable || s.billable === true));
+    const counted = sess.filter(
+        (s) => s.present && !(rules.missedNeverBillable && /missed/i.test(s.topic)) && !(rules.zeroHourNeverBillable && s.hrs === 0) && (!rules.statusGatesBillable || s.billable === true),
+      );
     const hrs = +counted.reduce((a, s) => a + s.hrs, 0).toFixed(2);
     days.push({
       i,
