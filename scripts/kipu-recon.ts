@@ -189,8 +189,12 @@ for (const week of weeks) {
     const p = sum(parity);
     if (d.rows === 0 && p.rows === 0) continue;
 
-    // A10 exposure: a week with zero non-Complete GROUP rows cannot test the group half of
-    // the billable-status rule, so a matching number there is not evidence about A10.
+    // A10 exposure. ⚠ THE RULE THIS REPORTS ON WAS REVERSED 2026-08-27: documentation status
+    // no longer gates billability (`statusGatesBillable` defaults to false), because
+    // `Status != 'Complete'` is a care-team signal about an unfinished note, not a statement
+    // that the service is unbillable. The count is still worth printing — it says how much of
+    // the week would MOVE if the gate were ever switched back on — but it is no longer a
+    // caveat on the numbers above.
     let nonComplete = 0;
     let groupRows = 0;
     for (const g of groups) {
@@ -218,8 +222,8 @@ for (const week of weeks) {
     );
     console.log(
       nonComplete === 0
-        ? `    ⚠ A10 UNTESTED FOR GROUP SESSIONS this week: all ${groupRows} group row(s) are Complete, so a matching number here is NOT confirmation of the group billable-status rule`
-        : `    A10 exercised: ${nonComplete} of ${groupRows} group row(s) are non-Complete and were held out`,
+        ? `    A10 status gate: OFF (ruled) · all ${groupRows} group row(s) this week are Complete, so switching it back on would change nothing here`
+        : `    A10 status gate: OFF (ruled) · ${nonComplete} of ${groupRows} group row(s) are non-Complete and ARE counted — switching the gate on would drop them`,
     );
     console.log('    warehouse side — paste this:');
     for (const line of [

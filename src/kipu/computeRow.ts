@@ -7,18 +7,22 @@
  * are preserved from the mock; A9–A13 are named switchable rules — see
  * ./assumptions.ts for the ratification record.
  *
- *   A1 chronological over-cap tie-break        A2 evals count only when billable
+ *   A1 chronological over-cap tie-break        A2 evals count when present
  *   A3 hours-but-no-code → show hours          A4 "No Auth Required" never expires
  *   A5 D/C STACKS with billable codes          A6 days-past measured from latest auth end
  *   A7 BPS stacks and consumes no cap day      A8 IOP never emits a bare G or T
  *
- * ONE DELIBERATE DEVIATION from the mock, per A10's ruled semantics: the mock
- * counted any present GROUP row into hours and codes regardless of its billable
- * flag (only evaluations were gated), so a Ready-For-Review group still produced
- * an I/G code. Here a session of ANY kind counts only when `present && billable`.
- * The real Aug 10 export has no non-Complete group rows, so the browser-verified
- * parity numbers are unaffected — but a future export with unsigned group notes
- * will bill lower here than the mock would have. That is A10 working as ruled.
+ * ⚠ THE DEVIATION THAT USED TO BE DOCUMENTED HERE IS GONE — REVERSED 2026-08-27.
+ * This header previously said a session counts only when `present && billable`, a
+ * deliberate departure from the mock, which counted any present GROUP row into hours
+ * and codes regardless of documentation status. Alec ruled the MOCK was right:
+ * `Status != 'Complete'` is a care-team signal about an unfinished note, not a
+ * statement that the service is unbillable. Attendance bills. The gate is now
+ * `present` alone, and `statusGatesBillable` (default false) is the escape hatch.
+ *
+ * The engine and the mock therefore AGREE again on this point. The reconciled
+ * July weeks are unaffected either way — all 18 customer-weeks had zero non-`Complete`
+ * group rows, which is precisely why the recon could only ever report A10 as UNTESTED.
  *
  * A13 (ruling 2026-08-21): DEFAULT cap resolution is PER DAY from the authorization
  * covering that day; 'current-ur-loc' reproduces the mock's whole-week resolution
@@ -103,8 +107,14 @@ export function computeRow(
   for (let i = 0; i < 7; i++) {
     const date = isoShift(weekStart, i);
     const sess = c.sessions.filter((s) => s.date === date);
-    // A2 + A10 at the engine: only present AND billable rows count (see header).
-    const counted = sess.filter((s) => s.present && s.billable === true);
+    // A2 + A10 at the engine.
+    //
+    // ⚠ ATTENDANCE BILLS, DOCUMENTATION STATUS DOES NOT (ruled 2026-08-27). `present` is
+    // the gate; the documentation status is a CARE-TEAM signal about whether a clinician
+    // finished their note, and a non-`Complete` note does not make a delivered service
+    // unbillable. `statusGatesBillable` restores the old behaviour if that is ever
+    // reversed, and defaults to false — see assumptions.ts.
+    const counted = sess.filter((s) => s.present && (!rules.statusGatesBillable || s.billable === true));
     const hrs = +counted.reduce((a, s) => a + s.hrs, 0).toFixed(2);
     days.push({
       i,

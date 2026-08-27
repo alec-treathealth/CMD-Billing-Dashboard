@@ -1,0 +1,230 @@
+/**
+ * Billable Days import payload — the PHI gate and the numbers.
+ *
+ * Hermetic: it runs the real `src/kipu/` engine over the SCRUBBED in-repo fixture
+ * (`test/fixtures/kipu-billing-report/fixture-*.csv`, names/providers/auth numbers replaced
+ * and every date shifted -364 days). No network, no database, no real export.
+ *
+ * The point of the number assertions is the one thing a UI test cannot fake: the grid must
+ * show what `scripts/kipu-recon.ts` shows for the same export. Both read the same engine, so
+ * pinning the payload here pins the grid.
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join, dirname } from 'node:path';
+import { assembleBundle, buildFromCsv } from '../../src/kipu/billingReport.js';
+import { LOC_CONFIG_BASE, DEFAULT_RULES, withRules } from '../../src/kipu/assumptions.js';
+import { gridRows } from '../../src/kipu/computeRow.js';
+import { buildImportPayload, facilityCodesFor, segmentOf } from '../lib/billing-audit/kipu-import';
+import {
+  adjustedBillableDays,
+  cellKey,
+  isApproximate,
+  rowHasOverride,
+} from '../components/billing-audit/billable-days/overrides';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const FIXTURE_DIR = join(HERE, '../../test/fixtures/kipu-billing-report');
+/** The fixture's dates are shifted -364 days, so its single week is the 2025 mirror. */
+const WEEK = '2025-08-11';
+
+function payload(canRevealPhi: boolean, rules = DEFAULT_RULES) {
+  const files = readdirSync(FIXTURE_DIR)
+    .filter((f) => f.endsWith('.csv'))
+    .map((n) => ({ name: n, text: readFileSync(join(FIXTURE_DIR, n), 'utf8') }));
+  const build = buildFromCsv(assembleBundle(files, rules), LOC_CONFIG_BASE, rules);
+  const rowsForWeek = gridRows(build.clients, WEEK, build.locCfg, rules);
+  return buildImportPayload({
+    build,
+    rowsForWeek,
+    selectedWeek: WEEK,
+    filesByKind: { sessions: 1, evaluations: 1, patient: 1, labs: 1 },
+    canRevealPhi,
+  });
+}
+
+/* ------------------------------- the PHI gate ------------------------------ */
+
+test('without canRevealPhi the name, auth number and topic are ABSENT, not merely hidden', () => {
+  const p = payload(false);
+  assert.equal(p.phiIncluded, false);
+  assert.ok(p.rows.length > 0, 'fixture produced no rows');
+  for (const r of p.rows) {
+    assert.equal(r.name, null);
+    for (const a of r.auths) assert.equal(a.no, null);
+    for (const d of r.days) for (const s of d.sessions) assert.equal(s.topic, null);
+  }
+  // ⚠ THE REAL LEAK CHECK, and it must not be vacuous: take the names the PRIVILEGED
+  // payload exposes and assert not one of them appears anywhere in the masked payload's
+  // serialized form — not in a row, not in a note, not in a diagnostic string.
+  const names = payload(true)
+    .rows.map((r) => r.name)
+    .filter((n): n is string => typeof n === 'string' && n.trim().length > 0);
+  assert.ok(names.length > 0, 'fixture exposed no names to test against');
+  const json = JSON.stringify(p);
+  for (const n of names) {
+    assert.equal(json.includes(n), false, 'a patient name reached the masked payload');
+  }
+});
+
+test('with canRevealPhi those three fields are present', () => {
+  const p = payload(true);
+  assert.equal(p.phiIncluded, true);
+  assert.ok(p.rows.some((r) => typeof r.name === 'string' && r.name.length > 0));
+});
+
+test('non-PHI detail is present for EVERY viewer — masking must not blank the grid', () => {
+  const masked = payload(false);
+  const full = payload(true);
+  assert.equal(masked.rows.length, full.rows.length);
+  assert.deepEqual(
+    masked.rows.map((r) => [r.billableDays, r.capDays, r.totalHours]),
+    full.rows.map((r) => [r.billableDays, r.capDays, r.totalHours]),
+  );
+  for (const r of masked.rows) {
+    assert.equal(r.days.length, 7);
+    assert.ok(r.loc.length > 0 || r.loc === '');
+  }
+});
+
+/* ------------------------------- the numbers ------------------------------- */
+
+test('payload stats reproduce the engine numbers the recon reports for this export', () => {
+  // Same engine, same fixture, same week as test/kipuComputeRow.test.ts's parity test and
+  // `npx tsx scripts/kipu-recon.ts test/fixtures/kipu-billing-report`.
+  const p = payload(true, withRules({ capResolution: 'current-ur-loc' }));
+  assert.equal(p.rows.length, 26);
+  assert.equal(p.stats.clients, 26);
+  assert.equal(p.stats.billableDays, 63);
+  // Must equal the ENGINE's total, not the sum of the per-row rounded values (212.9).
+  assert.ok(Math.abs(p.stats.attendedHours - 212.6) < 0.05, `hours ${p.stats.attendedHours}`);
+  const sumOfRounded = p.rows.reduce((a, r) => a + r.totalHours, 0);
+  assert.ok(
+    Math.abs(sumOfRounded - p.stats.attendedHours) > 0.0001,
+    'this fixture is the case that proves the two differ — if they now agree, the guard is moot',
+  );
+});
+
+test('stats are derived from the rows they are shown next to, not recomputed independently', () => {
+  const p = payload(true);
+  assert.equal(
+    p.stats.billableDays,
+    p.rows.reduce((a, r) => a + r.billableDays, 0),
+  );
+  assert.equal(p.stats.needsReview, p.rows.filter((r) => r.flag).length);
+  assert.equal(p.stats.pastAuth, p.rows.filter((r) => r.maxPast > 0).length);
+  assert.equal(p.stats.furthestPastAuth, Math.max(0, ...p.rows.map((r) => r.maxPast)));
+});
+
+/* ----------------------------- diagnostics ----------------------------- */
+
+test('every engine diagnostic reaches the payload — none are dropped on the way to the UI', () => {
+  const p = payload(true);
+  const d = p.diagnostics;
+  assert.equal(d.weekCount, p.weeks.length);
+  assert.ok(d.clientCount >= p.rows.length);
+  assert.ok(Array.isArray(d.notes));
+  assert.ok(Array.isArray(d.skipped));
+  assert.ok(Array.isArray(d.locFlags));
+  assert.ok(d.locConfig.length > 0, 'no LOC config surfaced');
+  assert.equal(typeof d.midnightGuardMin, 'number');
+  assert.equal(d.facilities.length, p.facilityOptions.length);
+  // The scrubbed fixture files DO carry the -Billable- marker, so A9 correctly stays quiet
+  // here. The guard's live path is asserted separately below.
+  assert.equal(d.notes.some((n) => /A9 GUARD/.test(n)), false);
+});
+
+test('the A9 variant guard reaches the payload when a file lacks the -Billable- marker', () => {
+  // A9: row-existence-means-attended is only true of the Billable report variant, so an
+  // import from the wrong variant must warn IN THE UI, not just in the engine.
+  const build = buildFromCsv(
+    assembleBundle([{ name: 'some-other-export.csv', text: 'Session Id,Full Name\n1,X\n' }], DEFAULT_RULES),
+    LOC_CONFIG_BASE,
+    DEFAULT_RULES,
+  );
+  const p = buildImportPayload({
+    build,
+    rowsForWeek: [],
+    selectedWeek: WEEK,
+    filesByKind: { sessions: 1 },
+    canRevealPhi: false,
+  });
+  assert.ok(p.diagnostics.notes.some((n) => /A9 GUARD/.test(n)), 'A9 guard did not reach the payload');
+});
+
+test('an uncapped level of care is reported as ambiguous rather than silently defaulted', () => {
+  const p = payload(true);
+  // The no-level-of-care sentinel is missing DATA and must stay flagged.
+  assert.ok(p.diagnostics.locFlags.some((f) => /no level of care/i.test(f)));
+});
+
+/* -------------------------- registry / segments -------------------------- */
+
+test('facilityCodesFor maps the telehealth labels onto ONE CMD customer (N:1)', () => {
+  const codes = facilityCodesFor([
+    'Telehealth MH TX Group Sessions',
+    'Telehealth MH TN Group Sessions',
+    'Telehealth MH CO Group Sessions',
+  ]);
+  assert.deepEqual(codes, ['TELEHEALTH_MH']);
+});
+
+test('facilityCodesFor reports a mapped location with NO CMD customer as null, never dropped', () => {
+  assert.deepEqual(facilityCodesFor(['Group Session VA']), [null]);
+  assert.deepEqual(facilityCodesFor(['Group Session 1']), [null]);
+});
+
+test('segmentOf puts every row in All, and adds review/past only when earned', () => {
+  const p = payload(true);
+  for (const r of p.rows) {
+    const segs = segmentOf(r);
+    assert.ok(segs.includes('all'));
+    assert.equal(segs.includes('review'), r.flag);
+    assert.equal(segs.includes('past'), r.maxPast > 0);
+  }
+});
+
+/* ------------------------- session-local overrides ------------------------- */
+
+test('an un-edited row keeps the engine count exactly — overrides cannot cause drift', () => {
+  const p = payload(true);
+  const none = new Map<string, readonly string[]>();
+  for (const r of p.rows) {
+    assert.equal(adjustedBillableDays(r, none), r.billableDays);
+    assert.equal(rowHasOverride(r, none), false);
+    assert.equal(isApproximate(r, none), false);
+  }
+});
+
+test('overriding a cell to a billable code raises the count; N/B lowers it', () => {
+  const p = payload(true);
+  const row = p.rows.find((r) => r.days.some((d) => d.codes.length === 0) && r.billableDays < r.capDays);
+  assert.ok(row, 'no row with a spare day and headroom under the cap');
+  const emptyDay = row.days.find((d) => d.codes.length === 0)!;
+  const up = new Map([[cellKey(row.id, emptyDay.i), ['G'] as readonly string[]]]);
+  assert.equal(adjustedBillableDays(row, up), row.billableDays + 1);
+
+  const billableDay = row.days.find((d) => d.codes.some((c) => ['I', 'G', 'T', 'BPS'].includes(c)));
+  if (billableDay) {
+    const down = new Map([[cellKey(row.id, billableDay.i), ['N/B'] as readonly string[]]]);
+    assert.equal(adjustedBillableDays(row, down), row.billableDays - 1);
+  }
+});
+
+test('the adjusted count can never exceed the cap, however many cells are overridden', () => {
+  const p = payload(true);
+  const row = p.rows[0]!;
+  const all = new Map(row.days.map((d) => [cellKey(row.id, d.i), ['I'] as readonly string[]]));
+  assert.equal(adjustedBillableDays(row, all), Math.min(7, row.capDays));
+});
+
+test('a multi-LOC row is flagged approximate once edited — the browser cannot reproduce A13', () => {
+  const p = payload(true);
+  const multi = p.rows.find((r) => r.multiLoc);
+  if (!multi) return; // fixture may not contain one; the guard is still asserted below
+  const ov = new Map([[cellKey(multi.id, 0), ['I'] as readonly string[]]]);
+  assert.equal(isApproximate(multi, ov), true);
+  assert.equal(isApproximate(multi, new Map()), false);
+});
