@@ -48,8 +48,9 @@ export function rowHasOverride(row: KipuRowDTO, ov: CellOverrides): boolean {
  */
 export function adjustedBillableDays(row: KipuRowDTO, ov: CellOverrides): number {
   if (!rowHasOverride(row, ov)) return row.billableDays;
-  const n = row.days.filter((d) => effectiveCodes(row, d.i, ov).some((c) => BILLABLE.has(c))).length;
-  return Math.min(n, row.capDays);
+  const capped = row.days.filter((d) => effectiveCodes(row, d.i, ov).some((c) => BILLABLE.has(c) && c !== 'BPS')).length;
+  const bps = row.days.filter((d) => effectiveCodes(row, d.i, ov).includes('BPS')).length;
+  return Math.min(capped, row.capDays) + bps;
 }
 
 /** True when the adjusted count may disagree with a server recompute (see the header). */
