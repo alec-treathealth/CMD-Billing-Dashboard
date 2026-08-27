@@ -1,34 +1,63 @@
 /**
- * THROWAWAY READ-ONLY KIPU TOPOLOGY PROBE — NOT AN ARTIFACT. DO NOT COMMIT.
+ * COMMITTED READ-ONLY KIPU DIAGNOSTIC. Tracked on purpose; runs only when you run it.
  *
- * PURPOSE: answer the one question that decides the whole Kipu ingest design —
- * **does the provisioned credential reach ONE Kipu instance containing every Treat
- * company as a location, or one instance per company?** Everything downstream (how the
- * poller is scoped to Treat_CA / Treat_WA / Treat_TX / …, whether we hold N credential
- * sets, what the LOC config looks like) forks on the answer, and no amount of reading
- * the spec produces it. Two calls do.
+ * ⚠ THIS FILE USED TO SAY "THROWAWAY — DO NOT COMMIT" while being tracked in git. It was
+ * written as a one-shot topology probe, then earned a second job and never had its header
+ * rewritten. Corrected 2026-08-26. What it actually is now:
  *
- * IT CALLS EXACTLY TWO ENDPOINTS, BOTH NON-PHI CONFIG ROUTES:
+ *   1. TOPOLOGY PROBE (--live) — the original job. Answers whether one credential reaches
+ *      every Treat company as a location, or whether each company is its own instance.
+ *   2. AUTH DISCRIMINATOR (--diagnose) — six contrasting single calls (A-F) plus one
+ *      census scope check, separating causes of a Kipu 403 that are indistinguishable
+ *      from any one call. One call each, no retries.
+ *
+ * IT IS OUTSIDE THE FIVE-COMMAND GATE, DELIBERATELY. Every mode makes live network calls
+ * against a third-party API, so it can never run in `npm test`. The one part that IS
+ * gate-covered is the part that must never drift: `kipuSignature` / `kipuCanonicalString`
+ * and `interpretDiagnosis` are exported and pinned by `test/kipuSignature.test.ts`, which
+ * is hermetic and asserts the published worked-example vector bit for bit.
+ *
+ * ⚠ AN AUTH ATTEMPT IS NOT FREE. --diagnose spends six authentications plus one census
+ * call, and a client many consecutive failures deep can enter a lockout that is
+ * indistinguishable from a wrong key. There is no retry loop anywhere in this file and
+ * none should be added: a 403 here is never transient. Prefer re-reading a recorded run
+ * over re-running — that is why the verdict lives in a pure, unit-tested function.
+ *
+ * ROUTES IT CALLS. The two probe routes are NON-PHI config routes:
  *   GET /api/locations    -> location_id, location_name, enabled   (the facility roster)
  *   GET /api/care_levels  -> care_level_name, hours, days_of_the_week, billable,
  *                            consider_as, selected_billing_code, locations[]
  *                            (this is the mock's hardcoded LOC_CONFIG, owned by Kipu)
  *
+ * --diagnose ADDS ONE PHI-BEARING ROUTE, AND IT IS GUARDED IN CODE:
+ *   GET /api/patients/census?phi_level=high  -> the exact route Kipu documents its own
+ *                            signing against. It is called ONLY under --diagnose, and only
+ *                            to prove whether the credential works somewhere while
+ *                            /locations does not.
+ *
+ * ⚠ CENSUS RETURNS PHI. On a 200 the response body is NEVER DECODED — `censusScopeCheck`
+ * reads the raw bytes and reports only the LENGTH, so no code path on a 200 can put a
+ * patient field, or any count derived from patient records, on stdout. Only the non-200
+ * branch calls toString(), because Kipu's error bodies are small and non-PHI. That is a
+ * structural guard, not a comment: if you edit that function, keep the decode inside the
+ * error branch.
+ *
  * WHAT IT DOES NOT DO:
  *   - No database connection of ANY kind. Not a read, not a temp table, not a transaction.
- *   - No patient/episode/census/evaluation/group-session call. Nothing that returns PHI.
- *     `phi_level` is never sent, because neither endpoint accepts it.
+ *   - No episode/evaluation/group-session call, and no PHI body is ever printed or parsed.
  *   - No writes to Kipu. GET only. There is no POST/PATCH path in this file.
- *   - No secret, and no full app_id, ever reaches stdout.
+ *   - No secret, no access_id, and no full app_id ever reaches stdout — including the
+ *     deliberately-corrupted copies the --diagnose controls build.
  *
  * PHI DISCIPLINE: stdout carries facility names, level-of-care names, billing codes and
  * counts. Those are business identifiers, not patient identifiers. If a future edit makes
- * this script call an episode route, it stops being safe to run casually — write a new
+ * this script parse an episode route, it stops being safe to run casually — write a new
  * probe instead of widening this one.
  *
  *   npx tsx --env-file=.env scripts/probe-kipu-locations.ts          # dry run, no network
  *   npx tsx --env-file=.env scripts/probe-kipu-locations.ts --live   # the two GETs
  *   npx tsx --env-file=.env scripts/probe-kipu-locations.ts --live --json
+ *   npx tsx --env-file=.env scripts/probe-kipu-locations.ts --diagnose  # 6-call 403 discriminator + census
  *
  * `--env-file=.env` is REQUIRED: root scripts do not auto-load .env, and without it the
  * probe exits on missing env. `tsx` is not on PATH in this repo — go through `npx`.
@@ -43,10 +72,13 @@
  * file recommends — one credential set per Kipu instance, not one global set.
  */
 import { createHmac, createHash } from 'node:crypto';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const BASE_URL = 'https://api.kipuapi.com';
 const LIVE = process.argv.includes('--live');
 const AS_JSON = process.argv.includes('--json');
+const DIAGNOSE = process.argv.includes('--diagnose');
 
 type Creds = { accessId: string; secretKey: string; appId: string };
 
@@ -72,25 +104,73 @@ function creds(): Creds {
 }
 
 /**
- * The signed string and the sent string MUST be byte-identical, so the query string is
- * built ONCE as text and reused verbatim. Do not switch this to URLSearchParams at call
- * time — a reordered param is a 401, and a 401 here is never retryable.
+ * The canonical string Kipu signs for a GET: `,,{request_uri},{RFC1123 date}` — TWO
+ * leading commas, the empty content-type and content-MD5 slots.
+ *
+ * EXPORTED SO IT CAN BE PINNED BY A HERMETIC TEST. `test/kipuSignature.test.ts` asserts
+ * this pair reproduces Kipu's own published worked example bit for bit, using Kipu's
+ * placeholder secret. That test is the artifact that stops the signing being
+ * re-litigated every time a 403 appears — a 403 is an identity verdict, and the signature
+ * question is closed by the vector, not by re-reading this function.
  */
-function signedGet(c: Creds, path: string, extraQuery: string[], acceptVersion: 3 | 4) {
-  const query = [`app_id=${encodeURIComponent(c.appId)}`, ...extraQuery].join('&');
-  const requestUri = `${path}?${query}`;
+export function kipuCanonicalString(requestUri: string, date: string): string {
+  return `,,${requestUri},${date}`;
+}
+
+/**
+ * HMAC-SHA256 of the canonical string, base64.
+ *
+ * `secretKey` is normally the secret STRING, hashed as raw UTF-8 bytes — that is what the
+ * published vector pins. It accepts a Buffer so the --diagnose controls can test whether
+ * Kipu instead keys on the DECODED bytes of a base64 secret, a question the vector cannot
+ * answer (Kipu's placeholder secret is plain ASCII, not base64).
+ */
+export function kipuSignature(secretKey: string | Buffer, requestUri: string, date: string): string {
+  return createHmac('sha256', secretKey).update(kipuCanonicalString(requestUri, date)).digest('base64');
+}
+
+/**
+ * Sign an ALREADY-BUILT request_uri. The signed string and the sent string MUST be
+ * byte-identical, so the caller owns the query text verbatim — including its parameter
+ * ORDER. Do not switch this to URLSearchParams at call time; a reordered param is a 401,
+ * and a 401 here is never retryable.
+ *
+ * `signatureOverride` exists ONLY for the --diagnose discriminator, which needs to send a
+ * deliberately-wrong signature. It is never used on a normal call.
+ */
+interface SignOpts {
+  /** Send this signature instead of the computed one (control B). */
+  signatureOverride?: string;
+  /** HMAC with this key material instead of the secret string (controls D and F). */
+  keyOverride?: string | Buffer;
+  /**
+   * Authorization access_id (control E). NOTE: access_id is NOT part of the canonical
+   * string, so overriding it leaves the signature valid for exactly the bytes sent — which
+   * is what makes E a clean identity control rather than a second signature control.
+   */
+  accessIdOverride?: string;
+}
+
+function signedUri(c: Creds, requestUri: string, acceptVersion: 3 | 4, opts: SignOpts = {}) {
   const date = new Date().toUTCString(); // RFC 1123, e.g. "Thu, 21 Aug 2026 04:35:00 GMT"
-  const canonical = `,,${requestUri},${date}`; // GET form: TWO leading commas
-  const signature = createHmac('sha256', c.secretKey).update(canonical).digest('base64');
+  const signature = opts.signatureOverride ?? kipuSignature(opts.keyOverride ?? c.secretKey, requestUri, date);
+  const accessId = opts.accessIdOverride ?? c.accessId;
   return {
     url: BASE_URL + requestUri,
     requestUri,
+    date,
+    signature,
     headers: {
       Accept: `application/vnd.kipusystems+json; version=${acceptVersion}`,
-      Authorization: `APIAuth ${c.accessId}:${signature}`,
+      Authorization: `APIAuth ${accessId}:${signature}`,
       Date: date,
     } as Record<string, string>,
   };
+}
+
+function signedGet(c: Creds, path: string, extraQuery: string[], acceptVersion: 3 | 4) {
+  const query = [`app_id=${encodeURIComponent(c.appId)}`, ...extraQuery].join('&');
+  return signedUri(c, `${path}?${query}`, acceptVersion);
 }
 
 /**
@@ -159,6 +239,231 @@ async function call(label: string, req: ReturnType<typeof signedGet>): Promise<u
   }
 }
 
+/* ══════════════════ THE THREE-WAY 403 DISCRIMINATOR (--diagnose) ══════════════════
+ *
+ * A 403 from Kipu is an IDENTITY verdict with at least three causes that look identical
+ * in the body. Our signing is not one of them: `test/kipuSignature.test.ts` pins it to
+ * Kipu's own published vector. So the remaining question is which Kipu-side condition we
+ * are in, and one probe cannot answer it — three CONTRASTING probes can.
+ *
+ *   A  real app_id, real signature          (the call that fails today)
+ *   B  real app_id, CORRUPTED signature     (what "bad signature" looks like here)
+ *   C  CORRUPTED app_id, valid signature over the corrupted URI
+ *
+ * B and C are the controls. A is only interpretable next to them:
+ *   A == C, both != B  -> Kipu does not RECOGNISE this app_id. Provisioning: the record
+ *                         is Active in the UI but the app is not enabled on the API tier.
+ *   A == B             -> Kipu is rejecting our SIGNATURE. Given the pinned vector, that
+ *                         means the SECRET VALUE is wrong, not the algorithm.
+ *   all three equal    -> the response is indiscriminate. It tells us nothing; say so.
+ *
+ * ONE call each. No retries — a 403 is not transient, and a retry loop against an auth
+ * endpoint is how an integration gets rate-limited or locked.
+ */
+
+/**
+ * Flip the FIRST character to a different one from the same alphabet. First, not last, so
+ * a base64 signature never has its `=` padding mutated (which would change the failure
+ * mode from "wrong signature" to "malformed header"). The mutated value is a local copy
+ * and is NEVER printed or logged.
+ */
+function flipOne(v: string): string {
+  if (!v) return v;
+  const repl = v[0] === 'A' ? 'B' : 'A';
+  return repl + v.slice(1);
+}
+
+interface CallResult { label: string; status: number; body: string; ms: number }
+
+/** One GET. Prints status, body VERBATIM, elapsed ms. Nothing else. */
+async function oneCall(label: string, req: ReturnType<typeof signedUri>): Promise<CallResult> {
+  const t0 = Date.now();
+  let status = 0;
+  let body = '';
+  try {
+    const res = await fetch(req.url, { headers: req.headers, method: 'GET' });
+    status = res.status;
+    body = (await res.text()).trim();
+  } catch (e) {
+    body = `network error: ${e instanceof Error ? e.message : 'unknown'}`;
+  }
+  const ms = Date.now() - t0;
+  console.log(`\n[${label}]`);
+  console.log(`  uri    : ${maskUri(req.requestUri)}`);
+  console.log(`  status : ${status}`);
+  console.log(`  body   : ${body}`);
+  console.log(`  ms     : ${ms}`);
+  return { label, status, body, ms };
+}
+
+async function diagnose(c: Creds): Promise<void> {
+  const PATH = '/api/locations';
+  const V = 3 as const;
+  // ONE Accept version across all three so the only variable is the credential material.
+  const realUri = `${PATH}?app_id=${encodeURIComponent(c.appId)}&include_buildings=false`;
+  const corruptUri = `${PATH}?app_id=${encodeURIComponent(flipOne(c.appId))}&include_buildings=false`;
+
+  console.log('\n=== THREE-WAY 403 DISCRIMINATOR ===');
+  console.log(`  endpoint: GET ${PATH} (Accept version=${V}) — one call each, no retries`);
+
+  const a = await oneCall('A  real app_id, real signature', signedUri(c, realUri, V));
+
+  // B: sign correctly, then corrupt the signature we send. The mutated signature is never printed.
+  const bReq = signedUri(c, realUri, V);
+  const b = await oneCall(
+    'B  real app_id, CORRUPTED signature',
+    signedUri(c, realUri, V, { signatureOverride: flipOne(bReq.signature) }),
+  );
+
+  // C: corrupt the app_id, then sign THAT uri, so the signature is internally valid for
+  // exactly the bytes we send. This isolates "unknown app_id" from "bad signature".
+  const cRes = await oneCall('C  CORRUPTED app_id, valid signature over it', signedUri(c, corruptUri, V));
+
+  /* ── Second wave: separate "wrong access_id" from "wrong key material" ──────────
+   * A == B told us the signature is being rejected; it did NOT tell us why, because
+   * Kipu looks the secret up BY access_id and both a bad access_id and a bad secret
+   * surface as the same failed-to-authenticate body. D and F test the key material
+   * (the vector cannot: Kipu's placeholder secret is plain ASCII, ours is padded
+   * base64 decoding to 64 bytes). E tests the identity half.
+   */
+  const d = await oneCall(
+    'D  secret base64-DECODED to 64 raw bytes as HMAC key',
+    signedUri(c, realUri, V, { keyOverride: Buffer.from(c.secretKey, 'base64') }),
+  );
+  const e = await oneCall(
+    'E  CORRUPTED access_id, everything else real',
+    signedUri(c, realUri, V, { accessIdOverride: flipOne(c.accessId) }),
+  );
+  const f = await oneCall(
+    "F  secret with '==' padding stripped, as a string key",
+    signedUri(c, realUri, V, { keyOverride: c.secretKey.replace(/=+$/, '') }),
+  );
+
+  console.log('\n=== INTERPRETATION ===');
+  for (const line of interpretDiagnosis({ a, b, c: cRes, d, e, f })) console.log(line);
+}
+
+/** The minimum a control result needs for the verdict. */
+export interface ProbeOutcome { status: number; body: string }
+
+/**
+ * The whole verdict, as a PURE function so it can be asserted against a recorded matrix
+ * without spending another authentication attempt. That matters here specifically: this
+ * client is many consecutive failed auths deep, and re-running --diagnose to check a
+ * wording change would itself be a cost. See test/kipuSignature.test.ts.
+ */
+export function interpretDiagnosis(r: {
+  a: ProbeOutcome; b: ProbeOutcome; c: ProbeOutcome;
+  d: ProbeOutcome; e: ProbeOutcome; f: ProbeOutcome;
+}): string[] {
+  const same = (x: ProbeOutcome, y: ProbeOutcome) => x.status === y.status && x.body === y.body;
+  const out: string[] = [];
+  const ab = same(r.a, r.b), ac = same(r.a, r.c);
+
+  out.push(`  A == B ? ${ab ? 'YES' : 'no'}      A == C ? ${ac ? 'YES' : 'no'}      B == C ? ${same(r.b, r.c) ? 'YES' : 'no'}`);
+
+  if (ab && ac) {
+    out.push('  > INDETERMINATE. All three responses are identical, so this endpoint does not');
+    out.push('    discriminate a bad signature from an unknown app_id. Read nothing into it.');
+  } else if (ac && !ab) {
+    out.push('  > PROVISIONING. A matches C (a bogus app_id) and both differ from B (a bad');
+    out.push('    signature). Kipu does not RECOGNISE our app_id. Kipu-side action, not code.');
+  } else if (ab && !ac) {
+    out.push('  > SIGNATURE. A matches B (a deliberately corrupted signature), so Kipu is');
+    out.push('    rejecting what we signed — while our app_id IS recognised (C differs).');
+    out.push('    The algorithm is pinned by the published vector in test/kipuSignature.test.ts,');
+    out.push('    so the variable is the KEY MATERIAL or the secret VALUE. See D/E/F below.');
+  } else {
+    out.push('  > UNEXPECTED SHAPE. A differs from both controls. Read the bodies directly.');
+  }
+
+  out.push('');
+  out.push('  --- key material and identity controls ---');
+  const tag = (x: ProbeOutcome) =>
+    same(x, r.a) ? 'same as A' : same(x, r.c) ? 'same as C (unknown app_id)' : 'DISTINCT';
+  const mark = (x: ProbeOutcome) => (x.status === 200 ? '*** HTTP 200 ***' : `HTTP ${x.status}`);
+  out.push(`  D (decoded 64-byte key)  : ${mark(r.d)} ${tag(r.d)}`);
+  out.push(`  E (corrupted access_id)  : ${mark(r.e)} ${tag(r.e)}`);
+  out.push(`  F (padding-stripped key) : ${mark(r.f)} ${tag(r.f)}`);
+  out.push('');
+
+  if (r.d.status === 200 || r.f.status === 200) {
+    out.push('  > KEY MATERIAL WAS THE BUG. A control returned 200 — the secret VALUE is fine');
+    out.push('    and our derivation was wrong. Change the derivation; do not re-pull.');
+    return out;
+  }
+
+  const keyAxisExhausted = same(r.d, r.a) && same(r.f, r.a);
+  // E distinct from A in ANY way means a bogus access_id behaves differently from ours,
+  // i.e. Kipu RECOGNISES the real one. Matching C is not required — and in practice does
+  // not happen, because Kipu answers an unknown access_id and an unknown app_id with two
+  // different errors (401 "app not found" vs 403 "Invalid or Missing Recipient").
+  const accessIdRecognised = !same(r.e, r.a);
+
+  if (accessIdRecognised) {
+    out.push('  > IDENTITY IS CONFIRMED ON BOTH HALVES. A bogus access_id answers differently');
+    out.push(`    from ours (${mark(r.e)}), and so does a bogus app_id (${mark(r.c)}). Kipu knows`);
+    out.push('    this client. Identity is NOT the problem.');
+  } else {
+    out.push('  > E INCONCLUSIVE. A bogus access_id is indistinguishable from the real one here,');
+    out.push('    so this control cannot separate a wrong access_id from a wrong secret.');
+  }
+
+  if (keyAxisExhausted) {
+    out.push('');
+    out.push('  STOP. Every key derivation we can construct (raw string, decoded bytes,');
+    out.push('  padding-stripped) produces the SAME rejection as A. The key-material axis is');
+    out.push('  exhausted and the matrix has stopped yielding signal. This client is now many');
+    out.push('  consecutive failed auths deep, and an undocumented lockout would be');
+    out.push('  INDISTINGUISHABLE from a wrong key from here on.');
+    out.push('  DO NOT WIDEN THE MATRIX. Escalate to Kipu with these results.');
+  }
+  return out;
+}
+
+
+
+/* ─────────────────── endpoint-scope check: Kipu's OWN worked-example route ───────────
+ * If /locations and /care_levels were individually disabled on this instance while the
+ * credential is otherwise fine, census is where that shows: it is the exact route Kipu
+ * documents its signing against.
+ *
+ * ⚠ CENSUS RETURNS PHI. The 200 branch below never decodes the body to text — it reads
+ * the raw bytes and reports only the LENGTH. There is no code path on a 200 that can put
+ * a patient field, or any count derived from patient records, on stdout. Error bodies are
+ * small and non-PHI, so the non-200 branch may print them.
+ */
+async function censusScopeCheck(c: Creds): Promise<void> {
+  // Parameter order mirrors Kipu's published example exactly: phi_level THEN app_id.
+  const uri = `/api/patients/census?phi_level=high&app_id=${encodeURIComponent(c.appId)}`;
+  const req = signedUri(c, uri, 3);
+  console.log('\n=== ENDPOINT-SCOPE CHECK: GET /api/patients/census (Kipu\'s own example route) ===');
+  console.log(`  uri    : ${maskUri(req.requestUri)}`);
+  const t0 = Date.now();
+  try {
+    const res = await fetch(req.url, { headers: req.headers, method: 'GET' });
+    const raw = await res.arrayBuffer();
+    const bytes = raw.byteLength;
+    const ms = Date.now() - t0;
+    if (res.status === 200) {
+      // PHI GUARD, IN CODE: body withheld by construction — it was never decoded.
+      console.log(`  status : 200`);
+      console.log(`  body   : [WITHHELD — census returns PHI] bytes=${bytes}`);
+      console.log(`  ms     : ${ms}`);
+      console.log('  ▶ census WORKS while /locations does not => the credential is fine and');
+      console.log('    /locations + /care_levels are disabled for this instance (per-route).');
+    } else {
+      // Non-200: Kipu error bodies are small and non-PHI, so decode HERE and only here.
+      const body = Buffer.from(raw).toString('utf8').trim();
+      console.log(`  status : ${res.status}`);
+      console.log(`  body   : ${body}`);
+      console.log(`  ms     : ${ms}`);
+    }
+  } catch (e) {
+    console.log(`  network error: ${e instanceof Error ? e.message : 'unknown'}`);
+  }
+}
+
 async function main() {
   const c = creds();
   const appIdShape = fingerprint(c.appId);
@@ -180,6 +485,14 @@ async function main() {
   console.log(`plan        : GET ${maskUri(locV3.requestUri)}   (Accept version=3, then 4 on failure)`);
   console.log(`              GET ${maskUri(careLevels.requestUri)}   (Accept version=4)`);
   console.log('canonical   : ,,{request_uri},{RFC1123 Date}   — two leading commas, GET form');
+
+  if (DIAGNOSE) {
+    // --diagnose is inherently live: it exists to contrast three real responses. It does
+    // NOT fall through to the ordinary probe — 4 calls total, then stop.
+    await diagnose(c);
+    await censusScopeCheck(c);
+    return;
+  }
 
   if (!LIVE) {
     console.log('\nDry run only. Re-run with --live to make the calls.');
@@ -242,11 +555,16 @@ async function main() {
   console.log('    `consider_as` — that is the mock\'s own ⚠ UNRESOLVED question.');
 }
 
-main().catch((err) => {
-  // Never print the error object raw — a stack could carry a signed URL containing app_id.
-  console.error(`probe failed: ${err instanceof Error ? err.message : 'error'}`);
-  process.exit(1);
-});
+// Run ONLY when executed directly. test/kipuSignature.test.ts imports the signer from this
+// module, and an unguarded main() would call creds(), throw on missing env, and
+// process.exit(1) out of the test runner. Same guard shape as scripts/check-context-map.ts.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    // Never print the error object raw — a stack could carry a signed URL containing app_id.
+    console.error(`probe failed: ${err instanceof Error ? err.message : 'error'}`);
+    process.exit(1);
+  });
+}
 
 /*
  * NAMING NOTE (worth fixing before any real code lands):
