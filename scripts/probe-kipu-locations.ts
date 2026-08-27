@@ -362,7 +362,14 @@ export function interpretDiagnosis(r: {
 
   out.push(`  A == B ? ${ab ? 'YES' : 'no'}      A == C ? ${ac ? 'YES' : 'no'}      B == C ? ${same(r.b, r.c) ? 'YES' : 'no'}`);
 
-  if (ab && ac) {
+  // Only compare authentication outcomes. A transport failure or an unexpected response must not become evidence.
+    const validOutcome = (x: ProbeOutcome) => x.status === 200 || x.status === 401 || x.status === 403;
+    if (![r.a, r.b, r.c, r.d, r.e, r.f].every(validOutcome)) {
+      out.push('  > INDETERMINATE. One or more controls failed in transport or returned an unexpected response.');
+      return out;
+    }
+
+    if (ab && ac) {
     out.push('  > INDETERMINATE. All three responses are identical, so this endpoint does not');
     out.push('    discriminate a bad signature from an unknown app_id. Read nothing into it.');
   } else if (ac && !ab) {
@@ -399,8 +406,9 @@ export function interpretDiagnosis(r: {
   // not happen, because Kipu answers an unknown access_id and an unknown app_id with two
   // different errors (401 "app not found" vs 403 "Invalid or Missing Recipient").
   const accessIdRecognised = !same(r.e, r.a);
+    const appIdRecognised = !same(r.c, r.a);
 
-  if (accessIdRecognised) {
+  if (accessIdRecognised && appIdRecognised) {
     out.push('  > IDENTITY IS CONFIRMED ON BOTH HALVES. A bogus access_id answers differently');
     out.push(`    from ours (${mark(r.e)}), and so does a bogus app_id (${mark(r.c)}). Kipu knows`);
     out.push('    this client. Identity is NOT the problem.');
