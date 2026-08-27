@@ -35,12 +35,16 @@
  *                            to prove whether the credential works somewhere while
  *                            /locations does not.
  *
- * ⚠ CENSUS RETURNS PHI. On a 200 the response body is NEVER DECODED — `censusScopeCheck`
- * reads the raw bytes and reports only the LENGTH, so no code path on a 200 can put a
- * patient field, or any count derived from patient records, on stdout. Only the non-200
- * branch calls toString(), because Kipu's error bodies are small and non-PHI. That is a
- * structural guard, not a comment: if you edit that function, keep the decode inside the
- * error branch.
+ * ⚠ CENSUS RETURNS PHI, AND ITS BODY IS WITHHELD AT EVERY STATUS. `censusScopeCheck` reads
+ * the raw bytes and reports only the LENGTH — there is no `.text()` and no `toString()`
+ * anywhere in that function, so no status can put a patient field on stdout.
+ *
+ * An earlier version decoded non-200 bodies, reasoning that Kipu's error bodies are small
+ * and non-PHI. That reasoning is wrong and was removed: a status code is not evidence about
+ * a body's CONTENTS, and a 4xx/5xx from a PHI-bearing endpoint can echo a query, an upstream
+ * trace, or a partial payload. If you edit that function, DO NOT reintroduce a decode for
+ * any status — the classification comes from `explainStatus`, a fixed status-code allowlist
+ * that never reads the response.
  *
  * WHAT IT DOES NOT DO:
  *   - No database connection of ANY kind. Not a read, not a temp table, not a transaction.
@@ -276,27 +280,32 @@ function flipOne(v: string): string {
   return repl + v.slice(1);
 }
 
-interface CallResult { label: string; status: number; body: string; ms: number }
+interface CallResult { label: string; status: number; body: string; ms: number; transportError?: boolean }
 
 /** One GET. Prints status, body VERBATIM, elapsed ms. Nothing else. */
 async function oneCall(label: string, req: ReturnType<typeof signedUri>): Promise<CallResult> {
   const t0 = Date.now();
   let status = 0;
   let body = '';
+  let transportError = false;
   try {
     const res = await fetch(req.url, { headers: req.headers, method: 'GET' });
     status = res.status;
     body = (await res.text()).trim();
   } catch (e) {
+    // ⚠ A TRANSPORT FAILURE IS NOT A VERDICT. It is flagged rather than left as a bare
+    // status 0, because two failed calls would otherwise compare EQUAL to each other and
+    // the interpreter would read a network outage as "these controls agree".
+    transportError = true;
     body = `network error: ${e instanceof Error ? e.message : 'unknown'}`;
   }
   const ms = Date.now() - t0;
   console.log(`\n[${label}]`);
   console.log(`  uri    : ${maskUri(req.requestUri)}`);
-  console.log(`  status : ${status}`);
+  console.log(`  status : ${transportError ? 'n/a (transport error)' : status}`);
   console.log(`  body   : ${body}`);
   console.log(`  ms     : ${ms}`);
-  return { label, status, body, ms };
+  return { label, status, body, ms, transportError };
 }
 
 async function diagnose(c: Creds): Promise<void> {
@@ -347,7 +356,27 @@ async function diagnose(c: Creds): Promise<void> {
 }
 
 /** The minimum a control result needs for the verdict. */
-export interface ProbeOutcome { status: number; body: string }
+export interface ProbeOutcome {
+  status: number;
+  body: string;
+  /** True when the request never completed. Such a result is NOT an authentication verdict. */
+  transportError?: boolean;
+}
+
+/**
+ * The only statuses that are an ANSWER to "did this credential authenticate".
+ *
+ * ⚠ EVERYTHING ELSE IS NOT A VERDICT AND MUST NOT BE COMPARED. The six controls are
+ * independent sequential calls, so a partial outage can mix real 403s with synthetic
+ * failures — and because the interpreter works by EQUALITY, two failed calls would compare
+ * equal to each other and manufacture agreement out of an outage. A 502, a 410, a 404 or a
+ * transport error each say something about the ENDPOINT, not about the credential.
+ */
+const AUTH_INTERPRETABLE: ReadonlySet<number> = new Set([200, 401, 403]);
+
+function isInterpretable(r: ProbeOutcome): boolean {
+  return r.transportError !== true && AUTH_INTERPRETABLE.has(r.status);
+}
 
 /**
  * The whole verdict, as a PURE function so it can be asserted against a recorded matrix
@@ -361,6 +390,35 @@ export function interpretDiagnosis(r: {
 }): string[] {
   const same = (x: ProbeOutcome, y: ProbeOutcome) => x.status === y.status && x.body === y.body;
   const out: string[] = [];
+
+  // ── VALIDITY GATE. Runs before any equality comparison. ────────────────────────────
+  // A control that did not return an authentication verdict cannot participate in one.
+  // Reporting INDETERMINATE here is the whole point: a half-answered matrix that still
+  // prints "SIGNATURE" or "IDENTITY CONFIRMED" is worse than no matrix, because both
+  // conclusions would rest on comparisons against a result that means nothing.
+  const LABELS: Record<string, string> = {
+    a: 'A (real/real)',
+    b: 'B (corrupted signature)',
+    c: 'C (corrupted app_id)',
+    d: 'D (decoded 64-byte key)',
+    e: 'E (corrupted access_id)',
+    f: 'F (padding-stripped key)',
+  };
+  const unusable = (Object.keys(LABELS) as (keyof typeof r)[]).filter((k) => !isInterpretable(r[k]));
+  if (unusable.length > 0) {
+    out.push('  > INDETERMINATE — THE MATRIX IS INCOMPLETE, SO NO VERDICT IS DERIVED.');
+    for (const k of unusable) {
+      const x = r[k];
+      out.push(
+        `    ${LABELS[k]}: ${x.transportError ? 'transport error' : `HTTP ${x.status}`} — not an authentication verdict`,
+      );
+    }
+    out.push('    These controls answer for the ENDPOINT, not the credential. Comparing them by');
+    out.push('    equality would let an outage masquerade as agreement between controls.');
+    out.push('    Re-run --diagnose once the endpoint is reachable; do not read the rows above.');
+    return out;
+  }
+
   const ab = same(r.a, r.b), ac = same(r.a, r.c);
 
   out.push(`  A == B ? ${ab ? 'YES' : 'no'}      A == C ? ${ac ? 'YES' : 'no'}      B == C ? ${same(r.b, r.c) ? 'YES' : 'no'}`);
@@ -397,19 +455,34 @@ export function interpretDiagnosis(r: {
   }
 
   const keyAxisExhausted = same(r.d, r.a) && same(r.f, r.a);
-  // E distinct from A in ANY way means a bogus access_id behaves differently from ours,
-  // i.e. Kipu RECOGNISES the real one. Matching C is not required — and in practice does
-  // not happen, because Kipu answers an unknown access_id and an unknown app_id with two
-  // different errors (401 "app not found" vs 403 "Invalid or Missing Recipient").
-  const accessIdRecognised = !same(r.e, r.a);
 
-  if (accessIdRecognised) {
+  // ⚠ ONE CONTROL PER HALF, AND NEITHER SPEAKS FOR THE OTHER.
+  //
+  // E (a bogus access_id) can only ever discriminate the ACCESS_ID; C (a bogus app_id) can
+  // only ever discriminate the APP_ID. This used to claim BOTH halves off E alone, and its
+  // own sentence asserted the app_id half — "and so does a bogus app_id" — without testing
+  // it. On a provisioning matrix (A == C, E distinct) that produced two contradictory
+  // verdicts in one report: PROVISIONING above saying the app_id is unrecognised, and
+  // IDENTITY CONFIRMED below saying it is.
+  const accessIdRecognised = !same(r.e, r.a);
+  const appIdRecognised = !same(r.c, r.a);
+
+  if (accessIdRecognised && appIdRecognised) {
     out.push('  > IDENTITY IS CONFIRMED ON BOTH HALVES. A bogus access_id answers differently');
     out.push(`    from ours (${mark(r.e)}), and so does a bogus app_id (${mark(r.c)}). Kipu knows`);
     out.push('    this client. Identity is NOT the problem.');
+  } else if (accessIdRecognised && !appIdRecognised) {
+    out.push('  > ACCESS_ID RECOGNISED, APP_ID NOT. A bogus access_id answers differently from');
+    out.push(`    ours (${mark(r.e)}), but a bogus app_id answers the SAME as ours — so Kipu`);
+    out.push('    does not recognise the app_id. This agrees with the PROVISIONING verdict above.');
+  } else if (!accessIdRecognised && appIdRecognised) {
+    out.push('  > APP_ID RECOGNISED, ACCESS_ID INCONCLUSIVE. A bogus app_id answers differently');
+    out.push('    from ours, but a bogus access_id does not, so this matrix cannot separate a');
+    out.push('    wrong access_id from a wrong secret.');
   } else {
-    out.push('  > E INCONCLUSIVE. A bogus access_id is indistinguishable from the real one here,');
-    out.push('    so this control cannot separate a wrong access_id from a wrong secret.');
+    out.push('  > IDENTITY INCONCLUSIVE ON BOTH HALVES. Neither a bogus access_id nor a bogus');
+    out.push('    app_id is distinguishable from the real one here, so neither control can');
+    out.push('    separate a wrong identity from a wrong secret.');
   }
 
   if (keyAxisExhausted) {
@@ -445,22 +518,28 @@ async function censusScopeCheck(c: Creds): Promise<void> {
   const t0 = Date.now();
   try {
     const res = await fetch(req.url, { headers: req.headers, method: 'GET' });
-    const raw = await res.arrayBuffer();
-    const bytes = raw.byteLength;
+    const bytes = (await res.arrayBuffer()).byteLength;
     const ms = Date.now() - t0;
+    // ⚠ PHI GUARD, AND IT COVERS EVERY STATUS. The body is NEVER decoded on this route —
+    // there is no `.text()` and no `toString()` anywhere in this function, at any status.
+    //
+    // An earlier version withheld only the 200 body and printed non-200 bodies verbatim,
+    // on the theory that Kipu's error bodies are small and non-PHI. That reasoning does not
+    // hold: a status code is not evidence about a body's CONTENTS. A 4xx/5xx from a
+    // PHI-bearing endpoint can carry an echoed query, an upstream trace, or a partially
+    // rendered payload, and by the time you have decoded it to check, it is already in the
+    // process and one console.log from a transcript.
+    //
+    // What survives is everything diagnostically useful and nothing risky: the status, the
+    // byte length, the elapsed time, and a classification drawn ONLY from a fixed
+    // status-code allowlist (`explainStatus`) that never reads the response.
+    console.log(`  status : ${res.status}`);
+    console.log(`  body   : [WITHHELD — census is PHI-bearing at every status] bytes=${bytes}`);
+    console.log(`  class  : ${explainStatus(res.status)}`);
+    console.log(`  ms     : ${ms}`);
     if (res.status === 200) {
-      // PHI GUARD, IN CODE: body withheld by construction — it was never decoded.
-      console.log(`  status : 200`);
-      console.log(`  body   : [WITHHELD — census returns PHI] bytes=${bytes}`);
-      console.log(`  ms     : ${ms}`);
       console.log('  ▶ census WORKS while /locations does not => the credential is fine and');
       console.log('    /locations + /care_levels are disabled for this instance (per-route).');
-    } else {
-      // Non-200: Kipu error bodies are small and non-PHI, so decode HERE and only here.
-      const body = Buffer.from(raw).toString('utf8').trim();
-      console.log(`  status : ${res.status}`);
-      console.log(`  body   : ${body}`);
-      console.log(`  ms     : ${ms}`);
     }
   } catch (e) {
     console.log(`  network error: ${e instanceof Error ? e.message : 'unknown'}`);

@@ -147,9 +147,11 @@ test('a 200 on D outranks everything else and reverses the advice', () => {
   assert.doesNotMatch(out, /DO NOT WIDEN THE MATRIX/);
 });
 
-test('E matching A is reported as inconclusive, not as confirmation', () => {
+test('E matching A is reported as inconclusive for the ACCESS_ID half, not as confirmation', () => {
+  // C still discriminates here, so the app_id half is genuinely confirmed — the report must
+  // say exactly that much and no more, rather than collapsing to a single verdict.
   const out = interpretDiagnosis({ ...OBSERVED, e: FAILED_AUTH }).join('\n');
-  assert.match(out, /E INCONCLUSIVE/);
+  assert.match(out, /APP_ID RECOGNISED, ACCESS_ID INCONCLUSIVE/);
   assert.doesNotMatch(out, /IDENTITY IS CONFIRMED/);
 });
 
@@ -170,4 +172,82 @@ test('an unrecognised app_id still produces the provisioning verdict', () => {
   }).join('\n');
   assert.match(out, /> PROVISIONING\./);
   assert.doesNotMatch(out, /> SIGNATURE\./);
+});
+
+test('the provisioning matrix NEVER also claims both identity halves — they contradict', () => {
+  // ⚠ THE REGRESSION THIS PINS. This exact matrix (A == C, E distinct from A) reached the
+  // PROVISIONING branch — "Kipu does not RECOGNISE our app_id" — and then ALSO reached an
+  // identity branch that asserted the app_id half off E alone, in one report. E can only
+  // ever discriminate the access_id; C is the app_id's control and here it says the app_id
+  // is NOT recognised.
+  const out = interpretDiagnosis({
+    a: FAILED_AUTH, b: UNKNOWN_APP_ID, c: FAILED_AUTH,
+    d: FAILED_AUTH, e: UNKNOWN_ACCESS_ID, f: FAILED_AUTH,
+  }).join('\n');
+  assert.match(out, /> PROVISIONING\./);
+  assert.doesNotMatch(out, /IDENTITY IS CONFIRMED ON BOTH HALVES/);
+  // It should say what IS true: the access_id discriminates, the app_id does not.
+  assert.match(out, /ACCESS_ID RECOGNISED, APP_ID NOT/);
+});
+
+test('both halves are confirmed only when BOTH controls discriminate', () => {
+  // The real 2026-08-26 matrix: C distinct (unknown app_id error) AND E distinct (401).
+  const out = interpretDiagnosis(OBSERVED).join('\n');
+  assert.match(out, /IDENTITY IS CONFIRMED ON BOTH HALVES/);
+
+  // Drop C's discrimination and the claim must weaken, not persist.
+  const cBlind = interpretDiagnosis({ ...OBSERVED, c: FAILED_AUTH }).join('\n');
+  assert.doesNotMatch(cBlind, /IDENTITY IS CONFIRMED ON BOTH HALVES/);
+
+  // Drop E's and it must weaken the other way.
+  const eBlind = interpretDiagnosis({ ...OBSERVED, e: FAILED_AUTH }).join('\n');
+  assert.doesNotMatch(eBlind, /IDENTITY IS CONFIRMED ON BOTH HALVES/);
+  assert.match(eBlind, /APP_ID RECOGNISED, ACCESS_ID INCONCLUSIVE/);
+
+  // Neither discriminating is reported as such, not silently as confirmation.
+  const blind = interpretDiagnosis({ ...OBSERVED, c: FAILED_AUTH, e: FAILED_AUTH }).join('\n');
+  assert.match(blind, /IDENTITY INCONCLUSIVE ON BOTH HALVES/);
+});
+
+/* ── the validity gate: a partial outage must not become a verdict ─────────────────── */
+
+const TRANSPORT_ERROR: ProbeOutcome = { status: 0, body: 'network error: fetch failed', transportError: true };
+const BAD_GATEWAY: ProbeOutcome = { status: 502, body: '<html>upstream</html>' };
+
+test('a transport error on ANY control makes the whole diagnosis indeterminate', () => {
+  for (const k of ['a', 'b', 'c', 'd', 'e', 'f'] as const) {
+    const out = interpretDiagnosis({ ...OBSERVED, [k]: TRANSPORT_ERROR }).join('\n');
+    assert.match(out, /INDETERMINATE — THE MATRIX IS INCOMPLETE/, `control ${k} did not gate`);
+    assert.match(out, /transport error/);
+    // No verdict of any kind may be derived from an incomplete matrix.
+    assert.doesNotMatch(out, /> SIGNATURE\./);
+    assert.doesNotMatch(out, /> PROVISIONING\./);
+    assert.doesNotMatch(out, /IDENTITY IS CONFIRMED/);
+    assert.doesNotMatch(out, /DO NOT WIDEN THE MATRIX/);
+  }
+});
+
+test('a non-authentication status (502) is gated the same way as a transport error', () => {
+  const out = interpretDiagnosis({ ...OBSERVED, d: BAD_GATEWAY }).join('\n');
+  assert.match(out, /INDETERMINATE — THE MATRIX IS INCOMPLETE/);
+  assert.match(out, /HTTP 502 — not an authentication verdict/);
+  assert.doesNotMatch(out, /IDENTITY IS CONFIRMED/);
+});
+
+test('two transport errors do not compare EQUAL into a false agreement', () => {
+  // The failure mode the gate exists for: equality over synthetic results would read an
+  // outage as "these two controls agree", which is how an outage becomes a verdict.
+  const out = interpretDiagnosis({
+    a: TRANSPORT_ERROR, b: TRANSPORT_ERROR, c: TRANSPORT_ERROR,
+    d: TRANSPORT_ERROR, e: TRANSPORT_ERROR, f: TRANSPORT_ERROR,
+  }).join('\n');
+  assert.match(out, /INDETERMINATE — THE MATRIX IS INCOMPLETE/);
+  assert.doesNotMatch(out, /All three responses are identical/);
+});
+
+test('every control in the real matrix is authentication-interpretable', () => {
+  // Guards the gate itself: if the recorded matrix ever stopped passing, the tests above
+  // would be asserting against an indeterminate result and would silently prove nothing.
+  const out = interpretDiagnosis(OBSERVED).join('\n');
+  assert.doesNotMatch(out, /INDETERMINATE — THE MATRIX IS INCOMPLETE/);
 });
