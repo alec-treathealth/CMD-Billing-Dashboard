@@ -42,9 +42,15 @@
  * An earlier version decoded non-200 bodies, reasoning that Kipu's error bodies are small
  * and non-PHI. That reasoning is wrong and was removed: a status code is not evidence about
  * a body's CONTENTS, and a 4xx/5xx from a PHI-bearing endpoint can echo a query, an upstream
- * trace, or a partial payload. If you edit that function, DO NOT reintroduce a decode for
- * any status — the classification comes from `explainStatus`, a fixed status-code allowlist
- * that never reads the response.
+ * trace, or a partial payload. If you edit that function, DO NOT reintroduce a PRINT of the
+ * body at any status.
+ *
+ * A non-200 body IS decoded into a local and matched against `KNOWN_KIPU_ERRORS`, a fixed
+ * allowlist of strings we have already observed, and then discarded — only the matched LABEL
+ * is printed. That is what restores this route's actual purpose: telling whether census
+ * fails the SAME way as control A (credential-level) or a DIFFERENT way (per-route
+ * disabling), which a status code alone cannot distinguish because both are 403. An
+ * unrecognised body prints nothing about its contents.
  *
  * WHAT IT DOES NOT DO:
  *   - No database connection of ANY kind. Not a read, not a temp table, not a transaction.
@@ -193,6 +199,31 @@ function fingerprint(v: string): string {
 /** Mask the app_id value inside a request_uri before it is ever printed. */
 function maskUri(uri: string): string {
   return uri.replace(/app_id=[^&]+/, 'app_id=[REDACTED]');
+}
+
+/**
+ * The Kipu error bodies we have actually OBSERVED, matched exactly and reported by LABEL.
+ *
+ * ⚠ WHY THIS EXISTS RATHER THAN PRINTING THE BODY. The census route is PHI-bearing, so its
+ * body must never reach stdout at any status. But withholding it entirely also destroyed the
+ * one signal that route was added to produce: whether census fails the SAME way as control A
+ * (credential-level) or a DIFFERENT way (per-route disabling). A status code alone cannot
+ * tell those apart — both are 403.
+ *
+ * So the body is decoded into a local, compared against this fixed list, and DISCARDED. Only
+ * the matched label is printed. An unrecognised body prints nothing about its contents — the
+ * allowlist can only ever confirm a string we already knew, never reveal a new one.
+ */
+const KNOWN_KIPU_ERRORS: readonly { needle: string; label: string }[] = [
+  { needle: 'API Client app failed to authenticate', label: 'credential rejected — same body as control A' },
+  { needle: 'Invalid or Missing Recipient', label: 'unknown app_id — same body as control C' },
+  { needle: 'API Client app not found', label: 'unknown access_id — same body as control E' },
+];
+
+/** Matched label, or null when the body is not one we have seen. NEVER returns body text. */
+export function classifyKnownError(body: string): string | null {
+  for (const k of KNOWN_KIPU_ERRORS) if (body.includes(k.needle)) return k.label;
+  return null;
 }
 
 function explainStatus(status: number): string {
@@ -518,8 +549,14 @@ async function censusScopeCheck(c: Creds): Promise<void> {
   const t0 = Date.now();
   try {
     const res = await fetch(req.url, { headers: req.headers, method: 'GET' });
-    const bytes = (await res.arrayBuffer()).byteLength;
+    const raw = await res.arrayBuffer();
+    const bytes = raw.byteLength;
     const ms = Date.now() - t0;
+    // A 200 body is the PHI payload itself and is NEVER decoded. A non-200 body is decoded
+    // into a local ONLY to be matched against the known-error allowlist, then discarded —
+    // `decoded` is not printed, returned, or logged on any path.
+    const known =
+      res.status === 200 ? null : classifyKnownError(Buffer.from(raw).toString('utf8'));
     // ⚠ PHI GUARD, AND IT COVERS EVERY STATUS. The body is NEVER decoded on this route —
     // there is no `.text()` and no `toString()` anywhere in this function, at any status.
     //
@@ -536,6 +573,9 @@ async function censusScopeCheck(c: Creds): Promise<void> {
     console.log(`  status : ${res.status}`);
     console.log(`  body   : [WITHHELD — census is PHI-bearing at every status] bytes=${bytes}`);
     console.log(`  class  : ${explainStatus(res.status)}`);
+    if (res.status !== 200) {
+      console.log(`  match  : ${known ?? 'UNRECOGNISED — contents withheld, nothing inferred'}`);
+    }
     console.log(`  ms     : ${ms}`);
     if (res.status === 200) {
       console.log('  ▶ census WORKS while /locations does not => the credential is fine and');

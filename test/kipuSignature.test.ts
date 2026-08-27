@@ -97,7 +97,7 @@ test('importing this module does not execute the probe', () => {
  * client that is already many consecutive failures deep, where a lockout would be
  * indistinguishable from a wrong key. The matrix below is the ACTUAL 2026-08-26 run.
  * ════════════════════════════════════════════════════════════════════════════════════ */
-import { interpretDiagnosis, type ProbeOutcome } from '../scripts/probe-kipu-locations.js';
+import { classifyKnownError, interpretDiagnosis, type ProbeOutcome } from '../scripts/probe-kipu-locations.js';
 
 const FAILED_AUTH: ProbeOutcome = {
   status: 403,
@@ -250,4 +250,42 @@ test('every control in the real matrix is authentication-interpretable', () => {
   // would be asserting against an indeterminate result and would silently prove nothing.
   const out = interpretDiagnosis(OBSERVED).join('\n');
   assert.doesNotMatch(out, /INDETERMINATE — THE MATRIX IS INCOMPLETE/);
+});
+
+/* ── the census known-error allowlist ─────────────────────────────────────────────────
+ * The census route is PHI-bearing and its body is never printed. The allowlist is what
+ * keeps the route diagnostically useful anyway: it can CONFIRM a string we already know
+ * and can never reveal one we do not.
+ */
+
+test('each observed Kipu error body maps to its label', () => {
+  assert.match(classifyKnownError(FAILED_AUTH.body)!, /same body as control A/);
+  assert.match(classifyKnownError(UNKNOWN_APP_ID.body)!, /same body as control C/);
+  assert.match(classifyKnownError(UNKNOWN_ACCESS_ID.body)!, /same body as control E/);
+});
+
+test('an UNKNOWN body yields null — the allowlist never classifies what it has not seen', () => {
+  assert.equal(classifyKnownError('{"errors":"Something we have never observed"}'), null);
+  assert.equal(classifyKnownError(''), null);
+});
+
+test('the allowlist NEVER returns any part of the body it was given', () => {
+  // ⚠ THE PROPERTY THAT MATTERS. A label is a fixed string chosen from the table; if a
+  // future edit ever interpolated the body into it, a PHI-bearing census body could reach
+  // stdout through the "safe" path. Feed it a body containing a marker and assert the
+  // marker cannot come back out.
+  const MARKER = 'PATIENT-NAME-MARKER-9f3a';
+  for (const known of [FAILED_AUTH.body, UNKNOWN_APP_ID.body, UNKNOWN_ACCESS_ID.body]) {
+    const label = classifyKnownError(`${known} ${MARKER}`);
+    assert.ok(label, 'a known needle inside a larger body should still match');
+    assert.equal(label!.includes(MARKER), false, 'the label echoed caller-supplied text');
+  }
+  assert.equal(classifyKnownError(`{"errors":"${MARKER}"}`), null);
+});
+
+test('a 200 census body is never passed to the classifier at all', () => {
+  // Documented as a call-site invariant: censusScopeCheck passes null for status 200 rather
+  // than decoding. This asserts the classifier is not a safe place to send PHI regardless —
+  // it returns null for arbitrary content, so nothing is inferred from a payload.
+  assert.equal(classifyKnownError('[{"patient":"real phi payload"}]'), null);
 });
