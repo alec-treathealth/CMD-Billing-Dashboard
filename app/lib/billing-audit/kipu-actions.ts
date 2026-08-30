@@ -42,19 +42,21 @@ import { gridRows } from '../../../src/kipu/computeRow.js';
 import { buildImportPayload, type KipuImportPayload } from './kipu-import';
 
 /* ── Input bounds. Every one of these is enforced BEFORE any bytes are parsed. ──────────
- * A Kipu export is 4 CSVs; the largest single real export measured is 3.6 MB with a
- * ~2.6 MB Sessions file. These are sized to accept a couple of exports at once and refuse
- * anything that is obviously not one.
+ * They live in `./kipu-import-bounds.ts` because THIS file is `'use server'`, where a value
+ * export would 500 every Server Action on the page while passing the entire gate. See that
+ * module's header for the bounds themselves and for why the body ceiling must EXCEED
+ * MAX_TOTAL_BYTES rather than match it.
  *
  * ⚠ next.config.mjs ALSO has to allow the body — Server Actions default to 1 MB, which
- * silently rejects even ONE real export. `serverActions.bodySizeLimit` is raised there to
- * match MAX_TOTAL_BYTES; these checks are the real enforcement, that setting is the floor.
+ * silently rejects even ONE real export. These checks are the real enforcement; that setting
+ * only has to stop Next refusing a request before it reaches this function.
  */
-const MAX_FILES = 16;
-const MAX_BYTES_PER_FILE = 20 * 1024 * 1024;
-const MAX_TOTAL_BYTES = 32 * 1024 * 1024;
-/** Only the first chunk is sniffed — enough to hold a header row plus one data row. */
-const HEADER_SNIFF_BYTES = 64 * 1024;
+import {
+  HEADER_SNIFF_BYTES,
+  MAX_BYTES_PER_FILE,
+  MAX_FILES,
+  MAX_TOTAL_BYTES,
+} from './kipu-import-bounds';
 
 export type ImportError =
   | 'unauthorized'
