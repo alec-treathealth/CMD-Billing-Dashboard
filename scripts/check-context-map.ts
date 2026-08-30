@@ -11,7 +11,8 @@
  *   1. every canonical-table path resolves on disk
  *   2. every NOT-IN-REPO path does NOT resolve (if one lands, the map is lying)
  *   3. every SUPERSEDED path still resolves (they are real, just frozen)
- *   4. every tracked documentation file appears in the table (or on the allowlist)
+ *   4. every tracked documentation file appears in the table (or on the frozen allowlist,
+ *      whose contents are pinned by digest so the exemption set can only ever shrink)
  *
  * WHY 4 EXISTS, AND WHY ITS ABSENCE WAS INVISIBLE. Until 2026-08-30 this guard was
  * FORWARD-ONLY: it proved every LISTED path resolves, and never that every tracked doc
@@ -49,6 +50,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -304,32 +306,30 @@ const DOC_EXTENSIONS: readonly string[] = ['.md'];
 const OUT_OF_SCOPE_PREFIXES: readonly string[] = ['.claude/rules/'];
 
 /**
- * ⚠ DATED BACKLOG ALLOWLIST — CREATED 2026-08-30. IT MAY ONLY EVER SHRINK.
+ * ⚠ FROZEN BASELINE — THE EXACT 52 TRACKED DOCS UNREGISTERED ON 2026-08-30. NEVER EDIT IT.
  *
- * WHAT THIS IS: the exact set of tracked docs that were already unregistered on the day
- * assertion 4 was switched on. They are a violation of CLAUDE.md's "a doc is either in the
- * table above or it is deleted" — every one of them. They are listed here, individually and
- * by hand, so the assertion could go live for anything NEW without silently ratifying the
+ * WHAT THIS IS: the set of tracked docs that already violated CLAUDE.md's "a doc is either
+ * in the table above or it is deleted" on the day assertion 4 was switched on. Enumerated by
+ * hand so the assertion could go live for anything NEW without silently ratifying the
  * backlog. A NEW unregistered doc fails the gate on day one; these 52 stay visible instead
  * of being laundered into "passing".
  *
- * ⚠ ADDING A PATH HERE IS A RULE VIOLATION, NOT A NORMAL EDIT. It is not the way to make a
- * failing gate go green. If this check fails on a doc you touched, you have exactly two
- * legitimate moves, both named by CLAUDE.md: REGISTER it in the Canonical Context Set, or
- * DELETE it. Growing this array is the third state the rule exists to forbid — it converts
- * a one-time, dated, shrinking debt into an open-ended exemption, at which point the guard
- * asserts nothing. A reviewer seeing a `+` line in this array should treat it as the finding.
+ * ⚠ THIS ARRAY IS APPEND-NEVER AND EDIT-NEVER, AND THAT IS ENFORCED, NOT REQUESTED.
+ * `ALLOWLIST_BASELINE_SHA256` pins its contents. Adding a path, removing one, or SWAPPING one
+ * for another all change the digest and fail `checkAllowlistIntegrity`. There is no edit to
+ * this array that passes the gate.
  *
- * HOW IT SHRINKS: `checkUnregisteredDocs` reports any entry that is no longer a tracked,
- * unregistered doc. Register one of these and the stale entry FAILS the gate until it is
- * removed from this array, so the list cannot rot into a fiction of the backlog's size.
- * `test/contextMap.test.ts` additionally pins the length as a ratchet.
+ * The first version of this guard pinned only the LENGTH, which was a real hole (Qodo #276,
+ * finding 1): dropping one entry and adding a different tracked-and-unregistered path kept the
+ * count at 52 and satisfied every check, so the exemption set could be REPLACED rather than
+ * shrunk — while the comment above it claimed "only shrinks". A cardinality ratchet is not a
+ * subset ratchet. The digest is, and it holds regardless of what future readers believe the
+ * invariant to be.
  *
- * NOT triaged here on purpose: which of the 52 are live, which are frozen snapshots, and
- * which should be deleted is 52 separate judgements that belong to Alec, not to the change
- * that installs the guard.
+ * TO TRIAGE ONE: register it in the Canonical Context Set (or delete the file), then add its
+ * path to RESOLVED_SINCE_BASELINE below. That is the ONLY array that ever grows.
  */
-export const UNREGISTERED_DOC_ALLOWLIST: readonly string[] = [
+const ALLOWLIST_BASELINE_2026_08_30: readonly string[] = [
   'INT-INGEST-DIAGNOSIS-ROUND2.md',
   'MARKET_VALIDATION.md',
   'NO-FACILITY-ATTRIBUTION-FEASIBILITY.md',
@@ -384,9 +384,98 @@ export const UNREGISTERED_DOC_ALLOWLIST: readonly string[] = [
   'test/fixtures/kipu-billing-report/README.md',
 ];
 
-/** The size of the allowlist on the day it was created. It may go DOWN; never up. */
+/** sha256 over ALLOWLIST_BASELINE_2026_08_30.join('\n'). Any edit to the array breaks it. */
+export const ALLOWLIST_BASELINE_SHA256 =
+  'fe58db8ce381f1731b66589ff706c1eaa3240d4ec0ddeb04150a66629bf27d3e';
+
+/** When the baseline was taken, and how big it was. Both are historical facts, not settings. */
 export const ALLOWLIST_CREATED = '2026-08-30';
 export const ALLOWLIST_INITIAL_SIZE = 52;
+
+/**
+ * Docs from the baseline that have since been REGISTERED in the Canonical Context Set, or
+ * DELETED from the repo. This is the only array here that grows, and every entry is a debt
+ * paid down — the backlog is `ALLOWLIST_INITIAL_SIZE - RESOLVED_SINCE_BASELINE.length`.
+ *
+ * ⚠ This is NOT a place to exempt a new doc. An entry here is only honoured if the path is
+ * ALSO in the frozen baseline; adding an unrelated path exempts nothing (the doc is still not
+ * in the baseline, so it is still unregistered and still fails) and is reported as a stale
+ * entry. The two legitimate moves for a failing doc remain: register it, or delete it.
+ */
+const RESOLVED_SINCE_BASELINE: readonly string[] = [];
+
+/**
+ * The live exemption set: the frozen baseline minus what has been triaged. DERIVED, never
+ * hand-edited — which is what makes "only shrinks" a structural property of the code rather
+ * than a claim in a comment that the tests half-checked.
+ */
+export const UNREGISTERED_DOC_ALLOWLIST: readonly string[] = ALLOWLIST_BASELINE_2026_08_30.filter(
+  (p) => !RESOLVED_SINCE_BASELINE.includes(p),
+);
+
+/** The digest of the baseline as it stands right now. Compare against the pin. */
+export function allowlistBaselineDigest(): string {
+  return createHash('sha256').update(ALLOWLIST_BASELINE_2026_08_30.join('\n')).digest('hex');
+}
+
+/**
+ * Tamper check on the exemption machinery itself, independent of any repo state.
+ *
+ * Assertion 4 is only as trustworthy as the allowlist it consults, so the allowlist gets its
+ * own assertions: the baseline must be byte-identical to what was grandfathered, and the live
+ * set must be a subset of it. Without the first, a swap goes unnoticed; without the second, a
+ * future refactor that hand-edits UNREGISTERED_DOC_ALLOWLIST instead of deriving it could
+ * widen the exemption without ever touching the baseline.
+ *
+ * All four inputs are injected so the tests can exercise a TAMPERED baseline against the real
+ * logic. Defaults are the live wiring — `checkAllowlistIntegrity()` with no arguments is what
+ * `main()` and `loadAndCheck` call.
+ */
+export function checkAllowlistIntegrity(
+  baseline: readonly string[] = ALLOWLIST_BASELINE_2026_08_30,
+  live: readonly string[] = UNREGISTERED_DOC_ALLOWLIST,
+  resolved: readonly string[] = RESOLVED_SINCE_BASELINE,
+  pinnedDigest: string = ALLOWLIST_BASELINE_SHA256,
+): Failure[] {
+  const failures: Failure[] = [];
+
+  const digest = createHash('sha256').update(baseline.join('\n')).digest('hex');
+  if (digest !== pinnedDigest) {
+    failures.push({
+      kind: 'frozen allowlist baseline was edited',
+      path: 'scripts/check-context-map.ts',
+      detail:
+        `ALLOWLIST_BASELINE_2026_08_30 hashes to ${digest}, not the pinned ` +
+        `${pinnedDigest}. That array is frozen: adding, removing or SWAPPING an ` +
+        'entry are all rule violations. Register the doc or delete it; to retire a baseline ' +
+        'entry, add its path to RESOLVED_SINCE_BASELINE instead.',
+    });
+  }
+
+  const grandfathered = new Set(baseline);
+  for (const p of live) {
+    if (!grandfathered.has(p)) {
+      failures.push({
+        kind: 'exemption outside the frozen baseline',
+        path: p,
+        detail: `not among the ${ALLOWLIST_INITIAL_SIZE} docs grandfathered on ${ALLOWLIST_CREATED} — the exemption set may only shrink`,
+      });
+    }
+  }
+
+  for (const p of resolved) {
+    if (!grandfathered.has(p)) {
+      failures.push({
+        kind: 'stale RESOLVED_SINCE_BASELINE entry',
+        path: p,
+        detail: 'never in the frozen baseline, so it exempts nothing — remove it',
+      });
+    }
+  }
+
+  return failures;
+}
+
 
 function isDoc(path: string): boolean {
   return DOC_EXTENSIONS.some((ext) => path.endsWith(ext));
@@ -480,6 +569,7 @@ export function loadAndCheck(repoRoot: string = REPO_ROOT): Failure[] {
   const map = loadContextMap(repoRoot);
   return [
     ...checkContextMap(map, repoRoot),
+    ...checkAllowlistIntegrity(),
     ...checkUnregisteredDocs(map, listTrackedDocs(repoRoot)),
   ];
 }
@@ -491,7 +581,11 @@ function main(): void {
   try {
     map = loadContextMap();
     tracked = listTrackedDocs();
-    failures = [...checkContextMap(map), ...checkUnregisteredDocs(map, tracked)];
+    failures = [
+      ...checkContextMap(map),
+      ...checkAllowlistIntegrity(),
+      ...checkUnregisteredDocs(map, tracked),
+    ];
   } catch (err) {
     console.error(`context-map: ${(err as Error).message}`);
     process.exit(1);

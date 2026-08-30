@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
+  ALLOWLIST_BASELINE_SHA256,
   ALLOWLIST_CREATED,
   ALLOWLIST_INITIAL_SIZE,
   REPO_ROOT,
   UNREGISTERED_DOC_ALLOWLIST,
+  allowlistBaselineDigest,
+  checkAllowlistIntegrity,
   checkContextMap,
   checkUnregisteredDocs,
   listTrackedDocs,
@@ -197,12 +201,24 @@ test('assertion 4 reports zero failures against the live repo', () => {
   assert.deepEqual(checkUnregisteredDocs(map, trackedDocs), []);
 });
 
-test('the dated allowlist may only shrink — it is a ratchet, never a growth surface', () => {
+test('the frozen baseline is byte-identical to what was grandfathered', () => {
+  // A LENGTH ratchet was the first version of this and it was a real hole: dropping one entry
+  // and adding a different tracked-and-unregistered path kept the count at 52 and passed every
+  // check, so the exemption set could be REPLACED rather than shrunk. Cardinality is not
+  // subset. The digest catches an addition, a removal AND a swap.
+  assert.equal(
+    allowlistBaselineDigest(),
+    ALLOWLIST_BASELINE_SHA256,
+    'ALLOWLIST_BASELINE_2026_08_30 was edited. It is frozen — register the doc or delete it; ' +
+      'to retire a baseline entry, add its path to RESOLVED_SINCE_BASELINE.',
+  );
+});
+
+test('the live allowlist may only shrink — it is a subset of the frozen baseline', () => {
+  assert.deepEqual(checkAllowlistIntegrity(), []);
   assert.ok(
     UNREGISTERED_DOC_ALLOWLIST.length <= ALLOWLIST_INITIAL_SIZE,
-    `UNREGISTERED_DOC_ALLOWLIST grew to ${UNREGISTERED_DOC_ALLOWLIST.length}, above its ` +
-      `${ALLOWLIST_CREATED} size of ${ALLOWLIST_INITIAL_SIZE}. Adding a path is a rule ` +
-      'violation: register the doc in the Canonical Context Set, or delete it.',
+    `the exemption set grew past its ${ALLOWLIST_CREATED} size of ${ALLOWLIST_INITIAL_SIZE}`,
   );
 });
 
@@ -292,4 +308,45 @@ test('an allowlist entry for a deleted doc fails until the entry is removed', ()
   assert.equal(failures.length, 1);
   assert.match(failures[0]!.kind, /stale allowlist entry/);
   assert.match(failures[0]!.detail, /no longer a tracked in-scope doc/);
+});
+
+test('a same-size REPLACEMENT of a baseline entry is caught, not just growth', () => {
+  // THE EXACT BUG THE LENGTH RATCHET MISSED. Swap one grandfathered path for a different
+  // tracked, unregistered one: the count is unchanged, every per-entry check in
+  // checkUnregisteredDocs is satisfied (it honours whatever allowlist it is handed), and the
+  // old `length <= 52` assertion passed. Cardinality is not subset — so the assertion has to
+  // live on the allowlist's own PROVENANCE, which is what the digest pins.
+  const baseline = ['docs/a.md', 'docs/b.md'];
+  const digest = createHash('sha256').update(baseline.join('\n')).digest('hex');
+  const swapped = ['docs/a.md', 'docs/sneaked-in.md'];
+  assert.equal(swapped.length, baseline.length, 'same size, by construction');
+
+  // Unchanged baseline + a swapped LIVE set: caught as an exemption outside the baseline.
+  const widened = checkAllowlistIntegrity(baseline, swapped, [], digest);
+  assert.equal(widened.length, 1);
+  assert.equal(widened[0]!.path, 'docs/sneaked-in.md');
+  assert.match(widened[0]!.kind, /outside the frozen baseline/);
+
+  // Swapping the BASELINE itself instead: caught by the digest.
+  const edited = checkAllowlistIntegrity(swapped, swapped, [], digest);
+  assert.equal(edited.length, 1);
+  assert.match(edited[0]!.kind, /frozen allowlist baseline was edited/);
+});
+
+test('a RESOLVED entry that was never in the baseline exempts nothing', () => {
+  // Guards the obvious workaround: "resolve" a path that was never grandfathered, hoping the
+  // derivation lets it through. The live set is baseline MINUS resolved, so subtracting an
+  // unrelated path removes nothing — and the bogus entry is reported rather than ignored.
+  const baseline = ['docs/a.md'];
+  const digest = createHash('sha256').update(baseline.join('\n')).digest('hex');
+  const failures = checkAllowlistIntegrity(baseline, baseline, ['docs/never-here.md'], digest);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]!.path, 'docs/never-here.md');
+  assert.match(failures[0]!.kind, /stale RESOLVED_SINCE_BASELINE entry/);
+});
+
+test('editing the frozen baseline changes the digest', () => {
+  // Proves the pin is load-bearing rather than a constant that happens to match today.
+  const tampered = [...UNREGISTERED_DOC_ALLOWLIST.slice(1), 'docs/sneaked-in.md'].join('\n');
+  assert.notEqual(createHash('sha256').update(tampered).digest('hex'), ALLOWLIST_BASELINE_SHA256);
 });

@@ -29,13 +29,19 @@ index**, because tracked-ness is the only question that gives the same answer on
 every machine; a filesystem walk would fail a teammate's gate on their local
 scratch note.
 
-⚠ **52 tracked docs predate the backward check and are exempt by a dated
-allowlist** (`UNREGISTERED_DOC_ALLOWLIST`, created 2026-08-30). They are
-violations, held visible rather than laundered into "passing". A **new**
-unregistered doc fails on day one. **Adding a path to that allowlist is a rule
-violation, not a normal edit** — the two legitimate moves are register or delete.
-The allowlist only shrinks: registering one of the 52 makes its now-stale entry
-fail until it is removed.
+⚠ **52 tracked docs predate the backward check and are exempt by a dated,
+digest-pinned baseline** (`ALLOWLIST_BASELINE_2026_08_30`). They are violations,
+held visible rather than laundered into "passing". A **new** unregistered doc
+fails on day one. **Adding a path to that baseline is a rule violation, not a
+normal edit** — the two legitimate moves are register or delete.
+
+The exemption set can only ever SHRINK, and that is structural rather than
+promised: the baseline is pinned by `ALLOWLIST_BASELINE_SHA256`, so an addition, a
+removal **or a same-size swap** all break the digest and fail the gate. The live
+allowlist is *derived* — baseline minus `RESOLVED_SINCE_BASELINE`, the one array
+that grows — so triaging a doc means registering it (or deleting it) and then
+recording the path there. A length-only ratchet shipped first and was wrong:
+cardinality is not subset.
 
 | Role | Path | Read-order |
 |---|---|---|
