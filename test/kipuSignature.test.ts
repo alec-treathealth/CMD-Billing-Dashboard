@@ -289,3 +289,71 @@ test('a 200 census body is never passed to the classifier at all', () => {
   // it returns null for arbitrary content, so nothing is inferred from a payload.
   assert.equal(classifyKnownError('[{"patient":"real phi payload"}]'), null);
 });
+
+/* ══════════ QODO FINDING 2 — the --explain credential mask was FAIL-OPEN ══════════════
+ * `String.replace` returns its input UNCHANGED when the pattern does not match. The old
+ * mask ran a regex over the assembled Authorization header, so any access_id that broke
+ * the pattern — a trailing newline is enough — printed the FULL access ID and signature,
+ * under a comment promising neither would ever reach stdout.
+ *
+ * These tests assert the ABSENCE of the credential, not the presence of a placeholder. A
+ * placeholder-present assertion passes happily while the real value sits next to it.
+ * ════════════════════════════════════════════════════════════════════════════════════ */
+import { authHeaderDisplay } from '../scripts/probe-kipu-locations.js';
+
+const ACCESS_ID = 'CGqj6mLOU9bwa6KO0wuFD5i70GIn9luhsq6s0coegvE';
+const SIGNATURE = 'gEHjE4LZabcdefghijklmnopqrstuvwxyz0123456789=';
+
+test('a well-formed header masks the access_id and truncates the signature', () => {
+  const out = authHeaderDisplay(`APIAuth-HMAC-SHA256 ${ACCESS_ID}:${SIGNATURE}`, SIGNATURE);
+  assert.equal(out.includes(ACCESS_ID), false, 'the access_id survived masking');
+  assert.match(out, /^APIAuth-HMAC-SHA256 \[ACCESS_ID REDACTED\]:gEHjE4LZ…$/);
+  assert.equal(out.includes(SIGNATURE), false, 'the full signature survived');
+});
+
+test('a MALFORMED access_id still leaks nothing — newline, colon and space each', () => {
+  // Each of these breaks the old regex, which then returned the header verbatim.
+  const malformed = {
+    newline: `${ACCESS_ID}\n`,
+    colon: `${ACCESS_ID}:extra`,
+    space: `${ACCESS_ID} trailing`,
+    leadingNewline: `\n${ACCESS_ID}`,
+    empty: '',
+  };
+  for (const [label, id] of Object.entries(malformed)) {
+    const header = `APIAuth-HMAC-SHA256 ${id}:${SIGNATURE}`;
+    const out = authHeaderDisplay(header, SIGNATURE);
+    assert.equal(out.includes(ACCESS_ID), false, `${label}: the access_id reached stdout`);
+    assert.equal(out.includes(SIGNATURE), false, `${label}: the full signature reached stdout`);
+    // And it must not have fallen back to echoing the header.
+    assert.equal(out === header, false, `${label}: fell back to the raw header`);
+  }
+});
+
+test('an unrecognised scheme is replaced by a placeholder, never echoed', () => {
+  const out = authHeaderDisplay(`Bearer-${ACCESS_ID} ${ACCESS_ID}:${SIGNATURE}`, SIGNATURE);
+  assert.match(out, /^\[UNRECOGNISED SCHEME\]/);
+  assert.equal(out.includes(ACCESS_ID), false, 'the scheme path echoed caller text');
+});
+
+test('the display never reads the header for the signature — a garbage header still truncates', () => {
+  // The signature comes from the SAFE field signedUri returned, not from parsing.
+  const out = authHeaderDisplay('total garbage with no colon at all', SIGNATURE);
+  assert.match(out, /:gEHjE4LZ…$/);
+  assert.equal(out.includes(SIGNATURE), false);
+});
+
+test('a missing signature yields a placeholder rather than an empty tail', () => {
+  const out = authHeaderDisplay(`APIAuth-HMAC-SHA256 ${ACCESS_ID}:`, '');
+  assert.match(out, /\[SIGNATURE UNAVAILABLE\]$/);
+  assert.equal(out.includes(ACCESS_ID), false);
+});
+
+test('the output is built from a fixed alphabet — no caller text can reach it', () => {
+  // Property check: whatever is fed in, the result must be one of the constructed shapes.
+  const poison = 'POISON-MARKER-7f3b';
+  for (const header of [`APIAuth ${poison}:${poison}`, poison, `${poison} ${poison}:${poison}`]) {
+    const out = authHeaderDisplay(header, 'abcdefgh');
+    assert.equal(out.includes(poison), false, `caller text leaked from header "${header.slice(0, 12)}…"`);
+  }
+});
