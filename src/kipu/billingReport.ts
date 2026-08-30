@@ -52,6 +52,8 @@ export interface KipuSession {
   readonly hrs: number;
   readonly present: boolean;
   readonly billable: boolean;
+  /** Independent A12 exclusion; unlike documentation status, this is always enforced. */
+  readonly a12NeverBillable?: boolean;
   readonly status: string;
   readonly srcId: string;
   /**
@@ -508,6 +510,7 @@ export function buildFromCsv(
       hrs,
       present: true,
       billable,
+        a12NeverBillable: missedHold || zeroHold,
       status,
       srcId: r['Evaluation Id'] ?? '',
     });
