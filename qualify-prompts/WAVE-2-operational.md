@@ -34,9 +34,9 @@ Hard invariants:
 **Verification gate — all five, green, before any commit:**
 
 ```bash
-npm test                    # >=1439 pass / 0 fail
+npm test                    # see CLAUDE.md Verification gate for the current floor
 npm run typecheck           # root tsc (strict)
-cd app && npm test          # >=831 pass / 0 fail
+cd app && npm test          # see CLAUDE.md Verification gate for the current floor
 cd app && npm run typecheck
 cd app && npm run build
 ```
