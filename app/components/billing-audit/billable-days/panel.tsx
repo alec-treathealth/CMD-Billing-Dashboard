@@ -31,7 +31,9 @@
  * ⚠ ALL OF THE LIFECYCLE STATE LIVES IN `import-state.ts`, deliberately. `data`, `files`,
  * `busy`, `error`, both override maps and the drawer target are one fact, not seven; read that
  * file's header before changing any of them. The filters below (`segment`, `locFilter`,
- * `facFilter`, `revealed`, `dragging`) are genuinely independent view state and stay local.
+ * `revealed`, `dragging`) are genuinely independent view state and stay local. The two GRID
+ * FILTERS moved INTO the reducer: their valid values come from the loaded payload, so they are
+ * export-scoped state, not view state — see that file's header.
  *
  * PHI: names / auth numbers / session topics are absent from the payload unless the viewer
  * has `canRevealPhi`. The reveal toggle only controls DISPLAY of what the server already
@@ -88,11 +90,9 @@ function Stat({ label, value, tone }: { label: string; value: string | number; t
 export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView; canRevealPhi: boolean }) {
   // The whole import lifecycle — see import-state.ts. `dispatch` is stable, so it is not a dep.
   const [st, dispatch] = useReducer(importReducer, initialImportState);
-  const { data, files, busy, error, cellOv, statusOv, target } = st;
+  const { data, files, busy, error, cellOv, statusOv, target, locFilter, facFilter } = st;
   const [dragging, setDragging] = useState(false);
   const [segment, setSegment] = useState<KipuSegment>('all');
-  const [locFilter, setLocFilter] = useState<string>('');
-  const [facFilter, setFacFilter] = useState<string>('');
   const [revealed, setRevealed] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   /** Monotonic request id. A ref, not state: allocating it must not schedule a render. */
@@ -255,7 +255,7 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
             <select
               aria-label="Level of care"
               value={locFilter}
-              onChange={(e) => setLocFilter(e.target.value)}
+              onChange={(e) => dispatch({ type: 'set-filter', filter: 'loc', value: e.target.value })}
               className="ml-2 rounded-md border border-line bg-card px-2 py-1 text-sm text-ink900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <option value="">All levels of care</option>
@@ -269,7 +269,7 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
             <select
               aria-label="Location"
               value={facFilter}
-              onChange={(e) => setFacFilter(e.target.value)}
+              onChange={(e) => dispatch({ type: 'set-filter', filter: 'fac', value: e.target.value })}
               className="rounded-md border border-line bg-card px-2 py-1 text-sm text-ink900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <option value="">All locations</option>
