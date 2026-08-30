@@ -325,20 +325,29 @@ export interface ReportBundle {
 
 export function assembleBundle(files: readonly ReportFile[], rules: BillableDayRules = DEFAULT_RULES): ReportBundle {
   const bundle: ReportBundle = { sessions: [], evaluations: [], patient: [], labs: [], variantWarnings: [] };
-  for (const f of files) {
+  files.forEach((f, i) => {
     const rows = parseCsv(f.text);
     const kind = classifyRows(rows);
     if (kind === 'sessions' || kind === 'evaluations' || kind === 'patient' || kind === 'labs') {
       bundle[kind] = bundle[kind].concat(rows);
     }
     if (rules.requireBillableVariant && !isBillableReportFile(f.name)) {
+      // ⚠ THE FILENAME IS NEVER INTERPOLATED HERE (Qodo finding 9). This warning travels
+      // variantWarnings -> BuildResult.notes -> the import payload -> the BROWSER, so any
+      // source value put in it is published to every viewer regardless of canRevealPhi. An
+      // uploaded filename is user-supplied text from a PHI-bearing export and routinely
+      // carries a patient name or MRN, so it is identified POSITIONALLY instead.
+      //
+      // The guard itself still reads `f.name` — that is the -Billable- marker's only home,
+      // and renamed exports stay supported because CLASSIFICATION is by header signature
+      // (classifyRows), never by name. Reading the name is fine; emitting it is not.
       bundle.variantWarnings.push(
-        `A9 GUARD: "${f.name}" does not carry the -Billable- report variant marker. ` +
-          'Row existence = attended (A9) is only true of the Billable variant — do not bill ' +
-          'off this import until the export variant is confirmed.',
+        `A9 GUARD: file ${i + 1} of ${files.length} (detected kind: ${kind}) does not carry the ` +
+          '-Billable- report variant marker. Row existence = attended (A9) is only true of the ' +
+          'Billable variant — do not bill off this import until the export variant is confirmed.',
       );
     }
-  }
+  });
   return bundle;
 }
 
@@ -357,13 +366,38 @@ export interface BoundaryHit {
   readonly billable: boolean;
 }
 
+/**
+ * One row the parser refused to count, as STRUCTURE rather than prose (Qodo finding 6).
+ *
+ * ⚠ `detail` CARRIES SOURCE-ROW TEXT AND IS SERVER-SIDE ONLY. It holds the row's Topic or
+ * Evaluation name — clinical free text from a PHI-bearing export. This used to be baked
+ * into a display string that the import payload copied verbatim to every viewer, so a
+ * caller without `canRevealPhi` received clinical text the rest of the payload carefully
+ * withholds. Splitting reason from detail is what lets the payload drop one and keep the
+ * other; do not merge them back into a single string.
+ */
+export interface SkippedRow {
+  /** Fixed, enumerable — safe for any viewer. */
+  readonly reason: 'no-full-name' | 'unparseable-started';
+  readonly kind: 'group-session' | 'evaluation';
+  /** Source-row text. PHI-adjacent: gate on canRevealPhi before it leaves the server. */
+  readonly detail: string | null;
+}
+
+/** Human display for a skipped row, INCLUDING its source text. Never send to an ungated viewer. */
+export function skippedLabel(s: SkippedRow): string {
+  const what = s.kind === 'group-session' ? 'group session' : 'evaluation';
+  const why = s.reason === 'no-full-name' ? 'no Full Name' : 'unparseable Started';
+  return s.detail ? `${what} "${s.detail}" — ${why}` : `${what} row with ${why}`;
+}
+
 export interface BuildResult {
   clients: KipuClient[];
   weeks: WeekInfo[];
   locCfg: LocConfigMap;
   locFlags: string[];
   notes: string[];
-  skipped: string[];
+  skipped: SkippedRow[];
   facilities: string[];
   boundary: BoundaryHit[];
   tzFlags: TzFlag[];
@@ -377,7 +411,7 @@ export function buildFromCsv(
   rules: BillableDayRules = DEFAULT_RULES,
 ): BuildResult {
   const notes: string[] = [...bundle.variantWarnings];
-  const skipped: string[] = [];
+  const skipped: SkippedRow[] = [];
   const byName = new Map<string, KipuClient>();
   const authKeys = new Map<KipuClient, Set<string>>();
   const facilities = new Set<string>();
@@ -433,7 +467,7 @@ export function buildFromCsv(
   for (const r of bundle.sessions) {
     const n = (r['Full Name'] ?? '').trim();
     if (!n) {
-      skipped.push('session row with no Full Name');
+      skipped.push({ reason: 'no-full-name', kind: 'group-session', detail: null });
       continue;
     }
     const c = client(n);
@@ -441,7 +475,11 @@ export function buildFromCsv(
     addAuths(c, r['Authorizations'] ?? '');
     const st = usDateTime(r['Started'] ?? '');
     if (!st) {
-      skipped.push(`group session "${stripAttestation(r['Topic'] ?? '')}" — unparseable Started`);
+      skipped.push({
+        reason: 'unparseable-started',
+        kind: 'group-session',
+        detail: stripAttestation(r['Topic'] ?? '') || null,
+      });
       continue;
     }
     const en = usDateTime(r['Ended'] ?? '');
@@ -480,7 +518,7 @@ export function buildFromCsv(
   for (const r of bundle.evaluations) {
     const n = (r['Full Name'] ?? '').trim();
     if (!n) {
-      skipped.push('evaluation row with no Full Name');
+      skipped.push({ reason: 'no-full-name', kind: 'evaluation', detail: null });
       continue;
     }
     const c = client(n);
@@ -488,7 +526,11 @@ export function buildFromCsv(
     addAuths(c, r['Authorizations'] ?? '');
     const st = usDateTime(r['Started'] ?? '');
     if (!st) {
-      skipped.push(`evaluation "${stripAttestation(r['Evaluation'] ?? '')}" — unparseable Started`);
+      skipped.push({
+        reason: 'unparseable-started',
+        kind: 'evaluation',
+        detail: stripAttestation(r['Evaluation'] ?? '') || null,
+      });
       continue;
     }
     const en = usDateTime(r['Ended'] ?? '');

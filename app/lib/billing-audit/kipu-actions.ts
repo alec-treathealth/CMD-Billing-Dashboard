@@ -152,7 +152,16 @@ export async function importKipuReport(formData: FormData): Promise<KipuImportRe
       return { ok: false, error: 'not-csv' };
     }
     filesByKind[kind] = (filesByKind[kind] ?? 0) + 1;
-    // `name` feeds the A9 -Billable- variant guard ONLY. It never reaches a log or the client.
+    // `name` feeds the A9 -Billable- variant guard ONLY (`isBillableReportFile`). It reaches
+    // no log and no client payload.
+    //
+    // ⚠ THIS COMMENT WAS FALSE UNTIL 2026-08-30 (Qodo finding 9). `assembleBundle`
+    // interpolated the raw filename into its A9 warning, and that string travelled
+    // variantWarnings -> BuildResult.notes -> diagnostics.notes -> the browser. An uploaded
+    // filename is user-supplied text from a PHI-bearing export and routinely carries a
+    // patient name or MRN, so the claim above was not merely stale — it described the
+    // opposite of the behaviour. The warning is now positional ("file 2 of 3"), which is
+    // what makes this true. Classification stays header-based, so renamed exports still work.
     files.push({ name: f.name, text });
   }
   if (!filesByKind['sessions'] && !filesByKind['evaluations']) {

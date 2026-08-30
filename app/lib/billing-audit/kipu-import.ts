@@ -15,14 +15,16 @@
  * mistake. A week change re-posts the files rather than shipping every week at once; that
  * cost is temporary and disappears when the parsed corpus lands in `kipu.*` (next PR).
  *
- * PHI POSTURE. Three fields are gated on `canRevealPhi` and are `null` for everyone else:
- * the patient NAME, the authorization NUMBER, and the session TOPIC. Everything else the
+ * PHI POSTURE. Three ROW fields are gated on `canRevealPhi` and are `null` for everyone
+ * else: the patient NAME, the authorization NUMBER, and the session TOPIC. A fourth gate
+ * sits on the DIAGNOSTICS: `skipped` carries source-row text and is reduced to reason codes
+ * plus counts for an ungated viewer (`gateSkipped`). Everything else the
  * grid needs — dates, times, hours, codes, counts, level of care, payer, container labels,
  * auth windows — is non-identifying and always present. The gate is applied HERE, at the
  * mapping, so an ungated field can never reach the client by way of a component forgetting
  * to mask it: for a plain `user` the value is absent from the payload, not merely hidden.
  */
-import type { BuildResult, KipuClient, WeekInfo } from '../../../src/kipu/billingReport.js';
+import { skippedLabel, type BuildResult, type KipuClient, type SkippedRow, type WeekInfo } from '../../../src/kipu/billingReport.js';
 import type { GridRow } from '../../../src/kipu/computeRow.js';
 import { locationFor } from '../../../src/kipu/locations.js';
 
@@ -109,7 +111,11 @@ export interface KipuDiagnosticsDTO {
   readonly weekCount: number;
   /** A9/A10 and engine notes — rules-level warnings, no identifiers. */
   readonly notes: string[];
-  /** Rows the engine held OUT as non-billable, and why. */
+  /**
+   * Rows the parser held OUT, and why. Display strings, already PHI-GATED: with
+   * `canRevealPhi` they name the source row; without it they are fixed reason codes with
+   * counts and carry nothing drawn from the row. See `gateSkipped`.
+   */
   readonly skipped: string[];
   readonly facilities: string[];
   readonly locConfig: KipuLocCfgDTO[];
@@ -200,6 +206,34 @@ function mapRow(g: GridRow, canRevealPhi: boolean): KipuRowDTO {
   };
 }
 
+/**
+ * The skipped-row PHI gate (Qodo finding 6) — the SAME `canRevealPhi ? value : withheld`
+ * shape `mapRow` already applies to name, auth number and session topic. There is
+ * deliberately no second mechanism here.
+ *
+ * ⚠ WHY THIS EXISTS. `build.skipped` used to be copied to the payload verbatim, and its
+ * entries interpolate the source row's Topic / Evaluation name — clinical free text from a
+ * PHI-bearing export. Every viewer received it, including a plain `user` for whom the very
+ * same topic string is `null` two fields away in the same response. That is the defect.
+ *
+ * Ungated callers get the REASON and a COUNT and nothing drawn from the row. Aggregating
+ * also stops the list length itself from tracking individual rows.
+ */
+export function gateSkipped(rows: readonly SkippedRow[], canRevealPhi: boolean): string[] {
+  if (canRevealPhi) return rows.map(skippedLabel);
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    const key = `${r.kind}|${r.reason}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort().map(([key, n]) => {
+    const [kind, reason] = key.split('|') as [SkippedRow['kind'], SkippedRow['reason']];
+    const what = kind === 'group-session' ? 'group session' : 'evaluation';
+    const why = reason === 'no-full-name' ? 'no Full Name' : 'unparseable Started';
+    return `${n} ${what} row${n === 1 ? '' : 's'} held out — ${why}`;
+  });
+}
+
 export function segmentOf(r: KipuRowDTO): KipuSegment[] {
   const segs: KipuSegment[] = ['all'];
   if (r.flag) segs.push('review');
@@ -273,7 +307,7 @@ export function buildImportPayload(args: {
       clientCount: build.clients.length,
       weekCount: build.weeks.length,
       notes: [...build.notes],
-      skipped: [...build.skipped],
+      skipped: gateSkipped(build.skipped, canRevealPhi),
       facilities: facilityOptions,
       locConfig: Object.entries(build.locCfg).map(([loc, e]) => ({
         loc,
