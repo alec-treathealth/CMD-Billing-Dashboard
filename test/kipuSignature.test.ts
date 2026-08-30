@@ -301,7 +301,7 @@ test('a 200 census body is never passed to the classifier at all', () => {
  * ════════════════════════════════════════════════════════════════════════════════════ */
 import { authHeaderDisplay } from '../scripts/probe-kipu-locations.js';
 
-const ACCESS_ID = 'CGqj6mLOU9bwa6KO0wuFD5i70GIn9luhsq6s0coegvE';
+const ACCESS_ID = 'synthetic-access-id-for-tests-7f3b';
 const SIGNATURE = 'gEHjE4LZabcdefghijklmnopqrstuvwxyz0123456789=';
 
 test('a well-formed header masks the access_id and truncates the signature', () => {
