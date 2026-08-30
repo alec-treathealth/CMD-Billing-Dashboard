@@ -1,8 +1,8 @@
 'use client';
 
 /**
- * Billing Audit workbench — the client shell hosting three subtabs (IP Audit / OP Audit / Flag
- * Queue) as in-page state (one route, no sub-navigation). Each scope panel holds its own filter
+ * Billing Audit workbench — the client shell hosting four subtabs (IP Audit / OP Audit / Flag
+ * Queue / Billable Days) as in-page state (one route, no sub-navigation). Each scope panel holds its own filter
  * state and a keyset-paged work table; the Flag Queue is a real destination, deliberately inert
  * (empty state) until the Phase-3 flag engine computes exceptions into claims.flag.
  *
@@ -16,16 +16,18 @@ import { AuditWorkTable } from './work-table';
 import { PivotStrip } from './pivot-strip';
 import { PatientDrill, type DrillTarget } from './patient-drill';
 import { DEFAULT_PRESET, type Preset } from './date-presets';
+import { BillableDaysPanel } from './billable-days/panel';
 import type { TagOption } from './tag-picker';
 import { searchAuditPatients, type AuditCursor, type AuditFilter, type AuditGridRow } from '@/lib/actions';
 import type { AuditScope } from '../../../src/billingAudit/auditConfig';
 import type { DashboardView } from '@/lib/views';
 
-type AuditTab = 'ip' | 'op' | 'flags';
+type AuditTab = 'ip' | 'op' | 'flags' | 'billable';
 const TABS: readonly { id: AuditTab; label: string }[] = [
   { id: 'ip', label: 'IP Audit' },
   { id: 'op', label: 'OP Audit' },
   { id: 'flags', label: 'Flag Queue' },
+  { id: 'billable', label: 'Billable Days' },
 ];
 
 export interface BillingAuditWorkbenchProps {
@@ -43,7 +45,7 @@ export interface BillingAuditWorkbenchProps {
 export function BillingAuditWorkbench(props: BillingAuditWorkbenchProps) {
   const { view, canRevealPhi, initialFilter } = props;
   const [active, setActive] = useState<AuditTab>('ip');
-  const tabRefs = useRef<Record<AuditTab, HTMLButtonElement | null>>({ ip: null, op: null, flags: null });
+  const tabRefs = useRef<Record<AuditTab, HTMLButtonElement | null>>({ ip: null, op: null, flags: null, billable: null });
 
   const onKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
@@ -86,7 +88,9 @@ export function BillingAuditWorkbench(props: BillingAuditWorkbenchProps) {
       </div>
 
       <div role="tabpanel" id={`billing-audit-panel-${active}`} aria-labelledby={`billing-audit-tab-${active}`}>
-        {active === 'flags' ? (
+        {active === 'billable' ? (
+          <BillableDaysPanel view={view} canRevealPhi={canRevealPhi} />
+        ) : active === 'flags' ? (
           <FlagQueueEmptyState />
         ) : active === 'ip' ? (
           <ScopePanel

@@ -23,6 +23,18 @@ const SECURITY_HEADERS = [
 const nextConfig = {
   // Don't advertise the framework/version to clients.
   poweredByHeader: false,
+  experimental: {
+    // ⚠ RAISED FOR THE KIPU BILLING REPORT UPLOAD (Billable Days subtab). Server Actions
+    // default to a 1 MB body, and ONE real Kipu export is ~3.6 MB (its Sessions CSV alone is
+    // ~2.6 MB) — so the default silently rejected every genuine import.
+    //
+    // This is a global ceiling, not a per-action one, which is why it is deliberately a
+    // FLOOR rather than the real control: `app/lib/billing-audit/kipu-actions.ts` enforces
+    // max file count, max bytes per file and max total BEFORE it reads a single byte. Raise
+    // that module's constants first if a larger import is ever needed; this number only has
+    // to stay >= its MAX_TOTAL_BYTES.
+    serverActions: { bodySizeLimit: '32mb' },
+  },
   async headers() {
     return [{ source: '/:path*', headers: SECURITY_HEADERS }];
   },

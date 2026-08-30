@@ -175,22 +175,70 @@ test('A7: a BPS on an over-cap day keeps the BPS and marks the day N/B', () => {
 
 /* ------------------------- what counts as attended ----------------------- */
 
-test('A2: a non-billable evaluation contributes no hours and no code', () => {
+test('A2: an evaluation counts on ATTENDANCE, not on documentation status (ruled 2026-08-27)', () => {
+  // ⚠ INVERTED 2026-08-27. This asserted that a non-`Complete` evaluation contributed
+  // nothing. Alec ruled documentation status is a CARE-TEAM signal about an unfinished
+  // note and does not decide billability — the service was delivered either way.
   const c = client({ sessions: [T('2026-08-10', 1.0, { billable: false })] });
   const r = computeRow(c, WEEK, CFG);
+  // The A10 point is the HOURS: 0 before the ruling, 1.0 after.
+  assert.equal(r.days[0]?.hrs, 1.0);
+  // The code is HRS, not T, and that is a DIFFERENT rule doing its job: this client is
+  // IOP/3.0, one hour is under the per-day threshold, and A8 forbids IOP emitting a bare
+  // T — so A3 shows the hours instead. Un-gating the status does not make the day billable.
+  assert.deepEqual(r.days[0]?.codes, ['HRS']);
+  assert.equal(r.billableDays, 0);
+});
+
+test('A2/A10 on an OP client: an un-Complete therapy hour bills its day outright', () => {
+  // The clean isolation of the ruling — OP has no hours threshold, so the restored hour
+  // turns straight into a billable T day.
+  const c = client({
+    loc: 'MH OP 2 Adult',
+    auths: [auth({ loc: 'MH OP 2 Adult', freq: '2 Day' })],
+    sessions: [T('2026-08-10', 1.0, { billable: false, status: 'Ready For Review' })],
+  });
+  const r = computeRow(c, WEEK, CFG);
+  assert.equal(r.days[0]?.hrs, 1.0);
+  assert.deepEqual(r.days[0]?.codes, ['T']);
+  assert.equal(r.billableDays, 1);
+});
+
+test('A2: statusGatesBillable:true restores the pre-ruling evaluation behaviour', () => {
+  const c = client({ sessions: [T('2026-08-10', 1.0, { billable: false })] });
+  const r = computeRow(c, WEEK, CFG, withRules({ statusGatesBillable: true }));
   assert.equal(r.days[0]?.hrs, 0);
   assert.deepEqual(r.days[0]?.codes, []);
 });
 
-test('a non-Complete GROUP session does not count toward hours or codes (deviation from the mock, per A10)', () => {
-  // The mock counted any present group row regardless of its billable flag, so a
-  // Ready-For-Review group still produced hours and an I/G code. That leaks A10 at
-  // the engine level. The extraction counts a session only when present AND billable.
+test('a non-Complete GROUP session DOES count — the engine agrees with the mock again', () => {
+  // ⚠ INVERTED 2026-08-27, and this one closed a real divergence rather than opening one.
+  // The mock always counted a present group row regardless of documentation status; the
+  // extraction deviated and gated it. Alec ruled the MOCK was right, so a Ready-For-Review
+  // group with 3 hours bills its day exactly as a Complete one does.
   const c = client({ sessions: [G('2026-08-10', 3.0, { billable: false, status: 'Ready For Review' })] });
   const r = computeRow(c, WEEK, CFG);
+  assert.equal(r.days[0]?.hrs, 3.0);
+  assert.deepEqual(r.days[0]?.codes, ['I']);
+  assert.equal(r.billableDays, 1);
+});
+
+test('statusGatesBillable:true restores the pre-ruling GROUP behaviour', () => {
+  const c = client({ sessions: [G('2026-08-10', 3.0, { billable: false, status: 'Ready For Review' })] });
+  const r = computeRow(c, WEEK, CFG, withRules({ statusGatesBillable: true }));
   assert.equal(r.days[0]?.hrs, 0);
   assert.deepEqual(r.days[0]?.codes, []);
   assert.equal(r.billableDays, 0);
+});
+
+test('present=false still never counts, whatever the status rule says', () => {
+  // The ruling moved the gate to `present` ALONE — it did not remove the gate.
+  for (const rules of [undefined, withRules({ statusGatesBillable: true })]) {
+    const c = client({ sessions: [G('2026-08-10', 3.0, { present: false, status: 'Complete' })] });
+    const r = computeRow(c, WEEK, CFG, rules);
+    assert.equal(r.days[0]?.hrs, 0);
+    assert.equal(r.billableDays, 0);
+  }
 });
 
 test('an absent group row (present=false) does not count', () => {
@@ -321,9 +369,52 @@ function fixtureBuild() {
   return buildFromCsv(assembleBundle(files), LOC_CONFIG_BASE);
 }
 
-test('fixture parity: the browser-verified Aug 10 grid numbers reproduce headlessly', () => {
+/**
+ * ⚠ THE PARITY NUMBERS MOVED ON 2026-08-27, BY RULING, NOT BY DRIFT.
+ *
+ * The browser-verified baseline was 25 rows / 62 billable days / 204.4 h / 12 flagged /
+ * 3 uncapped. Two rulings landed together:
+ *
+ *   A10 (status no longer gates billability) -> +1 row, +1 billable day, +8.2 hours.
+ *       One client's only sessions that week were non-`Complete`, so they had no counted
+ *       hours at all before and now appear in the grid.
+ *   OP ladder (OP-N = N days on the OP track) -> uncapped LOCs 3 -> 1. Only the
+ *       "no level of care in the export" sentinel is still uncapped, which is missing DATA.
+ *
+ * Flagged rose 12 -> 15 even though FEWER levels of care are ambiguous, because the hours
+ * A10 restored push more clients over their cap or outside their auth window. That is the
+ * two changes compounding, and it is the number to watch if either is ever revisited.
+ *
+ * The old baseline is still REACHABLE — see the test below — which is what makes this a
+ * clean switch rather than a lost verification.
+ */
+test('fixture parity: the Aug 10 grid numbers reproduce headlessly under the ruled semantics', () => {
   const b = fixtureBuild();
   const rows = gridRows(b.clients, FIXTURE_WEEK, b.locCfg, withRules({ capResolution: 'current-ur-loc' }));
+  assert.equal(rows.length, 26);
+  assert.equal(
+    rows.reduce((a, x) => a + x.row.billableDays, 0),
+    63,
+  );
+  const hours = rows.reduce((a, x) => a + x.row.total, 0);
+  assert.ok(Math.abs(hours - 212.6) < 0.05, `attended hours ${hours} != 212.6`);
+  assert.equal(rows.filter((x) => x.row.flag).length, 15);
+  // Only the no-level-of-care sentinel is left uncapped now.
+  assert.equal(rows.filter((x) => x.row.cfg.ambiguous === true && x.row.capDays === 7).length, 1);
+});
+
+test('fixture parity: the pre-ruling browser-verified numbers are still reachable via statusGatesBillable', () => {
+  // Isolates the A10 half. Turning the status gate back on reproduces 25 / 62 / 204.4
+  // EXACTLY — proof the ruling is a switch over one predicate, not a rewrite of the engine.
+  // (The uncapped count is not asserted here: the OP-ladder half is a config change and is
+  // deliberately NOT reversible by this flag.)
+  const b = fixtureBuild();
+  const rows = gridRows(
+    b.clients,
+    FIXTURE_WEEK,
+    b.locCfg,
+    withRules({ capResolution: 'current-ur-loc', statusGatesBillable: true }),
+  );
   assert.equal(rows.length, 25);
   assert.equal(
     rows.reduce((a, x) => a + x.row.billableDays, 0),
@@ -331,8 +422,6 @@ test('fixture parity: the browser-verified Aug 10 grid numbers reproduce headles
   );
   const hours = rows.reduce((a, x) => a + x.row.total, 0);
   assert.ok(Math.abs(hours - 204.4) < 0.05, `attended hours ${hours} != 204.4`);
-  assert.equal(rows.filter((x) => x.row.flag).length, 12);
-  assert.equal(rows.filter((x) => x.row.cfg.ambiguous === true && x.row.capDays === 7).length, 3);
 });
 
 test('fixture: per-day A13 resolution changes only clients whose auths span multiple LOCs', () => {
