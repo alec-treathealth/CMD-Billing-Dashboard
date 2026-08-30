@@ -24,6 +24,10 @@
  * monotonic token and the reducer drops any response that no longer holds it. Do not add a
  * state write to this component that bypasses `dispatch`.
  *
+ * A fresh pick discards the loaded export the moment it is ATTEMPTED, so the tab never shows the
+ * previous export's clients and totals under a "Parsing…" button as if they were the incoming
+ * import's. Week navigation does not — see `import-state.ts` for both contracts.
+ *
  * ⚠ ALL OF THE LIFECYCLE STATE LIVES IN `import-state.ts`, deliberately. `data`, `files`,
  * `busy`, `error`, both override maps and the drawer target are one fact, not seven; read that
  * file's header before changing any of them. The filters below (`segment`, `locFilter`,
@@ -97,7 +101,7 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
   const send = useCallback(
     async (picked: readonly File[], week: string | null, fresh: boolean) => {
       const id = ++reqId.current;
-      dispatch({ type: 'request', id });
+      dispatch({ type: 'request', id, fresh });
       const fd = new FormData();
       fd.set('view', view);
       if (week) fd.set('week', week);

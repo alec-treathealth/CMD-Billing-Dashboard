@@ -40,8 +40,8 @@ const run = (...actions: Parameters<typeof reduce>[1][]): ImportState =>
 test('an older response resolving SECOND cannot overwrite the newer payload, files or busy', () => {
   // Request 1 (a big export), then request 2 while it is still in flight. 2 comes back first.
   const s = run(
-    { type: 'request', id: 1 },
-    { type: 'request', id: 2 },
+    { type: 'request', id: 1, fresh: true },
+    { type: 'request', id: 2, fresh: true },
     { type: 'applied', id: 2, payload: NEW, files: newFiles, fresh: true },
     { type: 'applied', id: 1, payload: OLD, files: oldFiles, fresh: true },
   );
@@ -59,8 +59,8 @@ test('an older response resolving SECOND cannot overwrite the newer payload, fil
 
 test('a stale FAILURE cannot blank the newer payload or raise a phantom error', () => {
   const s = run(
-    { type: 'request', id: 1 },
-    { type: 'request', id: 2 },
+    { type: 'request', id: 1, fresh: true },
+    { type: 'request', id: 2, fresh: true },
     { type: 'applied', id: 2, payload: NEW, files: newFiles, fresh: true },
     { type: 'failed', id: 1, error: 'parse-failed', fresh: true },
   );
@@ -74,9 +74,9 @@ test('a stale response does not clear busy while the current request is still in
   // The spinner belongs to request 2. Request 1 finishing must not turn it off, or the tab
   // looks idle while it is still loading and the user fires a third request into the gap.
   const s = run(
-    { type: 'request', id: 1 },
-    { type: 'request', id: 2 },
-    { type: 'failed', id: 1, error: 'parse-failed', fresh: false },
+    { type: 'request', id: 1, fresh: true },
+    { type: 'request', id: 2, fresh: true },
+    { type: 'failed', id: 1, error: 'parse-failed', fresh: true },
   );
   assert.equal(s.busy, true, 'a superseded response cleared the in-flight spinner');
   assert.equal(s.error, null);
@@ -85,7 +85,7 @@ test('a stale response does not clear busy while the current request is still in
 test('the CURRENT response still applies normally — the guard must not drop everything', () => {
   // A guard that rejected every response would pass all three tests above. Pin the happy path.
   const s = run(
-    { type: 'request', id: 1 },
+    { type: 'request', id: 1, fresh: true },
     { type: 'applied', id: 1, payload: NEW, files: newFiles, fresh: true },
   );
   assert.equal(s.data, NEW);
@@ -99,7 +99,7 @@ test('the CURRENT response still applies normally — the guard must not drop ev
 /** A loaded export with one cell override, one week status and the drawer open on that client. */
 const loaded = (): ImportState =>
   run(
-    { type: 'request', id: 1 },
+    { type: 'request', id: 1, fresh: true },
     { type: 'applied', id: 1, payload: OLD, files: oldFiles, fresh: true },
     { type: 'set-cell', key: `${WEEK_A}|row-OLD:1`, codes: ['G'] },
     { type: 'set-status', key: `${WEEK_A}|row-OLD`, status: 'NEEDS BILLED' },
@@ -110,7 +110,7 @@ test('a fresh import failing with no-weeks clears the PREVIOUS export, not just 
   // This is the exact hole: `no-weeks` is returned AFTER parsing a corpus that produced no
   // dated weeks, and a fresh pick is a replacement. Showing "no dated sessions" above the
   // previous export's clients and billing totals reads as a statement about the data on screen.
-  const s = reduce(reduce(loaded(), { type: 'request', id: 2 }), {
+  const s = reduce(reduce(loaded(), { type: 'request', id: 2, fresh: true }), {
     type: 'failed',
     id: 2,
     error: 'no-weeks',
@@ -129,7 +129,12 @@ test('a fresh import failing with no-weeks clears the PREVIOUS export, not just 
 
 test('every other fresh failure clears the same way — the rule is fresh, not the error code', () => {
   for (const error of ['parse-failed', 'unmapped-location', 'not-csv', 'send-failed'] as const) {
-    const s = reduce(reduce(loaded(), { type: 'request', id: 2 }), { type: 'failed', id: 2, error, fresh: true });
+    const s = reduce(reduce(loaded(), { type: 'request', id: 2, fresh: true }), {
+      type: 'failed',
+      id: 2,
+      error,
+      fresh: true,
+    });
     assert.equal(s.data, null, `${error} left the previous payload rendered`);
     assert.equal(s.files, null, `${error} left the previous corpus retained`);
     assert.equal(s.cellOv.size, 0, `${error} left overrides behind`);
@@ -139,7 +144,7 @@ test('every other fresh failure clears the same way — the rule is fresh, not t
 test('a WEEK-NAVIGATION failure keeps the loaded export — a different case, deliberately', () => {
   // The corpus is still valid; only the hop failed. Overrides and files must survive, or a
   // biller loses their work to a transient error on a week they were only passing through.
-  const s = reduce(reduce(loaded(), { type: 'request', id: 2 }), {
+  const s = reduce(reduce(loaded(), { type: 'request', id: 2, fresh: false }), {
     type: 'failed',
     id: 2,
     error: 'no-weeks',
@@ -153,7 +158,7 @@ test('a WEEK-NAVIGATION failure keeps the loaded export — a different case, de
 });
 
 test('a week change PRESERVES overrides — they are week-keyed, so they are already scoped', () => {
-  const s = reduce(reduce(loaded(), { type: 'request', id: 2 }), {
+  const s = reduce(reduce(loaded(), { type: 'request', id: 2, fresh: false }), {
     type: 'applied',
     id: 2,
     payload: makePayload({ selectedWeek: WEEK_B }),
@@ -165,7 +170,7 @@ test('a week change PRESERVES overrides — they are week-keyed, so they are alr
 });
 
 test('a SUCCESSFUL fresh import clears overrides and the drawer — row ids are per-import ordinals', () => {
-  const s = reduce(reduce(loaded(), { type: 'request', id: 2 }), {
+  const s = reduce(reduce(loaded(), { type: 'request', id: 2, fresh: true }), {
     type: 'applied',
     id: 2,
     payload: NEW,
@@ -176,4 +181,86 @@ test('a SUCCESSFUL fresh import clears overrides and the drawer — row ids are 
   assert.equal(s.statusOv.size, 0);
   assert.equal(s.target, null);
   assert.equal(s.data, NEW);
+});
+
+/* ═══ QODO REVIEW OF THIS PR — three transitions the first draft got wrong ════════════════
+ * All three are the same class again: state surviving a boundary it was only valid inside.
+ * ════════════════════════════════════════════════════════════════════════════════════════ */
+
+test('a fresh request discards the loaded export IMMEDIATELY, not when it resolves', () => {
+  // Qodo 1. The first draft cleared on the RESPONSE, so for the whole round trip the tab showed
+  // the previous export's clients and totals beneath a "Parsing…" button — which reads as the
+  // state of the import now running. The end state was always the same; only this window differed.
+  const s = reduce(loaded(), { type: 'request', id: 2, fresh: true });
+
+  assert.notEqual(s.data, OLD, 'the previous export is still on screen while its replacement loads');
+  assert.equal(s.data, null);
+  assert.equal(s.files, null);
+  assert.equal(s.cellOv.size, 0);
+  assert.equal(s.statusOv.size, 0);
+  assert.equal(s.target, null, 'the drawer is still open on a client from the export being replaced');
+  assert.equal(s.busy, true, 'the request must still be in flight');
+});
+
+test('a WEEK-NAVIGATION request leaves the loaded export alone while it loads', () => {
+  // The other half: a week hop must NOT blank the grid. Without this, the assertions above would
+  // also pass if `request` cleared unconditionally.
+  const s = reduce(loaded(), { type: 'request', id: 2, fresh: false });
+  assert.equal(s.data, OLD, 'a week hop blanked the grid it was navigating within');
+  assert.equal(s.files, oldFiles);
+  assert.equal(s.cellOv.size, 1);
+  assert.equal(s.busy, true);
+});
+
+test('a stale response cannot resurrect an export a newer fresh request already discarded', () => {
+  // The two fixes composed: request 2 clears, then request 1 — issued earlier, still in flight —
+  // comes back. Dropping it is the only thing standing between the user and the export they
+  // explicitly replaced reappearing under the new import's error.
+  const s = run(
+    { type: 'request', id: 1, fresh: true },
+    { type: 'applied', id: 1, payload: OLD, files: oldFiles, fresh: true },
+    { type: 'request', id: 2, fresh: true },
+    { type: 'applied', id: 1, payload: OLD, files: oldFiles, fresh: true },
+  );
+  assert.notEqual(s.data, OLD, 'the discarded export came back after its replacement was issued');
+  assert.equal(s.data, null);
+  assert.equal(s.files, null);
+});
+
+test('a failed week hop keeps the export for EVERY error code, not just no-weeks', () => {
+  // Qodo 2. The first draft inherited `error !== 'no-weeks' -> clear` from the pre-reducer code,
+  // which left `files` and the override maps retained while `data` went null: a corpus with no
+  // grid, no week selector and no way back. Re-posting the SAME files cannot invalidate a corpus
+  // that already parsed.
+  for (const error of ['parse-failed', 'send-failed', 'unauthorized', 'unmapped-location'] as const) {
+    const s = reduce(reduce(loaded(), { type: 'request', id: 2, fresh: false }), {
+      type: 'failed',
+      id: 2,
+      error,
+      fresh: false,
+    });
+    assert.equal(s.data, OLD, `a failed week hop (${error}) discarded the loaded export`);
+    assert.equal(s.files, oldFiles, `${error} left a corpus the user can no longer reach`);
+    assert.equal(s.cellOv.size, 1, `${error} orphaned the overrides`);
+    assert.equal(s.error, error);
+    assert.equal(s.busy, false);
+  }
+});
+
+test('a successful week change CLOSES the drawer — its row belongs to the previous payload', () => {
+  // Qodo 3. The drawer holds a whole row captured on open, while its billable-day count is
+  // recomputed from the CURRENT selectedWeek — so a retained target renders one week's sessions
+  // beside another week's count. Reachable because grid cells stay interactive while busy: open
+  // a drawer after a week hop is issued and before it lands.
+  const s = reduce(reduce(loaded(), { type: 'request', id: 2, fresh: false }), {
+    type: 'applied',
+    id: 2,
+    payload: makePayload({ selectedWeek: WEEK_B }),
+    files: oldFiles,
+    fresh: false,
+  });
+  assert.equal(s.target, null, 'the drawer survived a week change holding the old week row');
+  // ...and the week-scoped work it navigated to is still there, which is the point of keeping it.
+  assert.equal(s.cellOv.size, 1);
+  assert.equal(s.data?.selectedWeek, WEEK_B);
 });

@@ -24,12 +24,30 @@
  *
  * ── FRESH vs. WEEK NAVIGATION (Qodo 7) ─────────────────────────────────────────────────────
  * `fresh` distinguishes "the user picked a new export" from "the user changed week on the
- * export already loaded". They fail differently ON PURPOSE:
- *   - fresh   → the previous export is GONE the moment its replacement is attempted. Any
- *               failure clears data, files, overrides and the drawer. Showing an error for the
- *               new export beside the old export's clients and totals is the worst of both.
- *   - !fresh  → the loaded export is still valid; a failed week hop keeps it. `no-weeks` in
- *               particular is a statement about the requested WEEK, not about the corpus.
+ * export already loaded". They behave differently ON PURPOSE:
+ *   - fresh   → the previous export is gone at the moment its replacement is ATTEMPTED, not
+ *               when the attempt resolves. `request` itself clears data, files, overrides and
+ *               the drawer. An earlier draft cleared them only on the response, which left the
+ *               old clients and totals rendered under a "Parsing…" button for the whole round
+ *               trip — read on screen as the state of the import now running (Qodo review of
+ *               this PR, finding 1). The end state was always the same; only the window
+ *               differed, so closing it costs nothing.
+ *   - !fresh  → the loaded export is still valid and a failed week hop KEEPS it, whatever the
+ *               error code. That first shipped as "keeps it unless the error is `no-weeks`",
+ *               inherited from the pre-reducer code, and it was incoherent: `files` and the
+ *               override maps survived while `data` did not, so a transient `send-failed` on a
+ *               week hop left a corpus the user could no longer reach — no grid, no week
+ *               selector, no way back (Qodo review of this PR, finding 2). Re-posting the SAME
+ *               files cannot invalidate a corpus that already parsed.
+ *
+ * ── THE DRAWER TARGET BELONGS TO ONE PAYLOAD ───────────────────────────────────────────────
+ * `applied` clears `target` on EVERY response, not only a fresh one. The drawer holds a whole
+ * `KipuRowDTO` captured when it opened, while its billable-day count is recomputed from the
+ * CURRENT `data.selectedWeek` — so a target that outlived a week change would render one week's
+ * sessions beside another week's count, with the override lookup landing on the new week's keys
+ * (Qodo review of this PR, finding 3). It is reachable: grid cells stay interactive while a
+ * request is in flight, so a drawer can be opened after a week hop is issued and before it
+ * lands. There is nothing to preserve — the row on screen is the old week's.
  *
  * ── SCOPE KEYS ARE NOT THIS MODULE'S JOB ───────────────────────────────────────────────────
  * Override keys carry their week (see `overrides.ts`); this reducer stores whatever key it is
@@ -66,7 +84,7 @@ export interface ImportState {
 }
 
 export type ImportAction =
-  | { readonly type: 'request'; readonly id: number }
+  | { readonly type: 'request'; readonly id: number; readonly fresh: boolean }
   | {
       readonly type: 'applied';
       readonly id: number;
@@ -108,8 +126,9 @@ export function importReducer(s: ImportState, a: ImportAction): ImportState {
   switch (a.type) {
     case 'request':
       // Claims the token. Ids come from a monotonic counter in the panel, so this only ever
-      // moves forward and every response issued before now is now stale.
-      return { ...s, seq: a.id, busy: true, error: null };
+      // moves forward and every response issued before now is now stale. A FRESH request also
+      // invalidates the loaded export immediately — see the header.
+      return { ...s, ...(a.fresh ? CLEARED : null), seq: a.id, busy: true, error: null };
 
     case 'applied':
       if (a.id !== s.seq) return s;
@@ -119,15 +138,21 @@ export function importReducer(s: ImportState, a: ImportAction): ImportState {
         error: null,
         data: a.payload,
         files: a.files,
-        ...(a.fresh ? { cellOv: NO_CELLS, statusOv: NO_STATUSES, target: null } : null),
+        // The drawer is closed by EVERY applied response — its row belongs to the payload being
+        // replaced. Overrides are week-keyed, so only a fresh import invalidates them.
+        target: null,
+        ...(a.fresh ? { cellOv: NO_CELLS, statusOv: NO_STATUSES } : null),
       };
 
     case 'failed':
       if (a.id !== s.seq) return s;
+      // Redundant for a fresh request — `request` already cleared — and kept deliberately, so
+      // the failure transition states the whole post-condition instead of relying on a caller
+      // having dispatched the matching `request`.
       if (a.fresh) return { ...s, ...CLEARED, busy: false, error: a.error };
-      // Week navigation: the loaded export is untouched by a failed hop. `no-weeks` says the
-      // requested week is empty, which is not a reason to discard the corpus either.
-      return { ...s, busy: false, error: a.error, data: a.error === 'no-weeks' ? s.data : null };
+      // Week navigation: the loaded export survives a failed hop, whatever went wrong. The
+      // corpus behind it already parsed; re-posting the same files cannot unmake that.
+      return { ...s, busy: false, error: a.error };
 
     case 'set-cell': {
       const next = new Map(s.cellOv);
