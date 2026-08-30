@@ -285,7 +285,9 @@ Follow `.claude/rules/collections-crons.md` + `sql-migrations.md`:
   `kipu_patient_eval` (+ template allowlist and field map), `kipu_utilization_review`,
   `kipu_care_level`, `kipu_location_map`, and the three decision tables
   (`billable_day_override`, `billable_week_writeoff`, `billable_week_billed`) with actor + timestamp.
-- **Tests** hermetic `node:test` only; the gate is all five commands, floors ≥1439 root / ≥831 app.
+- **Tests** hermetic `node:test` only; the gate is all five commands. Floors live in CLAUDE.md's
+  *Verification gate* and are re-measured there — this line used to name ≥1439 / ≥831, which were
+  447 root and 207 app tests low within three weeks. Do not copy the numbers back here.
 
 ### 6.4 Rules engine placement
 
