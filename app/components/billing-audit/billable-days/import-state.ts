@@ -40,22 +40,6 @@
  *               selector, no way back (Qodo review of this PR, finding 2). Re-posting the SAME
  *               files cannot invalidate a corpus that already parsed.
  *
- * ── THE GRID FILTERS BELONG TO ONE EXPORT, NOT TO THE TAB ──────────────────────────────────
- * `locFilter` and `facFilter` are held here rather than as local component state because their
- * VALID VALUES come from the loaded payload: `locOptions` and `facilityOptions` are built from
- * `build.clients` / `build.facilities`, i.e. from the whole EXPORT. Left as plain `useState`
- * they survived a replacement import, and a level of care or location that the new export does
- * not contain silently matches nothing — so the grid renders "No clients with counted hours in
- * this week", which reads as a statement about the DATA and is wrong. The user is shown an
- * empty week caused by their own stale filter, with the control that caused it scrolled off.
- *
- * They are deliberately NOT cleared on a week change: the option lists are per-export, so every
- * value stays valid across a week hop and discarding a filter there would be gratuitous. Same
- * fresh/not-fresh split as everything else in this file.
- *
- * `segment`, `revealed` and `dragging` stay local in the panel on purpose — their vocabularies
- * are fixed in code, so no payload can invalidate them.
- *
  * ── THE DRAWER TARGET BELONGS TO ONE PAYLOAD ───────────────────────────────────────────────
  * `applied` clears `target` on EVERY response, not only a fresh one. The drawer holds a whole
  * `KipuRowDTO` captured when it opened, while its billable-day count is recomputed from the
@@ -97,10 +81,6 @@ export interface ImportState {
   readonly cellOv: CellOverrides;
   readonly statusOv: StatusOverrides;
   readonly target: DrawerTarget | null;
-  /** Level-of-care filter. `''` = all. Valid only against the loaded payload's `locOptions`. */
-  readonly locFilter: string;
-  /** Location filter. `''` = all. Valid only against the loaded payload's `facilityOptions`. */
-  readonly facFilter: string;
 }
 
 export type ImportAction =
@@ -116,7 +96,6 @@ export type ImportAction =
   | { readonly type: 'set-cell'; readonly key: string; readonly codes: readonly string[] | null }
   | { readonly type: 'set-status'; readonly key: string; readonly status: WeekStatus | null }
   | { readonly type: 'clear-overrides' }
-  | { readonly type: 'set-filter'; readonly filter: 'loc' | 'fac'; readonly value: string }
   | { readonly type: 'open-drawer'; readonly target: DrawerTarget }
   | { readonly type: 'close-drawer' };
 
@@ -132,8 +111,6 @@ export const initialImportState: ImportState = {
   cellOv: NO_CELLS,
   statusOv: NO_STATUSES,
   target: null,
-  locFilter: '',
-  facFilter: '',
 };
 
 /** Everything a replacement import invalidates. The previous export is gone, not merely hidden. */
@@ -143,8 +120,6 @@ const CLEARED = {
   cellOv: NO_CELLS,
   statusOv: NO_STATUSES,
   target: null,
-  locFilter: '',
-  facFilter: '',
 } as const;
 
 export function importReducer(s: ImportState, a: ImportAction): ImportState {
@@ -166,12 +141,7 @@ export function importReducer(s: ImportState, a: ImportAction): ImportState {
         // The drawer is closed by EVERY applied response — its row belongs to the payload being
         // replaced. Overrides are week-keyed, so only a fresh import invalidates them.
         target: null,
-        // Redundant after a fresh `request`, which already cleared all four, and kept for the
-        // same reason the `failed` branch keeps its CLEARED: the transition states its whole
-        // post-condition rather than depending on a caller having dispatched the matching
-        // `request`. It cannot discard a live selection, because the controls that set these
-        // unmount with the grid while `data` is null — see billableDaysImportState.test.tsx.
-        ...(a.fresh ? { cellOv: NO_CELLS, statusOv: NO_STATUSES, locFilter: '', facFilter: '' } : null),
+        ...(a.fresh ? { cellOv: NO_CELLS, statusOv: NO_STATUSES } : null),
       };
 
     case 'failed':
@@ -200,9 +170,6 @@ export function importReducer(s: ImportState, a: ImportAction): ImportState {
 
     case 'clear-overrides':
       return { ...s, cellOv: NO_CELLS, statusOv: NO_STATUSES };
-
-    case 'set-filter':
-      return a.filter === 'loc' ? { ...s, locFilter: a.value } : { ...s, facFilter: a.value };
 
     case 'open-drawer':
       return { ...s, target: a.target };

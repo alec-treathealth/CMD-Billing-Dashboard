@@ -104,8 +104,6 @@ const loaded = (): ImportState =>
     { type: 'set-cell', key: `${WEEK_A}|row-OLD:1`, codes: ['G'] },
     { type: 'set-status', key: `${WEEK_A}|row-OLD`, status: 'NEEDS BILLED' },
     { type: 'open-drawer', target: { row: OLD.rows[0]!, dayIndex: 0 } },
-    { type: 'set-filter', filter: 'loc', value: 'SYNTHETIC IOP' },
-    { type: 'set-filter', filter: 'fac', value: 'SYNTHETIC IOP' },
   );
 
 test('a fresh import failing with no-weeks clears the PREVIOUS export, not just the error line', () => {
@@ -265,72 +263,4 @@ test('a successful week change CLOSES the drawer — its row belongs to the prev
   // ...and the week-scoped work it navigated to is still there, which is the point of keeping it.
   assert.equal(s.cellOv.size, 1);
   assert.equal(s.data?.selectedWeek, WEEK_B);
-});
-
-/* ═══ THE GRID FILTERS ARE EXPORT-SCOPED, NOT TAB-SCOPED ═════════════════════════════════
- * `locOptions` / `facilityOptions` are built from the whole EXPORT (`build.clients` and
- * `build.facilities` in kipu-import.ts), so a filter is valid for every week of the export it
- * was chosen in — and for no other export.
- * ════════════════════════════════════════════════════════════════════════════════════════ */
-
-test('a replacement import clears the grid filters — a stale one renders a FALSE empty week', () => {
-  // The visible symptom is the point: an unmatched filter shows "No clients with counted hours
-  // in this week", which reads as a statement about the data and is wrong. The user is shown an
-  // empty week caused by their own stale control.
-  const s = reduce(loaded(), { type: 'request', id: 2, fresh: true });
-  assert.notEqual(s.locFilter, 'SYNTHETIC IOP', 'a level-of-care filter survived a new import');
-  assert.notEqual(s.facFilter, 'SYNTHETIC IOP', 'a location filter survived a new import');
-  assert.equal(s.locFilter, '');
-  assert.equal(s.facFilter, '');
-});
-
-test('a fresh import that FAILS clears them too — nothing valid is left to filter', () => {
-  const s = reduce(reduce(loaded(), { type: 'request', id: 2, fresh: true }), {
-    type: 'failed',
-    id: 2,
-    error: 'parse-failed',
-    fresh: true,
-  });
-  assert.equal(s.locFilter, '');
-  assert.equal(s.facFilter, '');
-});
-
-test('a WEEK CHANGE keeps them — the option lists are per-export, so they stay valid', () => {
-  // Clearing here would be gratuitous: every value the user could have picked is still offered
-  // by the new payload, because both option lists come from the export rather than the week.
-  const s = reduce(reduce(loaded(), { type: 'request', id: 2, fresh: false }), {
-    type: 'applied',
-    id: 2,
-    payload: makePayload({ selectedWeek: WEEK_B }),
-    files: oldFiles,
-    fresh: false,
-  });
-  assert.equal(s.locFilter, 'SYNTHETIC IOP', 'a week hop discarded a filter that is still valid');
-  assert.equal(s.facFilter, 'SYNTHETIC IOP');
-});
-
-test('a filter changed DURING a week hop survives the response that lands', () => {
-  // This is the reachable in-flight case, and the only one. During a fresh import the two
-  // selects unmount with the grid (they sit inside `{data && …}` and a fresh request nulls
-  // `data`), so nothing can be picked. During a WEEK hop they stay mounted and are NOT
-  // disabled while busy — so a user can change the filter mid-request, and the arriving
-  // payload must not throw that away.
-  const s = run(
-    { type: 'request', id: 1, fresh: true },
-    { type: 'applied', id: 1, payload: OLD, files: oldFiles, fresh: true },
-    { type: 'request', id: 2, fresh: false },
-    { type: 'set-filter', filter: 'loc', value: 'PICKED-MID-HOP' },
-    { type: 'applied', id: 2, payload: makePayload({ selectedWeek: WEEK_B }), files: oldFiles, fresh: false },
-  );
-  assert.equal(s.locFilter, 'PICKED-MID-HOP', 'the week response undid a live selection');
-});
-
-test('each filter moves independently — one setter must not clobber the other', () => {
-  const s = run(
-    { type: 'request', id: 1, fresh: true },
-    { type: 'set-filter', filter: 'loc', value: 'A' },
-    { type: 'set-filter', filter: 'fac', value: 'B' },
-  );
-  assert.equal(s.locFilter, 'A');
-  assert.equal(s.facFilter, 'B');
 });
