@@ -64,6 +64,16 @@
  * this script parse an episode route, it stops being safe to run casually — write a new
  * probe instead of widening this one.
  *
+ * ⚠ THAT INSTRUCTION WAS FOLLOWED, AND IT IS WHY SEVEN HELPERS BELOW ARE `export`ed.
+ * `scripts/probe-kipu-group-sessions.ts` (added 2026-08-30) probes the PHI-BEARING
+ * `/api/group_sessions` route, so it is a SEPARATE file rather than a mode of this one —
+ * exactly as the paragraph above demands. It imports `creds`, `signedUri`, `signedGet`,
+ * `maskUri`, `fingerprint`, `explainStatus` and `classifyKnownError` from here so there is
+ * ONE signer, ONE credential validator and ONE redactor in the repo. The export keywords
+ * are load-bearing for that import; they are not leftovers, and removing one silently
+ * breaks a sibling that `npm test` does not run. The signer itself stays pinned by the
+ * hermetic `test/kipuSignature.test.ts`, which is what makes sharing it safe.
+ *
  *   npx tsx --env-file=.env scripts/probe-kipu-locations.ts          # dry run, no network
  *   npx tsx --env-file=.env scripts/probe-kipu-locations.ts --live   # the two GETs
  *   npx tsx --env-file=.env scripts/probe-kipu-locations.ts --live --json
@@ -102,7 +112,7 @@ const AS_JSON = process.argv.includes('--json');
 const DIAGNOSE = process.argv.includes('--diagnose');
 const EXPLAIN = process.argv.includes('--explain');
 
-type Creds = { accessId: string; secretKey: string; appId: string };
+export type Creds = { accessId: string; secretKey: string; appId: string };
 
 /**
  * Resolve the FIRST of `names` that is set, returning the NAME alongside the value.
@@ -126,7 +136,7 @@ export function pickEnv(
   return { name: names[0]!, value: undefined, tried: names };
 }
 
-function creds(): Creds {
+export function creds(): Creds {
   // KIPU_TREAT_* is the current per-INSTANCE spelling; the unprefixed names are the
   // pre-2026-08-26 globals, kept as a fallback so an older .env still probes.
   // ⚠ All three must come from the SAME Kipu instance. A triple assembled from two
@@ -222,7 +232,7 @@ export function kipuSignature(secretKey: string | Buffer, requestUri: string, da
  * `signatureOverride` exists ONLY for the --diagnose discriminator, which needs to send a
  * deliberately-wrong signature. It is never used on a normal call.
  */
-interface SignOpts {
+export interface SignOpts {
   /** Send this signature instead of the computed one (control B). */
   signatureOverride?: string;
   /** HMAC with this key material instead of the secret string (controls D and F). */
@@ -235,7 +245,7 @@ interface SignOpts {
   accessIdOverride?: string;
 }
 
-function signedUri(c: Creds, requestUri: string, acceptVersion: 3 | 4, opts: SignOpts = {}) {
+export function signedUri(c: Creds, requestUri: string, acceptVersion: 3 | 4, opts: SignOpts = {}) {
   const date = new Date().toUTCString(); // RFC 1123, e.g. "Thu, 21 Aug 2026 04:35:00 GMT"
   const signature = opts.signatureOverride ?? kipuSignature(opts.keyOverride ?? c.secretKey, requestUri, date);
   const accessId = opts.accessIdOverride ?? c.accessId;
@@ -252,7 +262,7 @@ function signedUri(c: Creds, requestUri: string, acceptVersion: 3 | 4, opts: Sig
   };
 }
 
-function signedGet(c: Creds, path: string, extraQuery: string[], acceptVersion: 3 | 4) {
+export function signedGet(c: Creds, path: string, extraQuery: string[], acceptVersion: 3 | 4) {
   const query = [`app_id=${encodeURIComponent(c.appId)}`, ...extraQuery].join('&');
   return signedUri(c, `${path}?${query}`, acceptVersion);
 }
@@ -263,12 +273,12 @@ function signedGet(c: Creds, path: string, extraQuery: string[], acceptVersion: 
  * app_id is an identifier that travels in the clear as a query param, not a secret like
  * secret_key — but it still does not belong in a shared terminal or a pasted log.
  */
-function fingerprint(v: string): string {
+export function fingerprint(v: string): string {
   return `len=${v.length} last4=…${v.slice(-4)} md5_8=${createHash('md5').update(v).digest('hex').slice(0, 8)}`;
 }
 
 /** Mask the app_id value inside a request_uri before it is ever printed. */
-function maskUri(uri: string): string {
+export function maskUri(uri: string): string {
   const masked = uri.replace(/app_id=[^&]*/g, 'app_id=[REDACTED]');
   // ⚠ FAIL CLOSED, because String.replace FAILS OPEN. It returns its input UNCHANGED when
   // the pattern does not match, so a URI whose app_id is shaped unexpectedly would be
@@ -328,7 +338,7 @@ export function classifyKnownError(body: string): string | null {
   return null;
 }
 
-function explainStatus(status: number): string {
+export function explainStatus(status: number): string {
   if (status === 200) return 'OK';
   if (status === 401) return 'SIGNING — the signed request_uri did not match what was sent (never retry; fix the canonical string)';
   if (status === 403)
