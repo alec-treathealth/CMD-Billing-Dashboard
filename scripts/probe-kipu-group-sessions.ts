@@ -42,10 +42,24 @@
  *
  * CALL BUDGET — AT MOST 3 GETs, no retries. "No sessions" and "endpoint broken" are
  * different answers, so the windows ESCALATE and stop at the first non-empty result:
- *   1. one recent full Mon-Sun week, scoped to --location
- *   2. the same week widened to four weeks, same location
- *   3. four weeks with NO location_id — the control that separates "this location ran no
- *      groups" from "this route returns nothing for anybody"
+ *   1. one recent full Mon-Sun week (or --weeks of them), scoped to --location
+ *   2. widened to the EARLIER of that start and four weeks back, same location
+ *   3. the same widened window with NO location_id — the control that separates "this
+ *      location ran no groups" from "this route returns nothing for anybody"
+ *
+ * ESCALATION IS DRIVEN BY `Outcome`, NOT BY STATUS. Only a CONFIRMED empty (a session array
+ * was located and had no rows) widens the window; an INDETERMINATE 200 is a contract
+ * problem that a wider window cannot fix. Step 2 is skipped when --weeks already covers the
+ * widen floor, because a subset of a window just proven empty is a guaranteed-empty call.
+ *
+ * ⚠ IT READS PAGE 1 ONLY (`per=100`), AND SAYS SO WHEN THAT MATTERS. Whole-window verdicts
+ * — "empty on every row", "constant" — are WITHHELD when `pagination.total_records` exceeds
+ * the rows read, because a value that would disprove them may sit on a later page. Narrow
+ * the window until it fits one page rather than trusting a truncated verdict.
+ *
+ * ⚠ REGRESSION DETECTION IS UNSUPPORTED. `EMPTY` means empty in this window on this run. The
+ * probe persists nothing — no database connection of any kind, by design — so it cannot
+ * distinguish an always-empty source from one that regressed to zero. See `Outcome`.
  *
  * GET only. No writes to Kipu, no database connection of any kind.
  *
@@ -121,14 +135,33 @@ const BILLING_FIELDS = [
   'status',
 ] as const;
 
+/**
+ * Identity/scheduling fields whose VALUE is safe to print: machine-generated timestamps
+ * and a numeric id. Nothing here is operator- or clinician-authored.
+ */
 const IDENTITY_FIELDS = [
   'session_start_time',
   'session_end_time',
   'group_session_title',
-  'group_session_topic',
-  'group_leader_full_name',
   'location_id',
 ] as const;
+
+/**
+ * ⚠ FIELDS WHOSE VALUE IS NEVER PRINTED — only their SHAPE (Qodo finding 1, "reportShape
+ * logs free-text fields"). These are clinician-authored free text on a PHI-bearing route,
+ * and a diagnostic's output exists to be pasted into a ticket.
+ *
+ * The value buys NOTHING here. The finding this probe produces is "these fields are
+ * populated", not what they say — so presence, length and character class carry the entire
+ * diagnostic payload at none of the risk.
+ *
+ *   group_session_topic     clinician free text. A group is multi-patient so a topic naming
+ *                           one patient is unlikely, but "unlikely" is not the standard this
+ *                           repo uses, and nothing stops someone typing a name in.
+ *   group_leader_full_name  not PHI — staff, not a patient — but it is a named real person
+ *                           and printing it is equally unnecessary. Presence, not value.
+ */
+const SHAPE_ONLY_FIELDS = ['group_session_topic', 'group_leader_full_name'] as const;
 
 /**
  * Is a value PRESENT in the sense that matters here? `null`, `undefined`, `''`, `[]` and
@@ -157,11 +190,59 @@ function describe(v: unknown): string {
   return String(v);
 }
 
+/**
+ * A NON-REVERSIBLE description of a string: is it there, how long, and which character
+ * CLASSES it draws from. Enough to tell a template ("alpha space punct", long, no digits)
+ * from a scrap of free text, and never enough to reconstruct a word of it.
+ *
+ * Deliberately reports classes, not counts-per-class: a per-character histogram of a short
+ * string starts leaking the string back.
+ */
+function shapeOf(v: unknown): string {
+  if (v === null) return 'null';
+  if (v === undefined) return '(absent)';
+  if (typeof v !== 'string') return `(non-string: ${typeof v})`;
+  if (v.trim().length === 0) return "'' (EMPTY)";
+  const classes: string[] = [];
+  if (/[A-Za-z]/.test(v)) classes.push('alpha');
+  if (/[0-9]/.test(v)) classes.push('digit');
+  if (/\s/.test(v)) classes.push('space');
+  if (/[^A-Za-z0-9\s]/.test(v)) classes.push('punct');
+  return `populated, len=${v.length}, classes=[${classes.join(',')}]  [VALUE WITHHELD]`;
+}
+
+/**
+ * How a single window turned out. `sessionCount` alone could not carry this: a malformed
+ * 200 and a genuinely empty one both used to arrive as "not more than zero", and the final
+ * verdict then read a broken payload as a SCOPE problem (Qodo finding 3).
+ *
+ *   POPULATED      200, a session array was located, and it has rows.
+ *   EMPTY          200, a session array was LOCATED, and it is empty. The only outcome that
+ *                  licenses the words "no sessions".
+ *   INDETERMINATE  200, but the body did not parse or no array could be located. This is a
+ *                  CONTRACT problem, never an emptiness claim.
+ *   NON_200 / TRANSPORT_ERROR  self-explanatory; neither is evidence about contents.
+ *
+ * ⚠ REGRESSION DETECTION IS OUT OF SCOPE AND UNSUPPORTED (Qodo finding 2). `EMPTY` means
+ * "empty in this window, on this run". It CANNOT distinguish a window that was always empty
+ * from one that regressed to zero since a previous run, because this probe persists nothing
+ * — no database connection of any kind, by design, which is what keeps it read-only and
+ * safe to run casually. Answering that question needs a stored prior result, and storing one
+ * would make this a stateful job rather than a diagnostic. If you need it, compare two
+ * recorded runs by hand.
+ */
+type Outcome = 'POPULATED' | 'EMPTY' | 'INDETERMINATE' | 'NON_200' | 'TRANSPORT_ERROR';
+
 interface WindowResult {
+  outcome: Outcome;
+  /** Rows ACTUALLY READ. Not the window total when the window is paged — see `complete`. */
+  rowsRead: number | null;
+  /** `pagination.total_records`, or null when the envelope did not carry one. */
+  totalRecords: number | null;
+  /** False when page 1 is a TRUNCATION of the window: no whole-window claim is licensed. */
+  complete: boolean;
   label: string;
   status: number;
-  sessionCount: number | null;
-  transportError?: boolean;
 }
 
 /**
@@ -214,7 +295,7 @@ async function probeWindow(
   } catch (e) {
     // A transport failure is NOT a verdict — flag it so two failures never compare equal.
     console.log(`  status : n/a (transport error: ${e instanceof Error ? e.message : 'unknown'})`);
-    return { label, status: 0, sessionCount: null, transportError: true };
+    return { label, status: 0, outcome: 'TRANSPORT_ERROR', rowsRead: null, totalRecords: null, complete: false };
   }
   const ms = Date.now() - t0;
   console.log(`  status : HTTP ${status} ${explainStatus(status)}   (${ms}ms, ${raw.byteLength} bytes)`);
@@ -225,15 +306,18 @@ async function probeWindow(
     // about its contents — the allowlist can only ever confirm a string we already knew.
     const known = classifyKnownError(new TextDecoder().decode(raw));
     console.log(`  body   : [WITHHELD — PHI-bearing route] ${known ? `matched: ${known}` : 'unrecognised (contents not printed)'}`);
-    return { label, status, sessionCount: null };
+    return { label, status, outcome: 'NON_200', rowsRead: null, totalRecords: null, complete: false };
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(new TextDecoder().decode(raw));
   } catch {
-    console.log('  ⚠ 200 but the body is not JSON. Contents withheld (PHI-bearing route).');
-    return { label, status, sessionCount: null };
+    // ⚠ INDETERMINATE, NOT EMPTY. An unparseable 200 says nothing about how many sessions
+    // exist; reporting it as zero sends an operator to diagnose SCOPE when the real problem
+    // is the payload (Qodo finding 3).
+    console.log('  ⚠ 200 but the body is not JSON — INDETERMINATE. Contents withheld (PHI-bearing route).');
+    return { label, status, outcome: 'INDETERMINATE', rowsRead: null, totalRecords: null, complete: false };
   }
 
   console.log(`  top-level keys: ${Object.keys(parsed as object).join(', ') || '(none)'}`);
@@ -242,34 +326,68 @@ async function probeWindow(
   // an inference and the envelope is evidence.
   const pg = (parsed as Record<string, unknown>)['pagination'];
   if (pg && typeof pg === 'object') console.log(`  pagination    : ${JSON.stringify(pg)}`);
+  // ⚠ KIPU RETURNS THESE AS STRINGS — "total_records":"16", "total_pages":"1" — while
+  // `current_page` is a number. Coerce explicitly; a `Number.isSafeInteger` guard applied
+  // to the raw value rejects every one of them. Same trap as node-pg's int8 handling.
+  const totalRaw = pg && typeof pg === 'object' ? (pg as Record<string, unknown>)['total_records'] : undefined;
+  const totalRecords = Number.isFinite(Number(totalRaw)) && totalRaw !== null && totalRaw !== ''
+    ? Number(totalRaw)
+    : null;
+
   const found = findSessions(parsed);
   if (!found) {
-    console.log('  ⚠ 200 but NO array anywhere in the envelope — zero sessions and no list to read.');
-    return { label, status, sessionCount: 0 };
+    // ⚠ INDETERMINATE, NOT EMPTY (Qodo finding 3). "No array in the envelope" is a broken or
+    // changed contract. Calling it zero sessions collapses a contract error into a data fact.
+    console.log('  ⚠ 200 but NO array anywhere in the envelope — INDETERMINATE, not empty.');
+    return { label, status, outcome: 'INDETERMINATE', rowsRead: null, totalRecords, complete: false };
   }
-  console.log(`  session array : "${found.key}"  ->  ${found.rows.length} session(s)`);
-  if (found.rows.length === 0) return { label, status, sessionCount: 0 };
+  const rowsRead = found.rows.length;
+  console.log(`  session array : "${found.key}"  ->  ${rowsRead} session(s) READ`);
 
-  reportShape(found.rows);
-  return { label, status, sessionCount: found.rows.length };
+  // ⚠ PAGE 1 ONLY (Qodo finding 4). Every call sends `page=1&per=100`, so a window holding
+  // more than 100 sessions arrives TRUNCATED — and a truncated sample cannot support
+  // "empty on every row" or "constant". Completeness is read from the envelope, never
+  // inferred from `rowsRead < per`, because that inference is what would be wrong.
+  const complete = totalRecords === null ? rowsRead < 100 : rowsRead >= totalRecords;
+  if (!complete) {
+    console.log(
+      `  ⚠ TRUNCATED: read ${rowsRead} of ${totalRecords ?? 'an unknown number of'} record(s) — ` +
+        'page 1 only. Whole-window verdicts are WITHHELD below.',
+    );
+  }
+  if (rowsRead === 0) return { label, status, outcome: 'EMPTY', rowsRead: 0, totalRecords, complete };
+
+  reportShape(found.rows, complete);
+  return { label, status, outcome: 'POPULATED', rowsRead, totalRecords, complete };
 }
 
-/** The actual deliverable: which fields arrived, and which arrived EMPTY. */
-function reportShape(rows: Record<string, unknown>[]): void {
+/**
+ * The actual deliverable: which fields arrived, and which arrived EMPTY.
+ *
+ * `complete` gates every WHOLE-WINDOW claim. When page 1 is a truncation, "empty on every
+ * row" and "constant" are unsupportable — the values that would disprove them may sit on
+ * page 2 — so those verdicts are downgraded to "in the rows read" rather than printed as
+ * facts about the window (Qodo finding 4).
+ */
+function reportShape(rows: Record<string, unknown>[], complete: boolean): void {
   const n = rows.length;
+  const scope = complete ? `all ${n} session(s)` : `the ${n} session(s) READ (page 1 of a TRUNCATED window)`;
   const allKeys = new Set<string>();
   for (const r of rows) for (const k of Object.keys(r)) allKeys.add(k);
 
-  console.log(`\n  ═══ FIELD PRESENCE across all ${n} session(s) ═══`);
+  console.log(`\n  ═══ FIELD PRESENCE across ${scope} ═══`);
   console.log(`  keys returned : ${[...allKeys].sort().join(', ')}`);
 
   const tally = (field: string) => {
     const present = rows.filter((r) => field in r).length;
     const populated = rows.filter((r) => isPopulated(r[field])).length;
     const verdict =
-      present === 0 ? 'ABSENT — key not returned at all'
-      : populated === 0 ? '⚠ PRESENT BUT EMPTY ON EVERY ROW — the care_levels hole'
-      : populated === n ? 'populated on every row'
+      present === 0 ? (complete ? 'ABSENT — key not returned at all' : 'absent from the rows read (window truncated)')
+      : populated === 0
+        ? complete
+          ? '⚠ PRESENT BUT EMPTY ON EVERY ROW — the care_levels hole'
+          : '⚠ empty on every row READ — NOT a whole-window verdict (truncated)'
+      : populated === n ? (complete ? 'populated on every row' : 'populated on every row read')
       : `populated on ${populated}/${n}`;
     console.log(`    ${field.padEnd(24)} key on ${String(present).padStart(3)}/${n}, value on ${String(populated).padStart(3)}/${n}   ${verdict}`);
   };
@@ -309,7 +427,10 @@ function reportShape(rows: Record<string, unknown>[]): void {
       counts.set(k, (counts.get(k) ?? 0) + 1);
     }
     const spread = [...counts.entries()].map(([k, v]) => `${k}×${v}`).join('  ');
-    const verdict = counts.size <= 1 ? '  ⚠ CONSTANT — cannot discriminate' : '';
+    const verdict =
+      counts.size > 1 ? ''
+      : complete ? '  ⚠ CONSTANT — cannot discriminate'
+      : '  ⚠ constant in the rows READ — a differing value may sit on a later page';
     console.log(`    ${f.padEnd(24)} ${spread}${verdict}`);
   }
 
@@ -319,6 +440,21 @@ function reportShape(rows: Record<string, unknown>[]): void {
   for (const f of [...IDENTITY_FIELDS, ...BILLING_FIELDS]) {
     console.log(`    ${f.padEnd(24)} ${describe(sample[f])}`);
   }
+  // ⚠ VALUES WITHHELD, SHAPE ONLY — clinician free text and a staff name (Qodo finding 1).
+  // The diagnostic claim is "populated", and shape carries that in full.
+  console.log('\n  -- free-text fields: SHAPE ONLY, values never printed --');
+  for (const f of SHAPE_ONLY_FIELDS) {
+    console.log(`    ${f.padEnd(24)} ${shapeOf(sample[f])}`);
+  }
+  // ⚠ `group_session_title` IS PRINTED VERBATIM, AND THAT IS A RULING, NOT AN OVERSIGHT.
+  // Qodo finding 1 named it alongside the two above. Alec ruled 2026-08-30 that it keeps
+  // printing: it is a TEMPLATE assembled from the location container plus a fixed
+  // attestation sentence ("TX Group Session: The encounter occurred via real-time…"), and
+  // seeing it verbatim is what surfaced the attestation-suffix finding — the first live
+  // confirmation that src/kipu/locations.ts's stripping premise matches the API and not
+  // merely the CSV export. That is a real diagnostic use the other two do not have.
+  // If a title is ever observed carrying anything patient-authored, move it into
+  // SHAPE_ONLY_FIELDS — the shape report above already handles it with no other change.
 }
 
 async function main(): Promise<void> {
@@ -333,6 +469,14 @@ async function main(): Promise<void> {
   // window buys that answer for the SAME one call, rather than a second authentication.
   const weeks = Math.max(1, Number(argValue('weeks') ?? '1') || 1);
   const step1Start = addDays(weekStart, -7 * (weeks - 1));
+  // ⚠ THE FALLBACK MUST NEVER NARROW THE REQUESTED WINDOW (Qodo finding 5). The widen step
+  // was pinned at a fixed four weeks while step 1 accepts any --weeks, so `--weeks=8` made
+  // step 2 a strict SUBSET of a window already known to be empty — advertised as a
+  // "widening", guaranteed to return nothing, and spending an authentication to do it.
+  // Take the EARLIER of the two starts, and skip the step entirely when there is nothing
+  // left to widen to.
+  const widenStart = step1Start < fourWeekStart ? step1Start : fourWeekStart;
+  const canWiden = widenStart < step1Start;
 
   console.log('=== Kipu /api/group_sessions probe ===');
   console.log(`mode        : ${LIVE ? 'LIVE (up to 3 GETs, no retries)' : 'DRY RUN (no network)'}`);
@@ -341,7 +485,10 @@ async function main(): Promise<void> {
   console.log(`app_id      : ${fingerprint(c.appId)}`);
   console.log(`route       : GET /api/group_sessions   (Accept version=4)`);
   console.log(`location_id : ${location}`);
-  console.log(`week        : ${step1Start} .. ${weekEnd}   (${weeks} week(s); widens to ${fourWeekStart} .. ${weekEnd} if empty)`);
+  console.log(
+    `week        : ${step1Start} .. ${weekEnd}   (${weeks} week(s); ` +
+      `${canWiden ? `widens to ${widenStart} .. ${weekEnd} if empty` : 'already at/past the widen floor — step 2 skipped'})`,
+  );
   console.log('⚠ PHI: episodes[] is COUNTED, never printed. Non-200 bodies are withheld.');
 
   if (!LIVE) {
@@ -359,35 +506,60 @@ async function main(): Promise<void> {
   );
   results.push(step1);
 
-  // Escalate ONLY on an empty 200. A non-200 is already the answer; widening the window
-  // would spend another authentication to re-learn it.
-  if (step1.status === 200 && step1.sessionCount === 0) {
-    const step2 = await probeWindow(c, 'STEP 2 — widened to four weeks, same location', fourWeekStart, weekEnd, location);
+  // Escalate ONLY on a CONFIRMED empty result — outcome EMPTY, meaning a session array was
+  // located and had no rows. An INDETERMINATE 200 is a contract problem, and widening the
+  // window cannot fix a payload we could not read; a non-200 is already the answer.
+  if (step1.outcome === 'EMPTY' && canWiden) {
+    const step2 = await probeWindow(c, `STEP 2 — widened to ${widenStart}, same location`, widenStart, weekEnd, location);
     results.push(step2);
-    if (step2.status === 200 && step2.sessionCount === 0) {
-      const step3 = await probeWindow(c, 'STEP 3 — four weeks, NO location filter (global control)', fourWeekStart, weekEnd, null);
+    if (step2.outcome === 'EMPTY') {
+      const step3 = await probeWindow(c, 'STEP 3 — same widened window, NO location filter (global control)', widenStart, weekEnd, null);
       results.push(step3);
     }
+  } else if (step1.outcome === 'EMPTY' && !canWiden) {
+    // Nothing to widen to: --weeks already covers at least the widen floor. Say so rather
+    // than spending a call on a window that is a subset of one just proven empty.
+    const step3 = await probeWindow(c, 'STEP 2 — same window, NO location filter (global control)', step1Start, weekEnd, null);
+    results.push(step3);
   }
 
   console.log('\n═══════════════════ VERDICT ═══════════════════');
   for (const r of results) {
     console.log(`  ${r.label}`);
-    console.log(`      HTTP ${r.transportError ? 'n/a' : r.status}, sessions=${r.sessionCount ?? 'n/a'}`);
+    console.log(
+      `      ${r.outcome}  HTTP ${r.outcome === 'TRANSPORT_ERROR' ? 'n/a' : r.status}` +
+        `, rows read=${r.rowsRead ?? 'n/a'}` +
+        `, window total=${r.totalRecords ?? 'unknown'}${r.complete ? '' : '  ⚠ TRUNCATED'}`,
+    );
   }
   const last = results[results.length - 1]!;
-  if (last.status === 410) {
+  if (last.outcome === 'INDETERMINATE') {
+    // ⚠ Checked BEFORE the status branches: an INDETERMINATE result is an HTTP 200, so a
+    // status-first branch reads it as a data answer. That was the bug (Qodo finding 3).
+    console.log('\n  INDETERMINATE — HTTP 200, but the payload could not be read as a session');
+    console.log('  list. This is a CONTRACT problem, NOT an emptiness result: do not conclude');
+    console.log('  anything about scope, and do not record the field contract as tested. Check');
+    console.log('  whether the envelope shape changed before spending more calls.');
+  } else if (last.status === 410) {
     console.log('\n  410 — THE ENDPOINT IS DISABLED FOR THIS INSTANCE. The planned ingest cannot');
     console.log('  be built this way. Escalate to Kipu to have it enabled before any more design.');
-  } else if (last.status === 200 && (last.sessionCount ?? 0) > 0) {
+  } else if (last.outcome === 'POPULATED') {
     console.log('\n  200 WITH SESSIONS. Read the FIELD PRESENCE block above, not this line: a 200');
     console.log('  is not the answer. Any billing field marked "PRESENT BUT EMPTY ON EVERY ROW"');
     console.log('  is the same hole /api/care_levels has, and it changes the ingest design.');
-  } else if (last.status === 200) {
+    if (!last.complete) {
+      console.log('  ⚠ THE WINDOW WAS TRUNCATED at page 1, so no whole-window verdict was issued.');
+      console.log('    Narrow --weeks until the window fits one page before concluding anything.');
+    }
+  } else if (last.outcome === 'EMPTY') {
     console.log('\n  200 BUT ZERO SESSIONS EVERYWHERE, including the unfiltered control. The route');
-    console.log('  ANSWERS (not 410, not 403), so it is enabled — but this credential sees no');
-    console.log('  group sessions. That is a SCOPE question, not a shape one, and the field');
-    console.log('  contract is still UNTESTED. Do not record it as verified.');
+    console.log('  ANSWERS (not 410, not 403) and returned a real session array, so it is');
+    console.log('  enabled — but this credential sees no group sessions in these windows. That');
+    console.log('  is a SCOPE question, not a shape one, and the field contract is still');
+    console.log('  UNTESTED. Do not record it as verified.');
+    console.log('  ⚠ This says EMPTY IN THESE WINDOWS, ON THIS RUN. It cannot tell an always-');
+    console.log('    empty source from one that regressed to zero — the probe persists nothing,');
+    console.log('    by design. Compare two recorded runs by hand if you need that.');
   } else {
     console.log('\n  NON-200. Read explainStatus above; a 403 here is an identity verdict and is');
     console.log('  never transient — do not retry. Run the sibling probe --diagnose instead.');
