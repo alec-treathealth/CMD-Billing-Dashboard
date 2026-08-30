@@ -236,7 +236,8 @@ async function probeWindow(
     return { label, status, sessionCount: null };
   }
 
-  console.log(`  top-level keys: ${Object.keys(parsed as object).join(', ') || '(none)'}`);
+  const topLevelKeys = parsed && typeof parsed === 'object' ? Object.keys(parsed) : [];
+  console.log(`  top-level keys: ${topLevelKeys.join(', ') || '(none)'}`);
   // Pagination is COUNTS ONLY — non-PHI, and it is the only thing that says whether page 1
   // is the whole window. `per=100` against 16 rows LOOKS complete, but "looks complete" is
   // an inference and the envelope is evidence.
@@ -244,8 +245,8 @@ async function probeWindow(
   if (pg && typeof pg === 'object') console.log(`  pagination    : ${JSON.stringify(pg)}`);
   const found = findSessions(parsed);
   if (!found) {
-    console.log('  ⚠ 200 but NO array anywhere in the envelope — zero sessions and no list to read.');
-    return { label, status, sessionCount: 0 };
+    console.log('  ⚠ 200 but NO session array was recognised in the response. Contents withheld (invalid or unrecognised payload).');
+    return { label, status, sessionCount: null };
   }
   console.log(`  session array : "${found.key}"  ->  ${found.rows.length} session(s)`);
   if (found.rows.length === 0) return { label, status, sessionCount: 0 };
@@ -383,11 +384,15 @@ async function main(): Promise<void> {
     console.log('\n  200 WITH SESSIONS. Read the FIELD PRESENCE block above, not this line: a 200');
     console.log('  is not the answer. Any billing field marked "PRESENT BUT EMPTY ON EVERY ROW"');
     console.log('  is the same hole /api/care_levels has, and it changes the ingest design.');
-  } else if (last.status === 200) {
+  } else if (last.status === 200 && last.sessionCount === 0) {
     console.log('\n  200 BUT ZERO SESSIONS EVERYWHERE, including the unfiltered control. The route');
     console.log('  ANSWERS (not 410, not 403), so it is enabled — but this credential sees no');
     console.log('  group sessions. That is a SCOPE question, not a shape one, and the field');
     console.log('  contract is still UNTESTED. Do not record it as verified.');
+  } else if (last.status === 200) {
+    console.log('\n  200 BUT THE RESPONSE SHAPE IS UNDETERMINED. No session array was identified, so');
+    console.log('  this is not evidence of zero sessions. Validate the response contract before');
+    console.log('  diagnosing scope or recording the endpoint as verified.');
   } else {
     console.log('\n  NON-200. Read explainStatus above; a 403 here is an identity verdict and is');
     console.log('  never transient — do not retry. Run the sibling probe --diagnose instead.');
