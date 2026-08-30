@@ -90,6 +90,7 @@ const BASE_URL = 'https://api.kipuapi.com';
 const LIVE = process.argv.includes('--live');
 const AS_JSON = process.argv.includes('--json');
 const DIAGNOSE = process.argv.includes('--diagnose');
+const EXPLAIN = process.argv.includes('--explain');
 
 type Creds = { accessId: string; secretKey: string; appId: string };
 
@@ -175,7 +176,7 @@ function signedUri(c: Creds, requestUri: string, acceptVersion: 3 | 4, opts: Sig
     signature,
     headers: {
       Accept: `application/vnd.kipusystems+json; version=${acceptVersion}`,
-      Authorization: `APIAuth ${accessId}:${signature}`,
+      Authorization: `APIAuth-HMAC-SHA256 ${accessId}:${signature}`,
       Date: date,
     } as Record<string, string>,
   };
@@ -231,10 +232,17 @@ function explainStatus(status: number): string {
   if (status === 401) return 'SIGNING — the signed request_uri did not match what was sent (never retry; fix the canonical string)';
   if (status === 403)
     return (
-      'IDENTITY/PERMISSION — Kipu rejected the credential itself, not the URI. Three distinct causes ' +
-      'look identical here: (a) the triple is mixed across API clients/instances, (b) the app_id is not ' +
-      'enabled as an active API client on this instance, (c) the EMR user behind the key lacks access to ' +
-      'this resource. Uniform 403s on every route point at (a) or (b); per-route 403s point at (c).'
+      'AUTHENTICATION FAILED — and it is NOT necessarily an identity problem. FOUR causes look ' +
+      'identical in the body: (a) CLIENT-SIDE SIGNATURE/SCHEME MISMATCH — check this FIRST, it is ' +
+      'the cheapest to rule out and it is what actually bit us on 2026-08-30; (b) the triple is ' +
+      'mixed across API clients/instances; (c) the app_id is not enabled as an active API client ' +
+      'on this instance; (d) the EMR user behind the key lacks access to this resource. Uniform ' +
+      '403s on every route point at (a), (b) or (c); per-route 403s point at (d).\n' +
+      '      ⚠ (a) IS THE ONE THIS SCRIPT USED TO MISS. The Authorization scheme is not decoration: ' +
+      'api_auth reads the DIGEST ALGORITHM out of the prefix. Bare `APIAuth` means SHA-1, so a ' +
+      'correctly-computed SHA-256 signature sent under it is verified against the wrong algorithm ' +
+      'and fails every time, with a body that reads like a provisioning failure. The scheme must be ' +
+      '`APIAuth-HMAC-SHA256`. Run --explain to print the scheme actually being sent.'
     );
   if (status === 404) return 'BAD URI or unsupported for this method';
   if (status === 410) return 'ENDPOINT DISABLED for this Kipu instance — stop calling it';
@@ -463,8 +471,12 @@ export function interpretDiagnosis(r: {
   } else if (ab && !ac) {
     out.push('  > SIGNATURE. A matches B (a deliberately corrupted signature), so Kipu is');
     out.push('    rejecting what we signed — while our app_id IS recognised (C differs).');
-    out.push('    The algorithm is pinned by the published vector in test/kipuSignature.test.ts,');
-    out.push('    so the variable is the KEY MATERIAL or the secret VALUE. See D/E/F below.');
+    out.push('    ⚠ CHECK THE AUTHORIZATION SCHEME FIRST (run --explain). The published vector in');
+    out.push('    test/kipuSignature.test.ts pins our HMAC MATH, but it says nothing about the');
+    out.push('    scheme we send it under, and api_auth reads the digest algorithm from that');
+    out.push('    prefix: bare `APIAuth` = SHA-1, so a perfect SHA-256 signature still fails.');
+    out.push('    That was the real cause on 2026-08-30. Only after the scheme is confirmed');
+    out.push('    `APIAuth-HMAC-SHA256` does the variable become KEY MATERIAL or the secret VALUE.');
   } else {
     out.push('  > UNEXPECTED SHAPE. A differs from both controls. Read the bodies directly.');
   }
@@ -586,6 +598,68 @@ async function censusScopeCheck(c: Creds): Promise<void> {
   }
 }
 
+/* ── --explain: emit exactly what this client constructs, without sending it ──────────
+ * No network. Prints the five things that decide whether a signature can verify at all.
+ *
+ * This exists because the 403 that motivated it was invisible from the outside: the HMAC
+ * math was correct and its golden-vector test passed, while the Authorization SCHEME told
+ * the server to verify with a different algorithm. Nothing short of printing the
+ * constructed header would have shown that, so it is kept rather than deleted.
+ *
+ * ⚠ ONE DEVIATION FROM "print the exact URL": the app_id is masked. This file's own
+ * standing rule is that no full app_id reaches stdout, and the question --explain exists to
+ * answer — "are the signed and sent strings byte-identical?" — is answered better by
+ * comparing them programmatically than by eyeballing two 43-char base64 blobs. The
+ * comparison below is exact; only the display is masked.
+ */
+function explainOneCall(c: Creds): void {
+  const PATH = '/api/locations';
+  const query = [`app_id=${encodeURIComponent(c.appId)}`, 'include_buildings=false'].join('&');
+  const requestUri = `${PATH}?${query}`;
+  const req = signedUri(c, requestUri, 3);
+
+  // What the URL would look like if app_id were NOT percent-encoded.
+  const rawQuery = [`app_id=${c.appId}`, 'include_buildings=false'].join('&');
+  const rawUri = `${PATH}?${rawQuery}`;
+
+  console.log('=== STEP 2 — what the probe constructs (no network) ===\n');
+
+  console.log('1. CANONICAL STRING (the bytes that are HMAC-ed; secret is NOT part of it)');
+  console.log(`   raw    : ${JSON.stringify(maskUri(kipuCanonicalString(req.requestUri, req.date)))}`);
+  console.log(`   shape  : ,,{request_uri},{date}   leading commas = 2`);
+  console.log(`   length : ${kipuCanonicalString(req.requestUri, req.date).length} chars\n`);
+
+  console.log('2. AUTHORIZATION HEADER (signature truncated to 8)');
+  const auth = req.headers['Authorization'] ?? '';
+  const scheme = auth.split(' ')[0] ?? '';
+  // ⚠ MASK THE ACCESS_ID TOO, not just the signature. maskUri only redacts app_id, so an
+  // earlier version of this line put the full access_id on stdout — exactly what this
+  // file's header forbids. The SCHEME is the only part of this header under inspection.
+  const shown = auth
+    .replace(/^(\S+)\s+([^:]+):(.*)$/, (_m, sch, _id, sig) =>
+      `${sch} [ACCESS_ID REDACTED]:${String(sig).slice(0, 8)}…`);
+  console.log(`   raw    : ${JSON.stringify(shown)}`);
+  console.log(`   scheme : ${JSON.stringify(scheme)}   <-- compare to the working curl\n`);
+
+  console.log('3. URL PASSED TO fetch()');
+  console.log(`   raw    : ${JSON.stringify(maskUri(req.url))}`);
+  console.log(`   signed request_uri === sent path+query ? ${req.url.endsWith(req.requestUri)}`);
+  console.log(`   app_id percent-encoded in sent URL ?     ${req.url.includes(encodeURIComponent(c.appId)) && encodeURIComponent(c.appId) !== c.appId}`);
+  console.log(`   encodeURIComponent CHANGES the app_id ?  ${encodeURIComponent(c.appId) !== c.appId}`);
+  console.log(`   encoded-vs-raw uri byte-identical ?      ${requestUri === rawUri}`);
+  console.log(`   param order (signed)                   : ${requestUri.split('?')[1]?.split('&').map((kv) => kv.split('=')[0]).join(',')}`);
+  console.log(`   param order (sent)                     : ${(req.url.split('?')[1] ?? '').split('&').map((kv) => kv.split('=')[0]).join(',')}\n`);
+
+  console.log('4. DIGEST ALGORITHM ACTUALLY USED');
+  // Function names first, line numbers second: the names survive drift, the numbers do not.
+  console.log(`   HMAC   : createHmac('sha256', …).digest('base64')  in kipuSignature()   (~line 143)`);
+  console.log(`   SCHEME : Authorization prefix written             in signedUri()       (~line 179)\n`);
+
+  console.log('5. DATE HEADER — one formatting call, reused?');
+  console.log(`   canonical date === header Date ? ${kipuCanonicalString(req.requestUri, req.date).endsWith(req.headers['Date'] ?? '')}`);
+  console.log(`   Date header    : ${JSON.stringify(req.headers['Date'] ?? '')}`);
+}
+
 async function main() {
   const c = creds();
   const appIdShape = fingerprint(c.appId);
@@ -607,6 +681,11 @@ async function main() {
   console.log(`plan        : GET ${maskUri(locV3.requestUri)}   (Accept version=3, then 4 on failure)`);
   console.log(`              GET ${maskUri(careLevels.requestUri)}   (Accept version=4)`);
   console.log('canonical   : ,,{request_uri},{RFC1123 Date}   — two leading commas, GET form');
+
+  if (EXPLAIN) {
+    explainOneCall(c);
+    return;
+  }
 
   if (DIAGNOSE) {
     // --diagnose is inherently live: it exists to contrast three real responses. It does
