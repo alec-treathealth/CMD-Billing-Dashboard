@@ -616,12 +616,19 @@ relation is `relowner = postgres` (measured 2026-08-05), so a `SET ROLE claims_a
 ### The verification gate — all five, before any commit
 
 ```bash
-npm test                    # root hermetic suite   — >=1439 pass / 0 fail
+npm test                    # root hermetic suite   — floor in CLAUDE.md
 npm run typecheck           # root tsc (strict: noUncheckedIndexedAccess)
-cd app && npm test          # app suite             — >=831 pass / 0 fail
+cd app && npm test          # app suite             — floor in CLAUDE.md
 cd app && npm run typecheck # app tsc
 cd app && npm run build     # catches bundler-only failures tsc cannot
 ```
+
+⚠ **The pass counts are NOT repeated here, deliberately.** This block used to carry
+`>=1439` / `>=831`; both were ratified 2026-08-11 and were **447 root and 207 app
+tests low** by 2026-08-30, so a suite that had silently lost 447 tests would still
+have "passed" the number printed on this page. CLAUDE.md's *Verification gate* is
+the single authority and the only place the floors are re-measured — read them
+there. A copy of a tripwire is a tripwire that stops firing.
 
 Root `tsc` is stricter than app `tsc` — a test can be green in `app/` while root `tsc` is red.
 The counts are a **tripwire, not a target**: fewer means tests were lost. They are `>=` floors

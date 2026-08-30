@@ -192,9 +192,9 @@ Run all five before any commit. This is the bar for "verified" — not typecheck
 alone, and especially not when a shared helper changed.
 
 ```bash
-npm test                          # root hermetic suite — >=1439 pass / 0 fail
+npm test                          # root hermetic suite — >=1886 pass / 0 fail
 npm run typecheck                 # root tsc (strict: noUncheckedIndexedAccess)
-cd app && npm test                # app suite — >=831 pass / 0 fail
+cd app && npm test                # app suite — >=1038 pass / 0 fail
 cd app && npm run typecheck        # app tsc
 cd app && npm run build            # catches bundler-only failures tsc cannot
 ```
@@ -208,28 +208,46 @@ number above, tests were lost — find out why before committing. They are writt
 as `>=` floors deliberately, because the suites grow and a hardcoded exact number
 rots into a false tripwire within days.
 
-**Provenance of the current floors (read before trusting them).** 1439 / 831 are
-**RATIFIED counts**, not merely floors known to be reachable: measured 2026-08-11
-on a **clean detached worktree** of `origin/main` @`f3a8d93` (`git worktree add
---detach origin/main`, `git status --porcelain` empty before any command ran,
-`npm ci` clean at both root and `app/`, all five gate commands exit 0). That is
-the exact condition the paragraph below demands, so these may be trusted as
-measured rather than as a lower bound someone once hit.
+**Provenance of the current floors (read before trusting them).** 1886 / 1038 are
+**RATIFIED counts**, not merely floors known to be reachable: measured 2026-08-30
+on a **clean detached worktree** of `origin/main` @`a55c83f` (`git worktree add
+--detach origin/main`, `git status --porcelain` empty before any command ran AND
+after `npm ci`, `npm ci` clean at both root and `app/`, all five gate commands
+exit 0). `next build` ran with **no `.env` present**, which is the stricter of the
+two conditions `.claude/rules/nextjs-app.md` describes — a local `.env` masks
+Vercel-only bundler failures. So these may be trusted as measured rather than as
+a lower bound someone once hit.
 
-They supersede 1284 / 386, measured 2026-08-06 under the same clean-worktree
-condition on `origin/main` @`ea3dadb` — correctly ratified then, simply outgrown
-since. That pair had drifted **155 root and 445 app tests low**, and the app half
-is the worse number this chain has recorded: 386 was **less than half** the real
-count, so `app/` could have silently lost 445 tests and still "passed" the floor.
-Earlier links, kept for the pattern: 1284 / 386 superseded 1110 / 259 (2026-08-04,
-measured on a **shared working tree** and flagged not-evidence, drifted 174 root /
-127 app low), which superseded 1076 / 206 (tree of `main` @`53b49d6`).
+⚠ **THE APP HALF IS ALREADY KNOWN-CONSERVATIVE BY ~17 AS OF THIS WRITING**, and
+that is not rot — three PRs were open against `a55c83f` when it was measured
+(#284 +7, #285 +5, #286 +5, all `app/`). Seeing 1055 in `app/` after they land is
+expected. Root is unaffected by all three. Do not "correct" the floor to match a
+number from a tree that includes unmerged work; re-measure on a clean detached
+checkout, which is the only thing this chain accepts as evidence.
 
-The lesson the app number now makes unmissable: a floor rots fastest where the
-suite grows fastest, and nothing in CI reports it — no script enforces these
-counts, by design (see the Git workflow section: checks are read by hand). If you
-find yourself more than a few dozen tests above the number here, that is the same
-rot — re-measure and promote.
+They supersede 1439 / 831, measured 2026-08-11 under the same clean-worktree
+condition on `origin/main` @`f3a8d93` — correctly ratified then, simply outgrown
+since. That pair had drifted **447 root and 207 app tests low** in 19 days, and
+the ROOT half is now the worse number this chain has recorded in absolute terms:
+`src/` could have silently lost 447 tests and still "passed". Note what changed
+about the shape of the rot — 2026-08-06's lesson was "a floor rots fastest where
+the suite grows fastest", drawn from an app half that was less than half the real
+count. That is no longer where the danger is: this cycle the root suite grew
+faster in absolute terms while the app suite grew faster in *proportion*, so
+**neither half is the reliable canary and both must be re-measured together.**
+
+Earlier links, kept for the pattern: 1439 / 831 superseded 1284 / 386 (2026-08-06,
+clean worktree @`ea3dadb`, drifted 155 root / 445 app low — 386 was less than half
+the real app count); 1284 / 386 superseded 1110 / 259 (2026-08-04, measured on a
+**shared working tree** and flagged not-evidence, drifted 174 root / 127 app low),
+which superseded 1076 / 206 (tree of `main` @`53b49d6`).
+
+The lesson this chain keeps re-teaching: a floor rots silently, and nothing in CI
+reports it — no script enforces these counts, by design (see the Git workflow
+section: checks are read by hand). Five ratifications in, the drift has never once
+been caught by the tripwire firing; it is always caught by somebody noticing the
+gap. If you find yourself more than a few dozen tests above the number here, that
+is the same rot — re-measure and promote.
 
 **The rule that produced these numbers, unchanged:** only counts measured on a
 clean detached checkout of `origin/main` are trustworthy — a shared working tree
