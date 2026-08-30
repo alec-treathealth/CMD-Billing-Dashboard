@@ -66,7 +66,7 @@ export interface ImportState {
 }
 
 export type ImportAction =
-  | { readonly type: 'request'; readonly id: number }
+  | { readonly type: 'request'; readonly id: number; readonly fresh?: boolean }
   | {
       readonly type: 'applied';
       readonly id: number;
@@ -109,7 +109,9 @@ export function importReducer(s: ImportState, a: ImportAction): ImportState {
     case 'request':
       // Claims the token. Ids come from a monotonic counter in the panel, so this only ever
       // moves forward and every response issued before now is now stale.
-      return { ...s, seq: a.id, busy: true, error: null };
+      return a.fresh
+          ? { ...s, ...CLEARED, seq: a.id, busy: true, error: null }
+          : { ...s, seq: a.id, busy: true, error: null };
 
     case 'applied':
       if (a.id !== s.seq) return s;
@@ -119,7 +121,7 @@ export function importReducer(s: ImportState, a: ImportAction): ImportState {
         error: null,
         data: a.payload,
         files: a.files,
-        ...(a.fresh ? { cellOv: NO_CELLS, statusOv: NO_STATUSES, target: null } : null),
+        ...(a.fresh ? { cellOv: NO_CELLS, statusOv: NO_STATUSES, target: null } : { target: null }),
       };
 
     case 'failed':
@@ -127,7 +129,7 @@ export function importReducer(s: ImportState, a: ImportAction): ImportState {
       if (a.fresh) return { ...s, ...CLEARED, busy: false, error: a.error };
       // Week navigation: the loaded export is untouched by a failed hop. `no-weeks` says the
       // requested week is empty, which is not a reason to discard the corpus either.
-      return { ...s, busy: false, error: a.error, data: a.error === 'no-weeks' ? s.data : null };
+      return { ...s, busy: false, error: a.error };
 
     case 'set-cell': {
       const next = new Map(s.cellOv);

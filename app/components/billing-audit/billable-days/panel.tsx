@@ -97,7 +97,7 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
   const send = useCallback(
     async (picked: readonly File[], week: string | null, fresh: boolean) => {
       const id = ++reqId.current;
-      dispatch({ type: 'request', id });
+      dispatch({ type: 'request', id, fresh });
       const fd = new FormData();
       fd.set('view', view);
       if (week) fd.set('week', week);
