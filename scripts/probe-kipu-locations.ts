@@ -104,29 +104,63 @@ const EXPLAIN = process.argv.includes('--explain');
 
 type Creds = { accessId: string; secretKey: string; appId: string };
 
+/**
+ * Resolve the FIRST of `names` that is set, returning the NAME alongside the value.
+ *
+ * ⚠ THE NAME AND THE VALUE MUST TRAVEL TOGETHER (Qodo finding 3). Validation errors name a
+ * variable for an operator to go and edit. Reporting the canonical `KIPU_TREAT_*` name for
+ * a value that actually came from a legacy fallback sends them to a variable that is not
+ * set, while the one carrying the stray newline sits untouched in the same file — the error
+ * does not merely fail to help, it actively misdirects the fix.
+ *
+ * Pure and env-injected so it is testable without touching process.env.
+ */
+export function pickEnv(
+  env: Record<string, string | undefined>,
+  names: readonly string[],
+): { name: string; value: string | undefined; tried: readonly string[] } {
+  for (const n of names) {
+    const v = env[n];
+    if (v !== undefined) return { name: n, value: v, tried: names };
+  }
+  return { name: names[0]!, value: undefined, tried: names };
+}
+
 function creds(): Creds {
   // KIPU_TREAT_* is the current per-INSTANCE spelling; the unprefixed names are the
   // pre-2026-08-26 globals, kept as a fallback so an older .env still probes.
   // ⚠ All three must come from the SAME Kipu instance. A triple assembled from two
   // instances 403s with the same body as a disabled client — see the bottom note.
-  const accessId = process.env.KIPU_TREAT_ACCESS_ID ?? process.env.KIPU_ACCESS_ID;
-  const secretKey = process.env.KIPU_TREAT_SECRET_KEY ?? process.env.KIPU_SECRET_KEY;
-  // Kipu's own name for this is app_id (aka recipient_id). The retired global .env spelled
-  // it KIPU_APP_API; accept every spelling so this probe works before/after the rename.
-  const appId =
-    process.env.KIPU_TREAT_APP_ID ?? process.env.KIPU_APP_API ?? process.env.KIPU_APP_ID;
-  const missing = [
-    !accessId && 'KIPU_TREAT_ACCESS_ID (or KIPU_ACCESS_ID)',
-    !secretKey && 'KIPU_TREAT_SECRET_KEY (or KIPU_SECRET_KEY)',
-    !appId && 'KIPU_TREAT_APP_ID (or KIPU_APP_API / KIPU_APP_ID)',
-  ].filter(Boolean);
+  // ⚠ RESOLVE THE NAME ALONGSIDE THE VALUE (Qodo finding 3). Every message below must name
+  // the variable that ACTUALLY supplied the value. Reporting the canonical KIPU_TREAT_* name
+  // for a value that came from a legacy fallback sends an operator to edit a variable that
+  // is not set, while the one with the stray newline sits untouched in the same file — the
+  // error actively misdirects the fix. `pick` returns the name and the value together so
+  // they cannot drift apart.
+  const pick = (...names: string[]) => pickEnv(process.env, names);
+
+  // KIPU_TREAT_* is the current per-INSTANCE spelling; the unprefixed names are the
+  // pre-2026-08-26 globals, kept as a fallback so an older .env still probes.
+  // ⚠ All three must come from the SAME Kipu instance. A triple assembled from two
+  // instances 403s with the same body as a disabled client — see the bottom note.
+  //
+  // Kipu's own name for the third is app_id (aka recipient_id); the retired global .env
+  // spelled it KIPU_APP_API, so every spelling is accepted.
+  const accessId = pick('KIPU_TREAT_ACCESS_ID', 'KIPU_ACCESS_ID');
+  const secretKey = pick('KIPU_TREAT_SECRET_KEY', 'KIPU_SECRET_KEY');
+  const appId = pick('KIPU_TREAT_APP_ID', 'KIPU_APP_API', 'KIPU_APP_ID');
+
+  const missing = [accessId, secretKey, appId]
+    .filter((e) => e.value === undefined)
+    .map((e) => `${e.tried[0]} (or ${e.tried.slice(1).join(' / ')})`);
   if (missing.length) {
     // Never echo a value — only which name is absent.
     throw new Error(`Missing env: ${missing.join(', ')} (set in .env; never hardcode or log it)`);
   }
-  // ⚠ SHAPE VALIDATION (Qodo finding 2's enabling cause). `creds()` did none, so a value
-  // carrying a stray newline out of `.env` flowed straight into the Authorization header and
-  // into every redactor that assumed a well-formed shape.
+
+  // ⚠ SHAPE VALIDATION. `creds()` did none, so a value carrying a stray newline out of
+  // `.env` flowed straight into the Authorization header and into every redactor that
+  // assumed a well-formed shape.
   //
   // Surrounding whitespace is TRIMMED — a trailing newline is an ordinary `.env` artifact and
   // failing the run over it helps nobody. Anything left that would break the header's
@@ -136,22 +170,21 @@ function creds(): Creds {
   // This is defence in depth, NOT the fix: `authHeaderDisplay` no longer reads the access_id
   // at all, so a malformed value cannot leak through the display even if validation is
   // removed. Two independent barriers, deliberately.
-  const clean = (v: string) => v.trim();
-  const triple: [string, string, string][] = [
-    ['KIPU_TREAT_ACCESS_ID', clean(accessId!), 'access_id'],
-    ['KIPU_TREAT_SECRET_KEY', clean(secretKey!), 'secret_key'],
-    ['KIPU_TREAT_APP_ID', clean(appId!), 'app_id'],
+  const triple = [
+    { ...accessId, value: accessId.value!.trim(), isSecret: false },
+    { ...secretKey, value: secretKey.value!.trim(), isSecret: true },
+    { ...appId, value: appId.value!.trim(), isSecret: false },
   ];
-  for (const [name, value, role] of triple) {
+  for (const { name, value, isSecret } of triple) {
     if (value.length === 0) throw new Error(`${name} is empty after trimming (never hardcode or log it)`);
     if (/[\s\u0000-\u001f]/.test(value)) {
       throw new Error(`${name} contains whitespace or a control character inside the value — refusing to send it`);
     }
-    if (role !== 'secret_key' && value.includes(':')) {
+    if (!isSecret && value.includes(':')) {
       throw new Error(`${name} contains ':' which would break the Authorization header grammar`);
     }
   }
-  return { accessId: triple[0]![1], secretKey: triple[1]![1], appId: triple[2]![1] };
+  return { accessId: triple[0]!.value, secretKey: triple[1]!.value, appId: triple[2]!.value };
 }
 
 /**

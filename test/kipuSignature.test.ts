@@ -301,13 +301,29 @@ test('a 200 census body is never passed to the classifier at all', () => {
  * ════════════════════════════════════════════════════════════════════════════════════ */
 import { authHeaderDisplay } from '../scripts/probe-kipu-locations.js';
 
-const ACCESS_ID = 'CGqj6mLOU9bwa6KO0wuFD5i70GIn9luhsq6s0coegvE';
-const SIGNATURE = 'gEHjE4LZabcdefghijklmnopqrstuvwxyz0123456789=';
+// ⚠ SYNTHETIC. Both values are invented and are NOT credentials.
+//
+// This line held the REAL Kipu access_id until 2026-08-30 — lifted verbatim out of a
+// `--explain` run while fixing the very leak that printed it. The file header two blocks up
+// claimed no real credential was involved; that claim was false, and this is what makes it
+// true. Alec ruled NOT to rotate (private repo; access_id is a non-signing identifier that
+// travels in cleartext in every Authorization header), so no history rewrite and no
+// rotation task — but nothing real goes back in here.
+//
+// Shape is preserved so the tests still exercise what they did: 43 characters over the
+// URL-safe base64 alphabet [A-Za-z0-9_-], same as a genuine Kipu access_id. The name is
+// deliberately unmistakable — no future reader can mistake it for a credential, and a
+// secret-scanner grepping for high-entropy 43-char strings gets an obvious negative.
+const ACCESS_ID = 'FAKE_ACCESS_ID_NOT_A_REAL_CREDENTIAL_000000';
+// Also synthetic. The first 8 characters of the previous value came from real `--explain`
+// output. An HMAC over an expired Date is ephemeral rather than a credential, but the point
+// of this file is that nothing real is in it.
+const SIGNATURE = 'FAKESIGNATURE_not_a_real_hmac_0123456789abc=';
 
 test('a well-formed header masks the access_id and truncates the signature', () => {
   const out = authHeaderDisplay(`APIAuth-HMAC-SHA256 ${ACCESS_ID}:${SIGNATURE}`, SIGNATURE);
   assert.equal(out.includes(ACCESS_ID), false, 'the access_id survived masking');
-  assert.match(out, /^APIAuth-HMAC-SHA256 \[ACCESS_ID REDACTED\]:gEHjE4LZ…$/);
+  assert.match(out, /^APIAuth-HMAC-SHA256 \[ACCESS_ID REDACTED\]:FAKESIGN…$/);
   assert.equal(out.includes(SIGNATURE), false, 'the full signature survived');
 });
 
@@ -339,7 +355,7 @@ test('an unrecognised scheme is replaced by a placeholder, never echoed', () => 
 test('the display never reads the header for the signature — a garbage header still truncates', () => {
   // The signature comes from the SAFE field signedUri returned, not from parsing.
   const out = authHeaderDisplay('total garbage with no colon at all', SIGNATURE);
-  assert.match(out, /:gEHjE4LZ…$/);
+  assert.match(out, /:FAKESIGN…$/);
   assert.equal(out.includes(SIGNATURE), false);
 });
 
@@ -356,4 +372,47 @@ test('the output is built from a fixed alphabet — no caller text can reach it'
     const out = authHeaderDisplay(header, 'abcdefgh');
     assert.equal(out.includes(poison), false, `caller text leaked from header "${header.slice(0, 12)}…"`);
   }
+});
+
+/* ══════════ QODO FINDING 3 — the error must name the variable that SUPPLIED the value ══
+ * Validation errors name a variable for an operator to go and edit. Naming the canonical
+ * KIPU_TREAT_* spelling for a value that came from a legacy fallback sends them to a
+ * variable that is not set, while the one carrying the stray newline sits untouched.
+ * ════════════════════════════════════════════════════════════════════════════════════ */
+import { pickEnv } from '../scripts/probe-kipu-locations.js';
+
+const ACCESS_NAMES = ['KIPU_TREAT_ACCESS_ID', 'KIPU_ACCESS_ID'] as const;
+const APP_NAMES = ['KIPU_TREAT_APP_ID', 'KIPU_APP_API', 'KIPU_APP_ID'] as const;
+
+test('the canonical name wins when it is set', () => {
+  const r = pickEnv({ KIPU_TREAT_ACCESS_ID: 'a', KIPU_ACCESS_ID: 'b' }, ACCESS_NAMES);
+  assert.equal(r.name, 'KIPU_TREAT_ACCESS_ID');
+  assert.equal(r.value, 'a');
+});
+
+test('a LEGACY fallback reports the legacy name, not the canonical one', () => {
+  const r = pickEnv({ KIPU_ACCESS_ID: 'b' }, ACCESS_NAMES);
+  assert.equal(r.name, 'KIPU_ACCESS_ID', 'the error would misdirect the operator');
+  assert.equal(r.value, 'b');
+});
+
+test('each fallback in a three-name chain reports itself', () => {
+  assert.equal(pickEnv({ KIPU_APP_API: 'x' }, APP_NAMES).name, 'KIPU_APP_API');
+  assert.equal(pickEnv({ KIPU_APP_ID: 'x' }, APP_NAMES).name, 'KIPU_APP_ID');
+  assert.equal(pickEnv({ KIPU_TREAT_APP_ID: 'x' }, APP_NAMES).name, 'KIPU_TREAT_APP_ID');
+});
+
+test('an EMPTY STRING is a set value — it must not fall through to the next name', () => {
+  // '' is a real (if useless) setting; falling through would report the wrong variable and
+  // then validate a value the operator never set.
+  const r = pickEnv({ KIPU_TREAT_ACCESS_ID: '', KIPU_ACCESS_ID: 'b' }, ACCESS_NAMES);
+  assert.equal(r.name, 'KIPU_TREAT_ACCESS_ID');
+  assert.equal(r.value, '');
+});
+
+test('when nothing is set it reports the canonical name and every name tried', () => {
+  const r = pickEnv({}, ACCESS_NAMES);
+  assert.equal(r.value, undefined);
+  assert.equal(r.name, 'KIPU_TREAT_ACCESS_ID');
+  assert.deepEqual([...r.tried], [...ACCESS_NAMES]);
 });

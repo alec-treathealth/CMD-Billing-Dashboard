@@ -31,10 +31,42 @@ only committed docs belong in the table — untracked ones go under
 | Qodo required-status-check contract + rename hazard | `docs/qodo-compliance-gate.md` | 6 |
 | Product orientation — what this app actually is | `README.md` | 7 |
 | AR build plan — the current CMD AR Automation work | `CMD AR Automation — Build Doc v2.md` | 8 |
+| Kipu API recon — endpoints, signing scheme, and how to read a 403 | `docs/KIPU-CLAIMS-DESK-RECON-2026-08-20.md` | 9 |
 
 Read-order is a cold-start sequence, not a priority ranking. Path-scoped rules in
 `.claude/rules/` load automatically and are not listed here — see
 [Where the detail lives](#where-the-detail-lives).
+
+### Artifact-kind rules — ask this SEPARATELY from the path globs
+
+`.claude/rules/*.md` are **path**-scoped. Answering "which rules apply here?" by globbing
+the files you are about to edit returns **nothing at all** for `scripts/`, `docs/`, root
+`test/`, or this file. That answer is correct and useless: a reader concludes no rules
+apply and moves on, while the global obligations keyed to the **KIND of artifact** being
+created go unchecked.
+
+⚠ **That is exactly how a doc modified in a PR reached review unregistered** (2026-08-30).
+No glob matched `docs/`, so the Canonical Context Set obligation — keyed to *"you touched
+a tracked doc"*, not to a path — was never consulted. The gate did not catch it either:
+`scripts/check-context-map.ts` verifies every **listed** path resolves; it never checks
+that every **tracked** doc is listed. Forward-only, by construction.
+
+So ask **both** questions before editing: *which rules match these paths*, and *what kind
+of artifact am I creating or changing*.
+
+| Creating or changing… | Obligation | Stated in |
+|---|---|---|
+| a tracked **doc** | register it in the table above, or delete it — "untracked" is not a third state | this file, [above](#uncommitted--not-guarded) |
+| a **test** | hermetic — `node:test` only, no new runner deps, no live LLM/DB | Standing rules |
+| a **test fixture** | never a real credential, key, token or `.env` value; synthetic only | `.claude/commands/qodo.md` |
+| a **commit or PR** | no `Co-Authored-By` trailer | Standing rules |
+| an **outward-facing action** (commit, push, migration, deploy) | show results and HOLD first | Standing rules |
+| anything that **logs, prompts, or reaches a client / URL / browser storage** | PHI never reaches it | Standing rules |
+| a **secret or env read** | env only; no `NEXT_PUBLIC_*` for anything server-side | Standing rules |
+
+Every row above is an existing rule restated by trigger, not a new one. If you add a rule
+that is not tied to a path, add its trigger here too — otherwise it is discoverable only by
+reading this file end to end, which is the failure this table exists to prevent.
 
 > **`docs/archive/` now holds two LIVE documents, which is a naming lie worth knowing about**
 > (recorded 2026-08-05). A bulk relocation moved `docs/Fable Build Doc E2E/00-GUIDE.md` →
