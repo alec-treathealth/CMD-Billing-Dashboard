@@ -29,6 +29,7 @@ import {
   effectiveCodes,
   isApproximate,
   rowHasOverride,
+  statusKey,
   type CellOverrides,
   type StatusOverrides,
 } from './overrides';
@@ -201,7 +202,8 @@ export function BillableDaysGrid({
   cellOv: CellOverrides;
   statusOv: StatusOverrides;
   onSetCell: (key: string, codes: readonly string[] | null) => void;
-  onSetStatus: (rowId: string, status: WeekStatus | null) => void;
+  /** Receives the WEEK-SCOPED key, not a bare row id — see overrides.ts. */
+  onSetStatus: (key: string, status: WeekStatus | null) => void;
   onOpen: (row: KipuRowDTO, dayIndex: number | null) => void;
 }) {
   if (rows.length === 0) {
@@ -247,9 +249,9 @@ export function BillableDaysGrid({
         </thead>
         <tbody>
           {rows.map((r) => {
-            const adjusted = adjustedBillableDays(r, cellOv);
-            const edited = rowHasOverride(r, cellOv);
-            const approx = isApproximate(r, cellOv);
+            const adjusted = adjustedBillableDays(r, cellOv, weekStart);
+            const edited = rowHasOverride(r, cellOv, weekStart);
+            const approx = isApproximate(r, cellOv, weekStart);
             const over = adjusted > r.capDays;
             return (
               <tr key={r.id} className="border-b border-line last:border-0 hover:bg-ground/40">
@@ -286,12 +288,12 @@ export function BillableDaysGrid({
                   <AuthPill r={r} />
                 </td>
                 {r.days.map((d) => {
-                  const key = cellKey(r.id, d.i);
+                  const key = cellKey(weekStart, r.id, d.i);
                   return (
                     <DayCell
                       key={d.i}
                       d={d}
-                      codes={effectiveCodes(r, d.i, cellOv)}
+                      codes={effectiveCodes(r, d.i, cellOv, weekStart)}
                       overridden={cellOv.has(key)}
                       onOpen={() => onOpen(r, d.i)}
                       onSet={(codes) => onSetCell(key, codes)}
@@ -327,8 +329,10 @@ export function BillableDaysGrid({
                   </label>
                   <select
                     id={`ws-${r.id}`}
-                    value={statusOv.get(r.id) ?? ''}
-                    onChange={(e) => onSetStatus(r.id, (e.target.value || null) as WeekStatus | null)}
+                    value={statusOv.get(statusKey(weekStart, r.id)) ?? ''}
+                    onChange={(e) =>
+                      onSetStatus(statusKey(weekStart, r.id), (e.target.value || null) as WeekStatus | null)
+                    }
                     title="Billing workflow state — set by hand, not saved"
                     className="rounded-md border border-line bg-card px-1.5 py-0.5 text-xs text-ink900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
