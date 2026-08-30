@@ -44,7 +44,7 @@ import type { DashboardView } from '@/lib/views';
 import { BillableDaysGrid } from './grid';
 import { BillableDaysDrawer } from './drawer';
 import { ImportSummary } from './import-summary';
-import { CODE_LEGEND } from './legend';
+import { CODE_LEGEND, codeOrReason } from './legend';
 import { adjustedBillableDays, countOverrides, isApproximate } from './overrides';
 import { importReducer, initialImportState, type ImportFailure } from './import-state';
 
@@ -377,7 +377,9 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
             {CODE_LEGEND.map((c) => (
               <span key={c.code}>
                 <span className="font-mono font-semibold text-ink600">{c.code}</span> {c.label}
-                {c.cpt ? ` (${c.cpt})` : ''}
+                {/* Prints the code, or WHY there is no code — never a blank where a code
+                    belongs, and never an unresolved pair read as a mapping. See legend.ts. */}
+                {` (${codeOrReason(c)})`}
               </span>
             ))}
           </div>
