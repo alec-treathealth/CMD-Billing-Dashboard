@@ -15,10 +15,10 @@
  * mistake. A week change re-posts the files rather than shipping every week at once; that
  * cost is temporary and disappears when the parsed corpus lands in `kipu.*` (next PR).
  *
- * PHI POSTURE. Three ROW fields are gated on `canRevealPhi` and are `null` for everyone
- * else: the patient NAME, the authorization NUMBER, and the session TOPIC. A fourth gate
- * sits on the DIAGNOSTICS: `skipped` carries source-row text and is reduced to reason codes
- * plus counts for an ungated viewer (`gateSkipped`). Everything else the
+ * PHI POSTURE. FOUR fields are gated on `canRevealPhi` and are `null` for everyone else:
+ * the patient NAME, the authorization NUMBER, the session TOPIC, and the session PROVIDER.
+ * A fifth gate sits on the DIAGNOSTICS: `skipped` carries source-row text and is reduced to
+ * reason codes plus counts for an ungated viewer (`gateSkipped`). Everything else the
  * grid needs — dates, times, hours, codes, counts, level of care, payer, container labels,
  * auth windows — is non-identifying and always present. The gate is applied HERE, at the
  * mapping, so an ungated field can never reach the client by way of a component forgetting
@@ -35,7 +35,20 @@ export interface KipuSessionDTO {
   readonly start: string;
   readonly end: string;
   readonly hrs: number;
-  readonly provider: string;
+  /**
+   * Clinician on the session — PHI-adjacent, `null` unless canRevealPhi.
+   *
+   * RULED 2026-08-29 (Alec). This shipped UNGATED, three lines above a gated `topic` in the
+   * same object, and the asymmetry protected almost nothing: a provider on a session row is
+   * not a bare staff name, it is "this clinician saw this client on this date" — and the
+   * client identity is already on the row. That linkage is part of the record. Worse,
+   * withholding a group's TOPIC while disclosing WHO LED IT lets the topic be inferred from
+   * the clinician's specialty, so the topic gate was leaking through this field.
+   *
+   * Billers who need providers get `canRevealPhi`. Provider does not bypass the gate for
+   * everyone. Do not re-open this with a separate permission or a config flag.
+   */
+  readonly provider: string | null;
   readonly status: string;
   readonly billable: boolean;
   /** Clinical topic — PHI-adjacent. `null` unless canRevealPhi. */
@@ -144,7 +157,7 @@ export interface KipuImportPayload {
   readonly locOptions: readonly string[];
   readonly facilityOptions: readonly string[];
   readonly diagnostics: KipuDiagnosticsDTO;
-  /** True when names/auth numbers/topics are present in this payload. */
+  /** True when names/auth numbers/topics/providers are present in this payload. */
   readonly phiIncluded: boolean;
 }
 
@@ -188,7 +201,7 @@ function mapRow(g: GridRow, canRevealPhi: boolean): KipuRowDTO {
         start: s.start,
         end: s.end,
         hrs: round1(s.hrs),
-        provider: s.provider,
+        provider: canRevealPhi ? s.provider : null,
         status: s.status,
         billable: s.billable,
         topic: canRevealPhi ? s.topic : null,

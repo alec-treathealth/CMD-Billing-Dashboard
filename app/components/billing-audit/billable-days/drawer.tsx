@@ -7,9 +7,22 @@
  * a11y: focus trap, Escape-to-close and focus restore all come from the shared `useDialog`
  * hook (`app/components/qualify/useDialog.ts`) rather than being hand-rolled here.
  *
- * PHI: name, authorization number and session topic arrive as `null` unless the viewer has
- * `canRevealPhi`; the drawer renders the mask when they are absent. Everything else — dates,
- * times, durations, providers, statuses, codes — is non-identifying and always shown.
+ * PHI: name, authorization number, session topic AND session PROVIDER arrive as `null` unless
+ * the viewer has `canRevealPhi`. Everything else — dates, times, durations, statuses, codes —
+ * is non-identifying and always shown.
+ *
+ * ⚠ THIS BLOCK LISTED `providers` AMONG THE ALWAYS-SHOWN NON-IDENTIFYING FIELDS UNTIL
+ * 2026-08-29, and that was the defect, not merely a stale comment. Provider was ungated three
+ * lines above a gated topic in the same mapper object. A provider on a session row is not a
+ * bare staff name — it is "this clinician saw this client on this date", with the client
+ * already identified on the row. It is gated now (Alec, 2026-08-29).
+ *
+ * The two masks differ ON PURPOSE. `topic` renders `••••••` because the line exists only to
+ * carry it, so an empty line would read as "no topic recorded". `provider` sits in a metadata
+ * strip beside status and label and is guarded by `{s.provider && …}`, so a withheld value
+ * simply drops out of the strip — which is also what a genuinely blank Kipu Provider column
+ * does. Do not add a mask glyph there: it would claim data was withheld on rows where Kipu
+ * never had any.
  */
 import { useDialog } from '../../qualify/useDialog';
 import type { KipuRowDTO } from '@/lib/billing-audit/kipu-import';
