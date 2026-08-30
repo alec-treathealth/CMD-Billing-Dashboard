@@ -444,3 +444,98 @@ test('fixture: per-day A13 resolution changes only clients whose auths span mult
     }
   }
 });
+
+/* ══════════════════ MH IOP 1/2/3 ARE ONE PROGRAM (ruled 2026-08-29) ══════════════════
+ * The trailing numeral is the weekly billable-day cap and nothing else varies. These
+ * tests pin BOTH halves of the ruling: that IOP 1/2 really do inherit IOP 3's semantics,
+ * and — separately, below and in kipuBillingReport.test.ts — that the rule is scoped to
+ * `MH IOP N` and cannot leak onto `MH OP N`.
+ * ════════════════════════════════════════════════════════════════════════════════════ */
+
+/** A client on `loc`, one covering auth on the same LOC, `n` days of 3.0h group. */
+const iopClient = (loc: string, n: number): KipuClient =>
+  client({
+    loc,
+    auths: [auth({ loc, freq: '' })],
+    sessions: Array.from({ length: n }, (_, i) => G(isoDay(i), 3.0)),
+  });
+const isoDay = (i: number): string => `2026-08-1${i}`; // 2026-08-10 .. 2026-08-13 (Mon..Thu)
+
+test('IOP 1/2/3 differ ONLY in capDays — same track, same minHours', () => {
+  const one = LOC_CONFIG_BASE['MH IOP 1 Adult'];
+  const two = LOC_CONFIG_BASE['MH IOP 2 Adult'];
+  const three = LOC_CONFIG_BASE['MH IOP 3 Adult'];
+  assert.ok(one && two && three, 'IOP 1/2/3 must all be configured');
+  for (const e of [one, two, three]) {
+    assert.equal(e.track, three.track);
+    assert.equal(e.minHours, three.minHours);
+    assert.equal(e.ambiguous, undefined, 'an enumerated entry is not ambiguous');
+  }
+  assert.deepEqual([one.capDays, two.capDays, three.capDays], [1, 2, 3]);
+});
+
+test('IOP 1/2/3 emit the SAME day code and hours — only the billable-day count is capped', () => {
+  // Four qualifying 3.0h days under each level. The per-day verdict must be identical
+  // (an `I` on every day, 12h attended); only how many of them BILL may differ.
+  const rows = (['MH IOP 1 Adult', 'MH IOP 2 Adult', 'MH IOP 3 Adult'] as const).map((loc) =>
+    computeRow(iopClient(loc, 4), WEEK, LOC_CONFIG_BASE),
+  );
+  for (const [idx, r] of rows.entries()) {
+    const cap = idx + 1;
+    assert.equal(r.total, 12, 'attended hours do not depend on the cap');
+    // Every day QUALIFIES identically (3.0h of group on an IOP track). The cap decides
+    // which of them BILL: the first `cap` days carry `I`, the rest are marked over-cap.
+    const codes = r.days.slice(0, 4).map((d) => d.codes.join('+'));
+    assert.deepEqual(
+      codes,
+      Array.from({ length: 4 }, (_, i) => (i < cap ? 'I' : 'N/B')),
+      `cap ${cap}: first ${cap} day(s) bill as I, the remainder are over-cap N/B`,
+    );
+    // A8 — an IOP track never emits a bare G or T, at any cap.
+    for (const d of r.days) assert.equal(d.codes.includes('G') || d.codes.includes('T'), false);
+  }
+  assert.deepEqual(rows.map((r) => r.billableDays), [1, 2, 3]);
+  assert.deepEqual(rows.map((r) => r.capDays), [1, 2, 3]);
+});
+
+test('an IOP day still needs the 3.0h minimum at cap 1 and cap 2 — the floor is inherited', () => {
+  for (const loc of ['MH IOP 1 Adult', 'MH IOP 2 Adult'] as const) {
+    const c = client({ loc, auths: [auth({ loc, freq: '' })], sessions: [G('2026-08-10', 1.5)] });
+    const r = computeRow(c, WEEK, LOC_CONFIG_BASE);
+    assert.equal(r.billableDays, 0, `${loc}: 1.5h is under the inherited 3.0h floor`);
+    assert.deepEqual(r.days[0]?.codes, ['HRS'], `${loc}: under-threshold IOP shows hours, not a code`);
+  }
+});
+
+/* ── CONSTRAINT 2: the rule is prefix-scoped to MH IOP N and must NOT reach MH OP N ── */
+
+test('MH OP 4 Adult stays OUTPATIENT and picks up no IOP cap behaviour', () => {
+  const e = LOC_CONFIG_BASE['MH OP 4 Adult'];
+  assert.ok(e);
+  // Kipu's own consider_as resolves this to outpatient (verified live 2026-08-29), and
+  // #268 reclassified it IOP/4 -> OP/4. Adding IOP 1/2 must not drag it back.
+  assert.equal(e.track, 'OP');
+  assert.equal(e.minHours, 0, 'an OP level has NO per-day hours threshold');
+  assert.equal(e.capDays, 4);
+
+  // Behavioural proof, not just config: a single 1.0h therapy day BILLS under OP. Under
+  // any IOP reading of "4" it would be 0 (below the 3.0h floor) and render as HRS.
+  const c = client({
+    loc: 'MH OP 4 Adult',
+    auths: [auth({ loc: 'MH OP 4 Adult', freq: '' })],
+    sessions: [T('2026-08-10', 1.0)],
+  });
+  const r = computeRow(c, WEEK, LOC_CONFIG_BASE);
+  assert.equal(r.billableDays, 1, 'OP bills any attended G/T day');
+  assert.deepEqual(r.days[0]?.codes, ['T']);
+});
+
+test('every MH OP N level is OP/0-minHours — none inherited the IOP floor', () => {
+  for (const n of [1, 2, 3, 4, 5]) {
+    const e = LOC_CONFIG_BASE[`MH OP ${n} Adult`];
+    assert.ok(e, `MH OP ${n} Adult missing`);
+    assert.equal(e.track, 'OP', `MH OP ${n} Adult must stay OP`);
+    assert.equal(e.minHours, 0, `MH OP ${n} Adult must not inherit the IOP hours floor`);
+    assert.equal(e.capDays, n);
+  }
+});

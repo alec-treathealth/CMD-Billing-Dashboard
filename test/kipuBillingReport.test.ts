@@ -620,3 +620,64 @@ test('fixture: harness invariants hold — attestations stripped, auth windows p
   assert.equal(b.boundary.length, 1);
   assert.equal(b.boundary.filter((x) => x.billable).length, 0);
 });
+
+/* ══════════ THE ANTI-DERIVATION GUARD (ruled 2026-08-29) ══════════════════════════════
+ * MH IOP 1/2/3 are enumerated, never parsed. A level that merely LOOKS like the pattern
+ * must not be absorbed by it: `MH IOP 9 Adult` has to land in the ambiguous fallback and
+ * be flagged by name, so a human confirms the cap instead of a regex inventing one.
+ * ════════════════════════════════════════════════════════════════════════════════════ */
+
+test('a level that LOOKS like MH IOP N is NOT given a cap parsed from its digit', () => {
+  assert.equal(LOC_CONFIG_BASE['MH IOP 9 Adult'], undefined, 'precondition: 9 is unmapped');
+  const b = buildFromCsv(
+    assembleBundle([
+      { name: 'x-Billable-Sessions.csv', text: csv(SESSIONS_HEADER, sessionRow({ loc: 'MH IOP 9 Adult' })) },
+    ]),
+    LOC_CONFIG_BASE,
+  );
+  const e = b.locCfg['MH IOP 9 Adult'];
+  assert.ok(e, 'the level must still be synthesised, not dropped');
+  // THE ASSERTION THAT MATTERS: the trailing 9 must not have become a cap of 9.
+  assert.notEqual(e.capDays, 9, 'a digit parser leaked in — the ruling is enumerate, not derive');
+  assert.equal(e.ambiguous, true, 'an unmapped level must be marked ambiguous');
+  assert.equal(e.capDays, 7, 'with no parseable auth Freq it falls back to uncapped');
+});
+
+test('the unmapped level is FLAGGED BY NAME — it fails loudly rather than silently', () => {
+  const b = buildFromCsv(
+    assembleBundle([
+      { name: 'x-Billable-Sessions.csv', text: csv(SESSIONS_HEADER, sessionRow({ loc: 'MH IOP 9 Adult' })) },
+    ]),
+    LOC_CONFIG_BASE,
+  );
+  const named = b.locFlags.filter((f) => f.includes('MH IOP 9 Adult'));
+  assert.equal(named.length, 1, 'exactly one flag naming the unmapped level');
+  assert.match(named[0]!, /no config entry/i);
+});
+
+test('the four ENUMERATED IOP levels produce no ambiguity flag — only unmapped ones do', () => {
+  for (const loc of ['MH IOP 1 Adult', 'MH IOP 2 Adult', 'MH IOP 3 Adult', 'MH IOP 4 Adult']) {
+    const b = buildFromCsv(
+      assembleBundle([{ name: 'x-Billable-Sessions.csv', text: csv(SESSIONS_HEADER, sessionRow({ loc })) }]),
+      LOC_CONFIG_BASE,
+    );
+    assert.equal(b.locCfg[loc]?.ambiguous, undefined, `${loc} should be a clean enumerated entry`);
+    assert.equal(b.locFlags.filter((f) => f.includes(loc)).length, 0, `${loc} should raise no flag`);
+  }
+});
+
+test('MH OP N is not reachable from the IOP rule — an OP level keeps OP semantics', () => {
+  // Guards constraint 2 at the synthesis layer as well as the config layer.
+  for (const n of [1, 2, 3, 4, 5]) {
+    const loc = `MH OP ${n} Adult`;
+    const b = buildFromCsv(
+      assembleBundle([{ name: 'x-Billable-Sessions.csv', text: csv(SESSIONS_HEADER, sessionRow({ loc })) }]),
+      LOC_CONFIG_BASE,
+    );
+    const e = b.locCfg[loc];
+    assert.ok(e, `${loc} missing`);
+    assert.equal(e.track, 'OP');
+    assert.equal(e.minHours, 0);
+    assert.equal(e.capDays, n);
+  }
+});

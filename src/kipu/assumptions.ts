@@ -158,6 +158,27 @@ export type LocConfigMap = Record<string, LocConfigEntry>;
 export const LOC_CONFIG_BASE: LocConfigMap = {
   // IOP: a day bills only when it reaches minHours (3.0) of attended service; BPS hours
   // count toward that total, and the weekly cap is the ladder number.
+  //
+  // ⚠ MH IOP 1 / 2 / 3 ARE THE SAME PROGRAM (ruled by Alec 2026-08-29). The trailing
+  // numeral is the weekly billable-day cap and NOTHING else varies: the 3.0h/day minimum,
+  // the `I` day code, the no-bare-G-or-T rule on an IOP track and BPS stacking without
+  // consuming a cap day are all inherited verbatim from MH IOP 3 Adult below.
+  //
+  // ⚠ ENUMERATED ON PURPOSE — DO NOT REPLACE THIS WITH A PARSER. It would be one line to
+  // read the trailing digit and synthesise a cap for any `MH IOP N`, and that is exactly
+  // what must not happen: the unmapped-level error is load-bearing. A future MH IOP 5 has
+  // to FAIL LOUDLY so a human confirms the cap actually is 5, rather than being silently
+  // absorbed by a pattern nobody has verified holds beyond 1-4.
+  //
+  // ⚠ THE RULE IS PREFIX-SCOPED TO `MH IOP N` AND STOPS THERE. It does NOT extend to
+  // `MH OP N`, which is a different track: MH OP 4 Adult resolves via Kipu's own
+  // `consider_as` to OUTPATIENT (verified live 2026-08-29), not IOP-with-cap-4. Making
+  // MH OP N inherit IOP semantics would revert the #268 ruling and is a regression.
+  //
+  // Kipu cannot supply any of this: /api/care_levels returns EMPTY `hours` and
+  // `days_of_the_week` on all 9 levels, so the caps are policy, not a Kipu read.
+  'MH IOP 1 Adult': { track: 'IOP', capDays: 1, minHours: 3.0 },
+  'MH IOP 2 Adult': { track: 'IOP', capDays: 2, minHours: 3.0 },
   'MH IOP 3 Adult': { track: 'IOP', capDays: 3, minHours: 3.0 },
   'MH IOP 4 Adult': { track: 'IOP', capDays: 4, minHours: 3.0 },
   // OP: any attended G or T day bills, up to the ladder number. No hours threshold.
