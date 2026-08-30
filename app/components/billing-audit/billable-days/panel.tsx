@@ -110,7 +110,14 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
         }
       } else {
         setError(ERROR_TEXT[res.error]);
-        if (res.error !== 'no-weeks') setData(null);
+        if (fresh) {
+            setData(null);
+            setFiles(null);
+            setCellOv(new Map());
+            setStatusOv(new Map());
+          } else if (res.error !== 'no-weeks') {
+            setData(null);
+          }
       }
       setBusy(false);
     },
