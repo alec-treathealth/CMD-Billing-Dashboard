@@ -272,8 +272,8 @@ export function buildImportPayload(args: {
       },
       clientCount: build.clients.length,
       weekCount: build.weeks.length,
-      notes: [...build.notes],
-      skipped: [...build.skipped],
+      notes: canRevealPhi ? [...build.notes] : build.notes.map(() => 'engine-diagnostic'),
+      skipped: canRevealPhi ? [...build.skipped] : build.skipped.map(() => 'skipped-row'),
       facilities: facilityOptions,
       locConfig: Object.entries(build.locCfg).map(([loc, e]) => ({
         loc,
