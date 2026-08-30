@@ -17,7 +17,7 @@ import { join, dirname } from 'node:path';
 import { assembleBundle, buildFromCsv } from '../../src/kipu/billingReport.js';
 import { LOC_CONFIG_BASE, DEFAULT_RULES, withRules } from '../../src/kipu/assumptions.js';
 import { gridRows } from '../../src/kipu/computeRow.js';
-import { buildImportPayload, facilityCodesFor, segmentOf } from '../lib/billing-audit/kipu-import';
+import { buildImportPayload, facilityCodesFor, gateSkipped, segmentOf } from '../lib/billing-audit/kipu-import';
 import {
   adjustedBillableDays,
   cellKey,
@@ -227,4 +227,101 @@ test('a multi-LOC row is flagged approximate once edited — the browser cannot 
   const ov = new Map([[cellKey(multi.id, 0), ['I'] as readonly string[]]]);
   assert.equal(isApproximate(multi, ov), true);
   assert.equal(isApproximate(multi, new Map()), false);
+});
+
+/* ══════════ QODO FINDINGS 6 + 9 — source text must not reach an ungated client ════════
+ * Both are the same defect class: server-side prose that interpolates a source value,
+ * copied into the payload without passing the canRevealPhi gate the row fields use.
+ * ════════════════════════════════════════════════════════════════════════════════════ */
+
+/** A bundle with one unparseable group row, so `skipped` is non-empty and carries detail. */
+const TOPIC = 'Trauma Processing Group';
+const skippedBuild = () =>
+  buildFromCsv(
+    assembleBundle(
+      [
+        {
+          name: 'Jane-Q-Patient-MRN-88213-export.csv',
+          text:
+            'Full Name,Admission Date,Discharge Date,Current UR Loc,Payment Method,' +
+            'Insurance 1   Insurance Company,Session,Topic,Provider,Started,Ended,Duration,' +
+            'Attended,Absent,Authorizations,Status,Completed At,Session Id,Template Id\n' +
+            `Pat One,08/01/2026,,MH IOP 3 Adult,Ins,Acme,Treat California,${TOPIC},Dr X,` +
+            'not-a-date,,3.0,Yes,,,Complete,,S1,T1\n',
+        },
+      ],
+      DEFAULT_RULES,
+    ),
+    LOC_CONFIG_BASE,
+    DEFAULT_RULES,
+  );
+
+const payloadFrom = (canRevealPhi: boolean) => {
+  const build = skippedBuild();
+  return buildImportPayload({
+    build,
+    rowsForWeek: [],
+    selectedWeek: WEEK,
+    filesByKind: { sessions: 1 },
+    canRevealPhi,
+  });
+};
+
+test('FINDING 6: without canRevealPhi, no source-row text reaches the payload', () => {
+  const p = payloadFrom(false);
+  assert.ok(p.diagnostics.skipped.length > 0, 'precondition: something was skipped');
+  const json = JSON.stringify(p);
+  assert.equal(json.includes(TOPIC), false, 'the raw Topic reached an ungated payload');
+  for (const frag of ['Trauma', 'Processing']) {
+    assert.equal(json.includes(frag), false, `"${frag}" leaked from the source row`);
+  }
+  // What it DOES get: a fixed reason code and a count.
+  assert.match(p.diagnostics.skipped[0]!, /1 group session row held out — unparseable Started/);
+});
+
+test('FINDING 6: with canRevealPhi, the existing detail is unchanged', () => {
+  const p = payloadFrom(true);
+  assert.equal(p.diagnostics.skipped.length, 1);
+  assert.match(p.diagnostics.skipped[0]!, /group session "Trauma Processing Group" — unparseable Started/);
+});
+
+test('FINDING 6: the gate is the SAME one the row fields use — topic and skipped agree', () => {
+  // A plain `user` must not receive the clinical topic in `skipped` while the very same
+  // string is nulled two fields away. Both are driven by canRevealPhi and nothing else.
+  for (const canRevealPhi of [false, true]) {
+    const p = payloadFrom(canRevealPhi);
+    assert.equal(p.phiIncluded, canRevealPhi);
+    assert.equal(JSON.stringify(p).includes(TOPIC), canRevealPhi);
+  }
+});
+
+test('FINDING 9: the uploaded filename never reaches the payload, gated or not', () => {
+  for (const canRevealPhi of [false, true]) {
+    const json = JSON.stringify(payloadFrom(canRevealPhi));
+    for (const leak of ['Jane', 'Patient', 'MRN', '88213', 'export.csv']) {
+      assert.equal(json.includes(leak), false, `"${leak}" leaked from the filename (phi=${canRevealPhi})`);
+    }
+  }
+});
+
+test('FINDING 9: the A9 warning still reaches the UI — the fix redacts, it does not silence', () => {
+  const p = payloadFrom(false);
+  const a9 = p.diagnostics.notes.filter((n) => /A9 GUARD/.test(n));
+  assert.equal(a9.length, 1, 'the A9 warning must survive redaction');
+  assert.match(a9[0]!, /file 1 of 1/);
+  assert.match(a9[0]!, /-Billable-/);
+});
+
+test('gateSkipped aggregates by reason+kind and never echoes detail', () => {
+  const rows = [
+    { reason: 'unparseable-started', kind: 'group-session', detail: 'SECRET-A' },
+    { reason: 'unparseable-started', kind: 'group-session', detail: 'SECRET-B' },
+    { reason: 'no-full-name', kind: 'evaluation', detail: null },
+  ] as const;
+  const out = gateSkipped(rows, false).join('\n');
+  assert.equal(out.includes('SECRET'), false, 'detail echoed through the ungated path');
+  assert.match(out, /2 group session rows held out — unparseable Started/);
+  assert.match(out, /1 evaluation row held out — no Full Name/);
+  // Singular/plural is not cosmetic here: it is the count doing the work of the detail.
+  assert.equal(gateSkipped(rows, true).join('\n').includes('SECRET-A'), true);
 });

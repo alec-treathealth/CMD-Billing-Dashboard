@@ -254,6 +254,35 @@ test('A9: assembleBundle classifies by header signature and warns loudly on a no
   assert.ok(warning);
   assert.match(warning, /A9/);
   assert.match(warning, /-Billable-/);
+  // Qodo finding 9: the FILENAME must not appear. It is user-supplied text from a
+  // PHI-bearing export, and this warning is published to the browser verbatim.
+  assert.equal(warning.includes('export-Labs.csv'), false, 'the raw filename leaked into the A9 warning');
+  assert.equal(warning.includes('export-Labs'), false);
+  // It is identified positionally instead, with the CONTENT-detected kind.
+  assert.match(warning, /file 1 of 1/);
+  assert.match(warning, /detected kind: sessions/);
+});
+
+test('A9: a filename carrying patient-looking text never reaches the warning', () => {
+  const bundle = assembleBundle([
+    { name: 'Jane-Q-Patient-MRN-88213-export.csv', text: csv(SESSIONS_HEADER, sessionRow({})) },
+  ]);
+  const warning = bundle.variantWarnings[0];
+  assert.ok(warning);
+  for (const leak of ['Jane', 'Patient', 'MRN', '88213', '.csv']) {
+    assert.equal(warning.includes(leak), false, `"${leak}" leaked from the filename into the A9 warning`);
+  }
+});
+
+test('A9 positional identification stays correct across several files', () => {
+  const bundle = assembleBundle([
+    { name: 'a-Billable-Sessions.csv', text: csv(SESSIONS_HEADER, sessionRow({})) },
+    { name: 'secret-name.csv', text: csv(EVALS_HEADER, evalRow({})) },
+  ]);
+  assert.equal(bundle.variantWarnings.length, 1, 'only the non-Billable file warns');
+  assert.match(bundle.variantWarnings[0]!, /file 2 of 2/);
+  assert.match(bundle.variantWarnings[0]!, /detected kind: evaluations/);
+  assert.equal(bundle.variantWarnings[0]!.includes('secret-name'), false);
 });
 
 test('A9: no warning for -Billable- filenames, and the guard is switchable off', () => {
@@ -680,4 +709,39 @@ test('MH OP N is not reachable from the IOP rule — an OP level keeps OP semant
     assert.equal(e.minHours, 0);
     assert.equal(e.capDays, n);
   }
+});
+
+
+/* ══════════ QODO FINDING 6 — skipped rows carry source text as STRUCTURE ══════════════
+ * The parser keeps the detail (it is server-side and the recon needs it); splitting reason
+ * from detail is what lets the payload drop one and keep the other.
+ * ════════════════════════════════════════════════════════════════════════════════════ */
+
+test('a skipped row records reason + kind + detail separately, not as one baked string', () => {
+  const b = buildFromCsv(
+    assembleBundle([
+      {
+        name: 'x-Billable-Sessions.csv',
+        text: csv(SESSIONS_HEADER, sessionRow({ topic: 'Trauma Processing Group', started: 'not-a-date' })),
+      },
+    ]),
+    LOC_CONFIG_BASE,
+  );
+  assert.equal(b.skipped.length, 1);
+  const row = b.skipped[0]!;
+  assert.equal(row.reason, 'unparseable-started');
+  assert.equal(row.kind, 'group-session');
+  assert.equal(row.detail, 'Trauma Processing Group');
+});
+
+test('a row skipped for no Full Name carries NO detail — there is no source text to keep', () => {
+  const b = buildFromCsv(
+    assembleBundle([
+      { name: 'x-Billable-Sessions.csv', text: csv(SESSIONS_HEADER, sessionRow({ name: '', topic: 'Trauma Processing Group' })) },
+    ]),
+    LOC_CONFIG_BASE,
+  );
+  assert.equal(b.skipped.length, 1);
+  assert.equal(b.skipped[0]!.reason, 'no-full-name');
+  assert.equal(b.skipped[0]!.detail, null);
 });
