@@ -243,47 +243,54 @@ test('segmentOf puts every row in All, and adds review/past only when earned', (
   }
 });
 
-/* ------------------------- session-local overrides ------------------------- */
+/* ------------------------- session-local overrides -------------------------
+ * Every helper takes the WEEK the edit was made on (Qodo 2, 2026-08-30). These cases all read
+ * and write the SAME week, so they assert the arithmetic; the cross-week scoping proof is
+ * `billableDaysOverrideScope.test.tsx`.
+ * --------------------------------------------------------------------------- */
 
 test('an un-edited row keeps the engine count exactly — overrides cannot cause drift', () => {
   const p = payload(true);
   const none = new Map<string, readonly string[]>();
   for (const r of p.rows) {
-    assert.equal(adjustedBillableDays(r, none), r.billableDays);
-    assert.equal(rowHasOverride(r, none), false);
-    assert.equal(isApproximate(r, none), false);
+    assert.equal(adjustedBillableDays(r, none, p.selectedWeek), r.billableDays);
+    assert.equal(rowHasOverride(r, none, p.selectedWeek), false);
+    assert.equal(isApproximate(r, none, p.selectedWeek), false);
   }
 });
 
 test('overriding a cell to a billable code raises the count; N/B lowers it', () => {
   const p = payload(true);
+  const w = p.selectedWeek;
   const row = p.rows.find((r) => r.days.some((d) => d.codes.length === 0) && r.billableDays < r.capDays);
   assert.ok(row, 'no row with a spare day and headroom under the cap');
   const emptyDay = row.days.find((d) => d.codes.length === 0)!;
-  const up = new Map([[cellKey(row.id, emptyDay.i), ['G'] as readonly string[]]]);
-  assert.equal(adjustedBillableDays(row, up), row.billableDays + 1);
+  const up = new Map([[cellKey(w, row.id, emptyDay.i), ['G'] as readonly string[]]]);
+  assert.equal(adjustedBillableDays(row, up, w), row.billableDays + 1);
 
   const billableDay = row.days.find((d) => d.codes.some((c) => ['I', 'G', 'T', 'BPS'].includes(c)));
   if (billableDay) {
-    const down = new Map([[cellKey(row.id, billableDay.i), ['N/B'] as readonly string[]]]);
-    assert.equal(adjustedBillableDays(row, down), row.billableDays - 1);
+    const down = new Map([[cellKey(w, row.id, billableDay.i), ['N/B'] as readonly string[]]]);
+    assert.equal(adjustedBillableDays(row, down, w), row.billableDays - 1);
   }
 });
 
 test('the adjusted count can never exceed the cap, however many cells are overridden', () => {
   const p = payload(true);
+  const w = p.selectedWeek;
   const row = p.rows[0]!;
-  const all = new Map(row.days.map((d) => [cellKey(row.id, d.i), ['I'] as readonly string[]]));
-  assert.equal(adjustedBillableDays(row, all), Math.min(7, row.capDays));
+  const all = new Map(row.days.map((d) => [cellKey(w, row.id, d.i), ['I'] as readonly string[]]));
+  assert.equal(adjustedBillableDays(row, all, w), Math.min(7, row.capDays));
 });
 
 test('a multi-LOC row is flagged approximate once edited — the browser cannot reproduce A13', () => {
   const p = payload(true);
+  const w = p.selectedWeek;
   const multi = p.rows.find((r) => r.multiLoc);
   if (!multi) return; // fixture may not contain one; the guard is still asserted below
-  const ov = new Map([[cellKey(multi.id, 0), ['I'] as readonly string[]]]);
-  assert.equal(isApproximate(multi, ov), true);
-  assert.equal(isApproximate(multi, new Map()), false);
+  const ov = new Map([[cellKey(w, multi.id, 0), ['I'] as readonly string[]]]);
+  assert.equal(isApproximate(multi, ov, w), true);
+  assert.equal(isApproximate(multi, new Map(), w), false);
 });
 
 /* ══════════ QODO FINDINGS 6 + 9 — source text must not reach an ungated client ════════

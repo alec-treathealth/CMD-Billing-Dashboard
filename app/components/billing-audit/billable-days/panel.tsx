@@ -15,22 +15,43 @@
  * temporary and disappears entirely once the parsed corpus persists — at which point a week
  * change becomes a keyed read. Do not "fix" it by shipping every week at once.
  *
+ * ⚠ ONE REQUEST MAY WRITE, AND IT IS THE LATEST ONE (Qodo 10, fixed 2026-08-30). Both `onPick`
+ * and `gotoWeek` call `send`, and the drop handler can fire while one is already in flight, so
+ * responses can and do arrive out of order. `send` used to apply EVERY response
+ * unconditionally: an older one could overwrite newer rows, a newer error, or — worst — the
+ * retained `File` handles, after which every later week change silently re-posted the WRONG
+ * corpus and the grid was confidently wrong rather than visibly broken. Each call now claims a
+ * monotonic token and the reducer drops any response that no longer holds it. Do not add a
+ * state write to this component that bypasses `dispatch`.
+ *
+ * A fresh pick discards the loaded export the moment it is ATTEMPTED, so the tab never shows the
+ * previous export's clients and totals under a "Parsing…" button as if they were the incoming
+ * import's. Week navigation does not — see `import-state.ts` for both contracts.
+ *
+ * ⚠ ALL OF THE LIFECYCLE STATE LIVES IN `import-state.ts`, deliberately. `data`, `files`,
+ * `busy`, `error`, both override maps and the drawer target are one fact, not seven; read that
+ * file's header before changing any of them. The filters below (`segment`, `locFilter`,
+ * `facFilter`, `revealed`, `dragging`) are genuinely independent view state and stay local.
+ *
  * PHI: names / auth numbers / session topics are absent from the payload unless the viewer
  * has `canRevealPhi`. The reveal toggle only controls DISPLAY of what the server already
  * decided this viewer may see.
  */
-import { useCallback, useRef, useState } from 'react';
-import { importKipuReport, type ImportError, type KipuImportResult } from '@/lib/billing-audit/kipu-actions';
-import type { KipuImportPayload, KipuRowDTO, KipuSegment } from '@/lib/billing-audit/kipu-import';
+import { useCallback, useReducer, useRef, useState } from 'react';
+import { importKipuReport, type KipuImportResult } from '@/lib/billing-audit/kipu-actions';
+import type { KipuRowDTO, KipuSegment } from '@/lib/billing-audit/kipu-import';
 import type { DashboardView } from '@/lib/views';
 import { BillableDaysGrid } from './grid';
-import { BillableDaysDrawer, type DrawerTarget } from './drawer';
+import { BillableDaysDrawer } from './drawer';
 import { ImportSummary } from './import-summary';
-import { CODE_LEGEND, type WeekStatus } from './legend';
-import { countOverrides, type CellOverrides, type StatusOverrides } from './overrides';
+import { CODE_LEGEND } from './legend';
+import { adjustedBillableDays, countOverrides, isApproximate } from './overrides';
+import { importReducer, initialImportState, type ImportFailure } from './import-state';
 
 /** Generic, enumerated. The server never sends file content or an identifier back. */
-const ERROR_TEXT: Record<ImportError, string> = {
+const ERROR_TEXT: Record<ImportFailure, string> = {
+  // Not a server code: the Server Action never returned (body rejected before it ran).
+  'send-failed': 'That upload could not be sent. Try one export at a time.',
   unauthorized: 'You do not have access to import Kipu reports.',
   'wrong-view': 'Treat locations are BXR facilities — switch the view to BXR to import.',
   'no-files': 'No files were selected.',
@@ -65,26 +86,22 @@ function Stat({ label, value, tone }: { label: string; value: string | number; t
 }
 
 export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView; canRevealPhi: boolean }) {
-  const [data, setData] = useState<KipuImportPayload | null>(null);
-  const [files, setFiles] = useState<File[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // The whole import lifecycle — see import-state.ts. `dispatch` is stable, so it is not a dep.
+  const [st, dispatch] = useReducer(importReducer, initialImportState);
+  const { data, files, busy, error, cellOv, statusOv, target } = st;
   const [dragging, setDragging] = useState(false);
   const [segment, setSegment] = useState<KipuSegment>('all');
   const [locFilter, setLocFilter] = useState<string>('');
   const [facFilter, setFacFilter] = useState<string>('');
   const [revealed, setRevealed] = useState(false);
-  const [target, setTarget] = useState<DrawerTarget | null>(null);
-  // SESSION-LOCAL overrides. Cleared whenever a new import replaces the data, because a
-  // cell key from the previous export means nothing against a different one.
-  const [cellOv, setCellOv] = useState<CellOverrides>(new Map());
-  const [statusOv, setStatusOv] = useState<StatusOverrides>(new Map());
   const inputRef = useRef<HTMLInputElement>(null);
+  /** Monotonic request id. A ref, not state: allocating it must not schedule a render. */
+  const reqId = useRef(0);
 
   const send = useCallback(
-    async (picked: File[], week: string | null, fresh: boolean) => {
-      setBusy(true);
-      setError(null);
+    async (picked: readonly File[], week: string | null, fresh: boolean) => {
+      const id = ++reqId.current;
+      dispatch({ type: 'request', id, fresh });
       const fd = new FormData();
       fd.set('view', view);
       if (week) fd.set('week', week);
@@ -94,25 +111,15 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
         res = await importKipuReport(fd);
       } catch {
         // A rejected body (too large for the server action limit) surfaces here, not as a result.
-        setError('That upload could not be sent. Try one export at a time.');
-        setBusy(false);
+        dispatch({ type: 'failed', id, error: 'send-failed', fresh });
         return;
       }
       if (res.ok) {
         const { ok: _ok, ...payload } = res;
-        setData(payload);
-        setFiles(picked);
-        if (fresh) {
-          // A cell key is `${rowId}:${day}` and row ids are per-import ordinals, so carrying
-          // overrides across a NEW export would silently re-point them at different people.
-          setCellOv(new Map());
-          setStatusOv(new Map());
-        }
+        dispatch({ type: 'applied', id, payload, files: picked, fresh });
       } else {
-        setError(ERROR_TEXT[res.error]);
-        if (res.error !== 'no-weeks') setData(null);
+        dispatch({ type: 'failed', id, error: res.error, fresh });
       }
-      setBusy(false);
     },
     [view],
   );
@@ -203,7 +210,7 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
         </button>
         {error && (
           <p role="alert" className="mx-auto mt-3 max-w-lg text-sm text-red-700 dark:text-red-400">
-            {error}
+            {ERROR_TEXT[error]}
           </p>
         )}
       </div>
@@ -336,23 +343,9 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
             revealed={revealed}
             cellOv={cellOv}
             statusOv={statusOv}
-            onSetCell={(key, codes) =>
-              setCellOv((prev) => {
-                const next = new Map(prev);
-                if (codes === null) next.delete(key);
-                else next.set(key, codes);
-                return next;
-              })
-            }
-            onSetStatus={(rowId, status) =>
-              setStatusOv((prev) => {
-                const next = new Map(prev);
-                if (status === null) next.delete(rowId);
-                else next.set(rowId, status);
-                return next;
-              })
-            }
-            onOpen={(row, dayIndex) => setTarget({ row, dayIndex })}
+            onSetCell={(key, codes) => dispatch({ type: 'set-cell', key, codes })}
+            onSetStatus={(key, status) => dispatch({ type: 'set-status', key, status })}
+            onOpen={(row, dayIndex) => dispatch({ type: 'open-drawer', target: { row, dayIndex } })}
           />
 
           {countOverrides(cellOv, statusOv) > 0 && (
@@ -370,10 +363,7 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
               </span>
               <button
                 type="button"
-                onClick={() => {
-                  setCellOv(new Map());
-                  setStatusOv(new Map());
-                }}
+                onClick={() => dispatch({ type: 'clear-overrides' })}
                 className="ml-auto rounded-md border border-line bg-card px-2 py-1 text-ink900 hover:border-ink400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
                 Clear all
@@ -396,12 +386,17 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
         </>
       )}
 
-      {target && (
+      {target && data && (
+        // The count comes from the SAME function the grid row uses, so the two cannot disagree
+        // (Qodo 8). `data` is required rather than optional: a drawer outliving its payload
+        // would have no week to scope the overrides by, and nothing valid to show.
         <BillableDaysDrawer
           target={target}
-          phiIncluded={data?.phiIncluded ?? false}
+          billableDays={adjustedBillableDays(target.row, cellOv, data.selectedWeek)}
+          approximate={isApproximate(target.row, cellOv, data.selectedWeek)}
+          phiIncluded={data.phiIncluded}
           revealed={revealed}
-          onClose={() => setTarget(null)}
+          onClose={() => dispatch({ type: 'close-drawer' })}
         />
       )}
     </section>

@@ -17,6 +17,17 @@
  * bare staff name — it is "this clinician saw this client on this date", with the client
  * already identified on the row. It is gated now (Alec, 2026-08-29).
  *
+ * ⚠ THE BILLABLE-DAY COUNT IS PASSED IN, NOT READ OFF THE ROW (Qodo 8, fixed 2026-08-30). This
+ * header used to render `r.billableDays` — the engine's untouched number — while the grid row
+ * two clicks away rendered `adjustedBillableDays(...)`. An edited client therefore showed TWO
+ * different totals for the same week, and the drawer's was the one a biller would read as
+ * authoritative because it sits under the client's name. The panel computes it ONCE and hands
+ * the same value to both surfaces, `approximate` included, so they cannot disagree.
+ *
+ * ⚠ DO NOT RECOMPUTE IT HERE. The cap semantics belong to `overrides.ts` (and its own header
+ * records where they are knowingly simplified). A second implementation in this file is how the
+ * two numbers diverged in the first place.
+ *
  * The two masks differ ON PURPOSE. `topic` renders `••••••` because the line exists only to
  * carry it, so an empty line would read as "no topic recorded". `provider` sits in a metadata
  * strip beside status and label and is guarded by `{s.provider && …}`, so a withheld value
@@ -36,11 +47,17 @@ export interface DrawerTarget {
 
 export function BillableDaysDrawer({
   target,
+  billableDays,
+  approximate,
   phiIncluded,
   revealed,
   onClose,
 }: {
   target: DrawerTarget;
+  /** Override-aware count from `adjustedBillableDays` — the SAME value the grid row shows. */
+  billableDays: number;
+  /** The grid's ` ≈` marker: this row's cap is applied approximately (see overrides.ts). */
+  approximate: boolean;
   phiIncluded: boolean;
   revealed: boolean;
   onClose: () => void;
@@ -67,7 +84,18 @@ export function BillableDaysDrawer({
             </h2>
             <p className="mt-0.5 text-xs text-ink400">
               {r.loc || '—'}
-              {r.payer ? ` · ${r.payer}` : ''} · {r.billableDays}/{r.capDays} billable days · {r.totalHours} h
+              {r.payer ? ` · ${r.payer}` : ''} ·{' '}
+              <span
+                title={
+                  approximate
+                    ? "This row's auths span more than one level of care, so the server applies a per-day cap the browser does not reproduce. Treat this as indicative until it is recomputed server-side."
+                    : undefined
+                }
+              >
+                {billableDays}
+                {approximate ? ' ≈' : ''}/{r.capDays} billable days
+              </span>{' '}
+              · {r.totalHours} h
             </p>
           </div>
           <button

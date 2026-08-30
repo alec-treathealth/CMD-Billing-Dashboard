@@ -63,9 +63,12 @@ function row(s: KipuSessionDTO): KipuRowDTO {
 }
 
 function html(s: KipuSessionDTO, phiIncluded: boolean): string {
+  const r = row(s);
   return renderToStaticMarkup(
     <BillableDaysDrawer
-      target={{ row: row(s), dayIndex: 0 }}
+      target={{ row: r, dayIndex: 0 }}
+      billableDays={r.billableDays}
+      approximate={false}
       phiIncluded={phiIncluded}
       revealed={phiIncluded}
       onClose={() => {}}
