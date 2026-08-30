@@ -7,26 +7,50 @@
  * weeks while never existing). CLAUDE.md is now the single map, and this script
  * makes a `git mv` fail a gate instead of silently rotting that map.
  *
- * Three assertions:
+ * Four assertions. 1-3 run FORWARD (table -> disk); 4 runs BACKWARD (disk -> table):
  *   1. every canonical-table path resolves on disk
  *   2. every NOT-IN-REPO path does NOT resolve (if one lands, the map is lying)
  *   3. every SUPERSEDED path still resolves (they are real, just frozen)
+ *   4. every tracked documentation file appears in the table (or on the frozen allowlist,
+ *      whose contents are pinned by digest so the exemption set can only ever shrink)
+ *
+ * WHY 4 EXISTS, AND WHY ITS ABSENCE WAS INVISIBLE. Until 2026-08-30 this guard was
+ * FORWARD-ONLY: it proved every LISTED path resolves, and never that every tracked doc
+ * is LISTED. So `npm test` stayed green while an unregistered doc sat in the tree, in
+ * violation of CLAUDE.md's "A doc is either in the table above or it is deleted —
+ * 'untracked' is not a third state". Nothing reported the gap, because a forward-only
+ * check cannot: the set it iterates is the set it is supposed to be auditing.
  *
  * Parsing is structural: locate the level-2 section by heading text, find the
  * table inside it whose header cells are Role/Path/Read-order, split body rows
  * on pipes, and read the path out of the cell's inline-code span. No matching
  * on filenames or extensions — renaming a doc must be detected, not tolerated.
  *
- * Known gap: this checks the working tree, not `git ls-tree HEAD`. A path that
- * exists locally but is uncommitted passes here and would 404 on a fresh clone.
- * Untracked docs therefore belong under "### Uncommitted — not guarded", not in
- * the table. (A HEAD check needs child_process, which the repo security hook
- * rejects; revisit if a vetted exec helper lands.)
+ * ASYMMETRY, ON PURPOSE. Assertions 1-3 read the WORKING TREE; assertion 4 reads the
+ * GIT INDEX. That is not an oversight:
+ *   - Forward, the working tree is the right question — a listed path must be readable
+ *     by the session reading CLAUDE.md right now.
+ *   - Backward, tracked-ness is the ONLY defensible question. A filesystem walk would
+ *     fail the gate on a teammate's local scratch note, making the result depend on an
+ *     uncommitted working tree and disagree machine-to-machine. A gate that fires on
+ *     files no one else can see is a gate people learn to ignore.
+ * The forward half's own gap therefore stands unchanged: a path that exists locally but
+ * is uncommitted still passes 1-3 and would 404 on a fresh clone.
+ *
+ * ⚠ THIS HEADER CLAIMED `child_process` WAS "rejected by the repo security hook" AND
+ * THAT WAS FALSE — it was the stated reason assertion 4 was never built. The repo's only
+ * hook is `.claude/hooks/session-start.sh`, which pins the git author identity and
+ * inspects no tool call; `src/auth.ts:11` has imported `node:child_process` in
+ * production source the whole time. A blocker recorded in a comment and never re-tested
+ * outlives the thing it described. `execFileSync` is used below with an ARGUMENT ARRAY
+ * and no shell, so no path or pathspec is ever interpolated into a command line.
  *
  * Run standalone:  npx tsx scripts/check-context-map.ts
  * Runs in root `npm test` via test/contextMap.test.ts
  */
 
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -240,20 +264,328 @@ export function checkContextMap(map: ContextMap, repoRoot: string = REPO_ROOT): 
   return failures;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════════════════
+ * Assertion 4 — the reverse direction: every tracked doc must be in the table.
+ * ══════════════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * WHICH TRACKED FILES COUNT AS "documentation", and why it is `.md` alone.
+ *
+ * Read from how the repo actually scopes the word rather than assumed. Three inputs:
+ *
+ *   - The table MAY list a non-`.md` file, and does: `pr_compliance_checklist.yaml` sits at
+ *     read-order 4. So table membership is not `.md`-only, and this check deliberately does
+ *     NOT assert the converse — a row may point at any path. The relation asserted here is
+ *     one-way: every tracked `.md` is in the table. Not: everything in the table is `.md`.
+ *   - That yaml is listed for its CONTENT ("PR compliance rules — the real Qodo content"),
+ *     not because `.yaml` is a documentation format. Generalising from it would sweep in
+ *     `.github/workflows/*.yml` and `requirements-brain{1,2,3}.txt` — CI config and pip
+ *     manifests. Those are configuration. Calling them docs would force either registering
+ *     config in a prose table or padding the allowlist with files nobody will ever triage,
+ *     and both make the table mean less.
+ *   - Nothing is lost by the narrower scope: every tracked file in this repo that reads as
+ *     prose documentation is already `.md`. The only non-`.md` candidates are the three
+ *     `requirements-brain*.txt` pip manifests, three `.github/workflows/*.yml`, and the one
+ *     `.yaml` already in the table — none of them prose.
+ *
+ * So: `.md` is the scope, stated rather than inferred. If a genuine `.rst`/`.adoc`/`.txt`
+ * doc ever lands, widen this array in the same change that adds it — do not let the first
+ * one in on the grounds that the guard did not happen to cover its extension.
+ */
+const DOC_EXTENSIONS: readonly string[] = ['.md'];
+
+/**
+ * Structurally out of scope — NOT backlog, and NOT allowlist material.
+ *
+ * CLAUDE.md says so itself, in the paragraph directly under the canonical table:
+ * "Path-scoped rules in `.claude/rules/` load automatically and are not listed here".
+ * They are a different artifact kind — auto-loaded, path-triggered rules, not cold-start
+ * reading — so they will never be triaged INTO the table and must never age out of an
+ * allowlist that is meant to reach zero.
+ */
+const OUT_OF_SCOPE_PREFIXES: readonly string[] = ['.claude/rules/'];
+
+/**
+ * ⚠ FROZEN BASELINE — THE EXACT 52 TRACKED DOCS UNREGISTERED ON 2026-08-30. NEVER EDIT IT.
+ *
+ * WHAT THIS IS: the set of tracked docs that already violated CLAUDE.md's "a doc is either
+ * in the table above or it is deleted" on the day assertion 4 was switched on. Enumerated by
+ * hand so the assertion could go live for anything NEW without silently ratifying the
+ * backlog. A NEW unregistered doc fails the gate on day one; these 52 stay visible instead
+ * of being laundered into "passing".
+ *
+ * ⚠ THIS ARRAY IS APPEND-NEVER AND EDIT-NEVER, AND THAT IS ENFORCED, NOT REQUESTED.
+ * `ALLOWLIST_BASELINE_SHA256` pins its contents. Adding a path, removing one, or SWAPPING one
+ * for another all change the digest and fail `checkAllowlistIntegrity`. There is no edit to
+ * this array that passes the gate.
+ *
+ * The first version of this guard pinned only the LENGTH, which was a real hole (Qodo #276,
+ * finding 1): dropping one entry and adding a different tracked-and-unregistered path kept the
+ * count at 52 and satisfied every check, so the exemption set could be REPLACED rather than
+ * shrunk — while the comment above it claimed "only shrinks". A cardinality ratchet is not a
+ * subset ratchet. The digest is, and it holds regardless of what future readers believe the
+ * invariant to be.
+ *
+ * TO TRIAGE ONE: register it in the Canonical Context Set (or delete the file), then add its
+ * path to RESOLVED_SINCE_BASELINE below. That is the ONLY array that ever grows.
+ */
+const ALLOWLIST_BASELINE_2026_08_30: readonly string[] = [
+  'INT-INGEST-DIAGNOSIS-ROUND2.md',
+  'MARKET_VALIDATION.md',
+  'NO-FACILITY-ATTRIBUTION-FEASIBILITY.md',
+  'NO-FACILITY-CUSTOMER-ID-LEVER.md',
+  'QUALIFY-AUDIT-2026-08-12.md',
+  'app/README.md',
+  'docs/BH-Payer-Policy-Report-All-Payers-2026-08-09.md',
+  'docs/DATABASE-SCHEMA-HANDOFF.md',
+  'docs/PERF-PROMPT-2026-08-03.md',
+  'docs/Qualify v2 — design prototype prompt.md',
+  'docs/UHC-93-code-exposure-2026-08-10.md',
+  'docs/archive/billing-audit-consolidated-reports.md',
+  'docs/archive/code-intel-AUDIT.md',
+  'docs/archive/fable-build-doc-e2e/02-session-tenancy-foundation.md',
+  'docs/archive/fable-build-doc-e2e/03-session-etl-reference-data.md',
+  'docs/archive/fable-build-doc-e2e/04-session-python-ml-runtime.md',
+  'docs/archive/fable-build-doc-e2e/05-session-auth.md',
+  'docs/archive/fable-build-doc-e2e/06-session-cmd-ingest-indigo.md',
+  'docs/archive/fable-build-doc-e2e/07-session-production-readiness-gate.md',
+  'docs/archive/fable-build-doc-e2e/08-session-era-835-ingestion.md',
+  'docs/archive/fable-build-doc-e2e/09-session-agent-validation.md',
+  'docs/archive/fable-build-doc-e2e/10-session-veris-ui.md',
+  'docs/archive/fable-build-doc-e2e/11-session-mcp-servers.md',
+  'docs/archive/fable-build-doc-e2e/12-session-evals-observability.md',
+  'docs/archive/fable-build-doc-e2e/13-session-gtm-instrumentation.md',
+  'docs/archive/veris-runbook.md',
+  'docs/cc-prompts-design-unification.md',
+  'docs/mockups/qualify-smoke-NOTES.md',
+  'docs/monday-census-board-architecture.md',
+  'docs/payer-intel-HANDOFF-2026-08-03.md',
+  'docs/qualify-current-status.md',
+  'docs/qualify-redesign-HANDOFF.md',
+  'docs/qualify-redesign-cc-prompt.md',
+  'docs/qualify-v2-build-plan.md',
+  'docs/qualify-v2-morning-runbook.md',
+  'docs/qualify-v3-followups-handoff.md',
+  'docs/qualify-v3-search-pattern.md',
+  'docs/qualify-watchers-handoff.md',
+  'docs/upcoming-payments-HANDOFF.md',
+  'etl/vob/HANDOFF.md',
+  'etl/vob/docs/vob_extraction_recon_and_build.md',
+  'etl/vob/docs/vob_supabase_load_plan.md',
+  'qualify-prompts/00-INDEX.md',
+  'qualify-prompts/OON-1-reimbursement-and-denial-recovery.md',
+  'qualify-prompts/WAVE-1-correctness-and-exposure.md',
+  'qualify-prompts/WAVE-2-operational.md',
+  'qualify-prompts/WAVE-3-accessibility.md',
+  'qualify-prompts/WAVE-4-ux-restructure.md',
+  'qualify-prompts/WAVE-5-followups-and-backlog.md',
+  'qualify-v3-search-rearchitecture-PROMPT.md',
+  'scripts/payer-ml/README.md',
+  'test/fixtures/kipu-billing-report/README.md',
+];
+
+/** sha256 over ALLOWLIST_BASELINE_2026_08_30.join('\n'). Any edit to the array breaks it. */
+export const ALLOWLIST_BASELINE_SHA256 =
+  'fe58db8ce381f1731b66589ff706c1eaa3240d4ec0ddeb04150a66629bf27d3e';
+
+/** When the baseline was taken, and how big it was. Both are historical facts, not settings. */
+export const ALLOWLIST_CREATED = '2026-08-30';
+export const ALLOWLIST_INITIAL_SIZE = 52;
+
+/**
+ * Docs from the baseline that have since been REGISTERED in the Canonical Context Set, or
+ * DELETED from the repo. This is the only array here that grows, and every entry is a debt
+ * paid down — the backlog is `ALLOWLIST_INITIAL_SIZE - RESOLVED_SINCE_BASELINE.length`.
+ *
+ * ⚠ This is NOT a place to exempt a new doc. An entry here is only honoured if the path is
+ * ALSO in the frozen baseline; adding an unrelated path exempts nothing (the doc is still not
+ * in the baseline, so it is still unregistered and still fails) and is reported as a stale
+ * entry. The two legitimate moves for a failing doc remain: register it, or delete it.
+ */
+const RESOLVED_SINCE_BASELINE: readonly string[] = [];
+
+/**
+ * The live exemption set: the frozen baseline minus what has been triaged. DERIVED, never
+ * hand-edited — which is what makes "only shrinks" a structural property of the code rather
+ * than a claim in a comment that the tests half-checked.
+ */
+export const UNREGISTERED_DOC_ALLOWLIST: readonly string[] = ALLOWLIST_BASELINE_2026_08_30.filter(
+  (p) => !RESOLVED_SINCE_BASELINE.includes(p),
+);
+
+/** The digest of the baseline as it stands right now. Compare against the pin. */
+export function allowlistBaselineDigest(): string {
+  return createHash('sha256').update(ALLOWLIST_BASELINE_2026_08_30.join('\n')).digest('hex');
+}
+
+/**
+ * Tamper check on the exemption machinery itself, independent of any repo state.
+ *
+ * Assertion 4 is only as trustworthy as the allowlist it consults, so the allowlist gets its
+ * own assertions: the baseline must be byte-identical to what was grandfathered, and the live
+ * set must be a subset of it. Without the first, a swap goes unnoticed; without the second, a
+ * future refactor that hand-edits UNREGISTERED_DOC_ALLOWLIST instead of deriving it could
+ * widen the exemption without ever touching the baseline.
+ *
+ * All four inputs are injected so the tests can exercise a TAMPERED baseline against the real
+ * logic. Defaults are the live wiring — `checkAllowlistIntegrity()` with no arguments is what
+ * `main()` and `loadAndCheck` call.
+ */
+export function checkAllowlistIntegrity(
+  baseline: readonly string[] = ALLOWLIST_BASELINE_2026_08_30,
+  live: readonly string[] = UNREGISTERED_DOC_ALLOWLIST,
+  resolved: readonly string[] = RESOLVED_SINCE_BASELINE,
+  pinnedDigest: string = ALLOWLIST_BASELINE_SHA256,
+): Failure[] {
+  const failures: Failure[] = [];
+
+  const digest = createHash('sha256').update(baseline.join('\n')).digest('hex');
+  if (digest !== pinnedDigest) {
+    failures.push({
+      kind: 'frozen allowlist baseline was edited',
+      path: 'scripts/check-context-map.ts',
+      detail:
+        `ALLOWLIST_BASELINE_2026_08_30 hashes to ${digest}, not the pinned ` +
+        `${pinnedDigest}. That array is frozen: adding, removing or SWAPPING an ` +
+        'entry are all rule violations. Register the doc or delete it; to retire a baseline ' +
+        'entry, add its path to RESOLVED_SINCE_BASELINE instead.',
+    });
+  }
+
+  const grandfathered = new Set(baseline);
+  for (const p of live) {
+    if (!grandfathered.has(p)) {
+      failures.push({
+        kind: 'exemption outside the frozen baseline',
+        path: p,
+        detail: `not among the ${ALLOWLIST_INITIAL_SIZE} docs grandfathered on ${ALLOWLIST_CREATED} — the exemption set may only shrink`,
+      });
+    }
+  }
+
+  for (const p of resolved) {
+    if (!grandfathered.has(p)) {
+      failures.push({
+        kind: 'stale RESOLVED_SINCE_BASELINE entry',
+        path: p,
+        detail: 'never in the frozen baseline, so it exempts nothing — remove it',
+      });
+    }
+  }
+
+  return failures;
+}
+
+
+function isDoc(path: string): boolean {
+  return DOC_EXTENSIONS.some((ext) => path.endsWith(ext));
+}
+
+function inScope(path: string): boolean {
+  return isDoc(path) && !OUT_OF_SCOPE_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
+/**
+ * Tracked documentation files, repo-relative, from the git index.
+ *
+ * `-z` because two tracked docs carry spaces and an em dash in their names
+ * ("CMD AR Automation — Build Doc v2.md"); newline-splitting corrupts those. The argument
+ * array means no shell, so the pathspec is never string-interpolated.
+ *
+ * THROWS if git is unavailable or this is not a checkout. That is deliberate — the failure
+ * mode being avoided is the one that made assertion 4 necessary in the first place: a check
+ * that cannot see its input must not report success. Fail loud, never fail open.
+ */
+export function listTrackedDocs(repoRoot: string = REPO_ROOT): string[] {
+  const pathspecs = DOC_EXTENSIONS.map((ext) => `*${ext}`);
+  let out: string;
+  try {
+    out = execFileSync('git', ['ls-files', '-z', '--', ...pathspecs], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch (err) {
+    throw new Error(
+      `context-map: cannot list tracked docs via git (${(err as Error).message}). ` +
+        'Assertion 4 needs the git index; it will not report success without it.',
+    );
+  }
+  return out.split('\0').filter(Boolean).filter(inScope).sort();
+}
+
+/**
+ * Assertion 4. Pure over its inputs — `trackedDocs` is injected so the unit tests can
+ * exercise it against synthetic lists with no git and no disk.
+ */
+export function checkUnregisteredDocs(
+  map: ContextMap,
+  trackedDocs: readonly string[],
+  allowlist: readonly string[] = UNREGISTERED_DOC_ALLOWLIST,
+): Failure[] {
+  const failures: Failure[] = [];
+  const registered = new Set([...map.canonical.map((e) => e.path), ...map.superseded]);
+  const allowed = new Set(allowlist);
+  const tracked = new Set(trackedDocs);
+
+  for (const path of trackedDocs) {
+    if (registered.has(path) || allowed.has(path)) continue;
+    failures.push({
+      kind: 'tracked doc not in the Canonical Context Set',
+      path,
+      detail:
+        'CLAUDE.md: a doc is either in the table or it is deleted. Register it (add a row ' +
+        'and renumber read-order) or delete it. Do NOT add it to UNREGISTERED_DOC_ALLOWLIST.',
+    });
+  }
+
+  // The shrink ratchet: an allowlist entry that is no longer a tracked, unregistered doc has
+  // been resolved, so the exemption must go with it. Without this the array would keep
+  // claiming a backlog that no longer exists.
+  for (const path of allowlist) {
+    if (!tracked.has(path)) {
+      failures.push({
+        kind: 'stale allowlist entry',
+        path,
+        detail: `no longer a tracked in-scope doc — remove it from UNREGISTERED_DOC_ALLOWLIST (created ${ALLOWLIST_CREATED})`,
+      });
+    } else if (registered.has(path)) {
+      failures.push({
+        kind: 'stale allowlist entry',
+        path,
+        detail: `now registered in the Canonical Context Set — remove it from UNREGISTERED_DOC_ALLOWLIST (created ${ALLOWLIST_CREATED})`,
+      });
+    }
+  }
+
+  return failures;
+}
+
 export function loadContextMap(repoRoot: string = REPO_ROOT): ContextMap {
   return parseContextMap(readFileSync(join(repoRoot, 'CLAUDE.md'), 'utf8'));
 }
 
 export function loadAndCheck(repoRoot: string = REPO_ROOT): Failure[] {
-  return checkContextMap(loadContextMap(repoRoot), repoRoot);
+  const map = loadContextMap(repoRoot);
+  return [
+    ...checkContextMap(map, repoRoot),
+    ...checkAllowlistIntegrity(),
+    ...checkUnregisteredDocs(map, listTrackedDocs(repoRoot)),
+  ];
 }
 
 function main(): void {
   let map: ContextMap;
+  let tracked: string[];
   let failures: Failure[];
   try {
     map = loadContextMap();
-    failures = checkContextMap(map);
+    tracked = listTrackedDocs();
+    failures = [
+      ...checkContextMap(map),
+      ...checkAllowlistIntegrity(),
+      ...checkUnregisteredDocs(map, tracked),
+    ];
   } catch (err) {
     console.error(`context-map: ${(err as Error).message}`);
     process.exit(1);
@@ -263,12 +595,19 @@ function main(): void {
     for (const f of failures) {
       console.error(`  ✗ ${f.path}\n      ${f.kind} — ${f.detail}`);
     }
-    console.error('\nFix the path in CLAUDE.md, or move the file back. Do not delete the row.');
+    console.error(
+      '\nForward failures (1-3): fix the path in CLAUDE.md, or move the file back — do not' +
+        '\ndelete the row. Reverse failures (4): register the doc in the Canonical Context Set' +
+        '\nor delete it. Adding it to UNREGISTERED_DOC_ALLOWLIST is a rule violation.',
+    );
     process.exit(1);
   }
+  const registered = new Set([...map.canonical.map((e) => e.path), ...map.superseded]);
+  const backlog = tracked.filter((p) => !registered.has(p)).length;
   console.log(
     `context-map: OK — ${map.canonical.length} canonical, ` +
-      `${map.superseded.length} superseded, ${map.notInRepo.length} not-in-repo`,
+      `${map.superseded.length} superseded, ${map.notInRepo.length} not-in-repo, ` +
+      `${tracked.length} tracked docs (${backlog} on the dated allowlist, target 0)`,
   );
 }
 
