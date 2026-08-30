@@ -20,9 +20,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { CODE_LEGEND, codeOrReason, codeTitle } from '../components/billing-audit/billable-days/legend';
+import {
+  CODE_LEGEND,
+  codeOrReason,
+  codeTitle,
+  meaningFor,
+} from '../components/billing-audit/billable-days/legend';
 import { BillableDaysGrid } from '../components/billing-audit/billable-days/grid';
-import { claimCodeFor } from '../../src/kipu/claimCodes.js';
+import { CA_CLAIM_CODES, claimCodeFor } from '../../src/kipu/claimCodes.js';
 import { WEEK_A, makeRow } from './helpers/billableDays';
 
 /** Every code the CA seed refuses to resolve, and the alternates it refuses to pick from. */
@@ -67,18 +72,58 @@ test('every entry carries a code XOR a reason — never both, never neither', ()
   }
 });
 
-test('the legend AGREES with the CA seed: same codes resolved, same ones refused', () => {
+/* ── the agreement runs BOTH WAYS, deliberately ──────────────────────────────────────────────
+ * The first version of this walked `CODE_LEGEND` only. That is the same shape as the
+ * forward-only context-map guard CLAUDE.md records: a check that iterates one set cannot report
+ * anything about entries missing from it. A code seeded in `claimCodes.ts` and absent from the
+ * legend would have passed silently, while this file claimed the two modules agreed.
+ * ─────────────────────────────────────────────────────────────────────────────────────────── */
+
+test('FORWARD — every code the LEGEND prints is one the CA seed actually resolves', () => {
   for (const m of CODE_LEGEND) {
     const seeded = claimCodeFor('CA', m.code);
-    if (seeded.resolved) {
+    if (m.cpt !== null) {
+      // The strong direction, and the one the original defect violated: the display may not
+      // print a claim code the policy does not resolve — whatever the reason it does not.
+      assert.equal(seeded.resolved, true, `${m.code} shows a CPT the CA seed does not resolve`);
       assert.equal(m.cpt, seeded.code, `${m.code}: the legend and the CA seed disagree`);
-    } else if (seeded.flag === 'claim-code-ambiguous' || seeded.flag === 'claim-code-absent') {
-      // The seed knows this code and refuses it — the display must refuse it too.
-      assert.equal(m.cpt, null, `${m.code} is unresolved in the CA seed but shows a code in the UI`);
+    } else if (seeded.resolved) {
+      assert.fail(`${m.code} resolves in the CA seed but the legend shows no code`);
     }
-    // `claim-code-unknown` (N/B) is not in the seed's legend at all; the display may still
-    // describe it, because "not a billable service" is a display fact, not a claim mapping.
   }
+});
+
+test('REVERSE — every code the CA SEED knows is described by the legend, and agrees', () => {
+  // The direction Qodo found missing. Without it, a seed-only entry is invisible here.
+  for (const e of CA_CLAIM_CODES) {
+    const m = meaningFor(e.dayCode);
+    assert.ok(m, `${e.dayCode} is in the CA seed but has no legend entry to render it`);
+    assert.equal(
+      m!.cpt,
+      e.code,
+      `${e.dayCode}: seed says ${e.code ?? 'no code'}, legend says ${m!.cpt ?? 'no code'}`,
+    );
+    if (e.code === null) {
+      assert.ok(m!.unresolved, `${e.dayCode} is unresolved in the seed but the legend gives no reason`);
+    }
+  }
+});
+
+test('the ONLY legitimate asymmetry is legend-only, non-service entries', () => {
+  // N/B is a display marker, not a service, so the seed has no line for it and `claimCodeFor`
+  // returns `claim-code-unknown`. Pin that this is the whole of the asymmetry — if a second
+  // legend-only code ever appears, someone has to decide whether it is a service.
+  const legendOnly = CODE_LEGEND.filter((m) => !CA_CLAIM_CODES.some((e) => e.dayCode === m.code));
+  assert.deepEqual(legendOnly.map((m) => m.code), ['N/B']);
+  for (const m of legendOnly) {
+    const seeded = claimCodeFor('CA', m.code);
+    assert.equal(seeded.resolved, false);
+    assert.equal(seeded.resolved ? null : seeded.flag, 'claim-code-unknown');
+    assert.equal(m.cpt, null, 'a code the seed has never heard of must not print a CPT');
+  }
+  // And nothing may be seed-only: every seeded code needs somewhere to render.
+  const seedOnly = CA_CLAIM_CODES.filter((e) => !CODE_LEGEND.some((m) => m.code === e.dayCode));
+  assert.deepEqual(seedOnly.map((e) => e.dayCode), []);
 });
 
 test('RENDERED: no alternate reaches the grid’s markup for an I day', () => {
