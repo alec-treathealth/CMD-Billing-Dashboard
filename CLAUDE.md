@@ -15,11 +15,27 @@ This table is the only authoritative source of doc paths in this repo. If a
 prompt hands you a path, treat it as a hint and defer to this table.
 
 Enforced by `scripts/check-context-map.ts`, which runs inside root `npm test`
-(`test/contextMap.test.ts`). Every path in the table must resolve on disk; every
-path in the NOT-IN-REPO list must not. A `git mv` fails the gate instead of
-silently rotting this section. The guard reads the working tree, not `HEAD`, so
-only committed docs belong in the table — untracked ones go under
-[Uncommitted — not guarded](#uncommitted--not-guarded).
+(`test/contextMap.test.ts`), in **both directions since 2026-08-30**. Forward:
+every path in the table must resolve on disk, every NOT-IN-REPO path must not,
+and every superseded path must. Backward: **every tracked `.md` must appear in
+the table.** A `git mv` fails the gate instead of silently rotting this section,
+and so now does adding a doc without registering it.
+
+The two halves read different things, deliberately. Forward reads the **working
+tree** — a listed path must be readable by the session reading this file right
+now — so only committed docs belong in the table and untracked ones go under
+[Uncommitted — not guarded](#uncommitted--not-guarded). Backward reads the **git
+index**, because tracked-ness is the only question that gives the same answer on
+every machine; a filesystem walk would fail a teammate's gate on their local
+scratch note.
+
+⚠ **52 tracked docs predate the backward check and are exempt by a dated
+allowlist** (`UNREGISTERED_DOC_ALLOWLIST`, created 2026-08-30). They are
+violations, held visible rather than laundered into "passing". A **new**
+unregistered doc fails on day one. **Adding a path to that allowlist is a rule
+violation, not a normal edit** — the two legitimate moves are register or delete.
+The allowlist only shrinks: registering one of the 52 makes its now-stale entry
+fail until it is removed.
 
 | Role | Path | Read-order |
 |---|---|---|
@@ -48,8 +64,16 @@ created go unchecked.
 ⚠ **That is exactly how a doc modified in a PR reached review unregistered** (2026-08-30).
 No glob matched `docs/`, so the Canonical Context Set obligation — keyed to *"you touched
 a tracked doc"*, not to a path — was never consulted. The gate did not catch it either:
-`scripts/check-context-map.ts` verifies every **listed** path resolves; it never checks
-that every **tracked** doc is listed. Forward-only, by construction.
+`scripts/check-context-map.ts` was **forward-only by construction**, verifying that every
+**listed** path resolves and never that every **tracked** doc is listed. A forward-only
+check structurally cannot report that gap: the set it iterates is the set it is supposed
+to be auditing.
+
+**The gate half is now closed** (2026-08-30) — the reverse assertion ships with a dated
+allowlist for the 52 pre-existing violations, so a new unregistered doc fails immediately.
+**The rules half is not, and cannot be**: no automated check tells you which obligations
+attach to the KIND of artifact you are creating. That is what the table below is for, and
+it is why the question survives its own worked example.
 
 So ask **both** questions before editing: *which rules match these paths*, and *what kind
 of artifact am I creating or changing*.
