@@ -26,12 +26,18 @@ Hard invariants:
 **Verification gate — all five, green, before any commit:**
 
 ```bash
-npm test                    # root hermetic suite — >=1439 pass / 0 fail
+npm test                    # floor in CLAUDE.md (NOT restated here — see below)
 npm run typecheck           # root tsc (strict: noUncheckedIndexedAccess)
-cd app && npm test          # app suite — >=831 pass / 0 fail
+cd app && npm test          # floor in CLAUDE.md
 cd app && npm run typecheck
 cd app && npm run build     # the only thing that catches webpack failures
 ```
+
+⚠ **The pass-count floors are deliberately NOT written here.** This block used to name
+`>=1439` / `>=831`; those were ratified 2026-08-11 and were **447 root and 207 app tests
+low** by 2026-08-30, so a session running this prompt would have checked a suite that had
+lost 447 tests against a number it still passed. CLAUDE.md's *Verification gate* is the only
+place the floors are re-measured. Read them there; do not copy them back into this file.
 
 Root `tsc` is stricter than app `tsc`. Run both. Counts are **floors, not targets** — if a suite reports fewer, tests were lost; find out why before committing.
 
