@@ -218,12 +218,27 @@ two conditions `.claude/rules/nextjs-app.md` describes — a local `.env` masks
 Vercel-only bundler failures. So these may be trusted as measured rather than as
 a lower bound someone once hit.
 
-⚠ **THE APP HALF IS ALREADY KNOWN-CONSERVATIVE BY ~17 AS OF THIS WRITING**, and
-that is not rot — three PRs were open against `a55c83f` when it was measured
-(#284 +7, #285 +5, #286 +5, all `app/`). Seeing 1055 in `app/` after they land is
-expected. Root is unaffected by all three. Do not "correct" the floor to match a
-number from a tree that includes unmerged work; re-measure on a clean detached
-checkout, which is the only thing this chain accepts as evidence.
+⚠ **THE APP HALF IS KNOWN-CONSERVATIVE AND THAT IS NOT ROT.** The floor was
+measured on `a55c83f` while several PRs were still open against it; they have
+since landed, so `app/` legitimately reports **more** than 1038. Root is
+unaffected by any of them. Do not "correct" the floor to match a number from a
+tree that includes unmerged work — re-measure on a clean detached checkout, which
+is the only thing this chain accepts as evidence.
+
+⚠ **AND THE PREDICTION THIS PARAGRAPH USED TO MAKE WAS WRONG WITHIN HOURS, WHICH
+IS THE MORE USEFUL LESSON.** It named an exact arithmetic — "conservative by ~17
+(#284 +7, #285 +5, #286 +5)", predicting 1055 — and every term of it moved. #284
+landed at **+9**, not +7, because its own review added two tests. #286 was merged
+and then **REVERTED** (#289 — it had been pushed early by accident), so its +5
+counts **zero** on `main` today and the grid-filter fix it carried is NOT in the
+tree. `main` @`ef082e8` measures **1052**, not the 1055 predicted.
+
+A floor is a measurement; a projection of a floor is a guess with a number on it,
+and it rots faster than the thing it was explaining. State what was measured and
+on which SHA — do not do arithmetic about work that has not merged. This
+paragraph was itself written in the change that DELETED the copied floors from
+eight other files, which is how easy the mistake is: a fresh copy minted in the
+act of removing the others.
 
 They supersede 1439 / 831, measured 2026-08-11 under the same clean-worktree
 condition on `origin/main` @`f3a8d93` — correctly ratified then, simply outgrown
