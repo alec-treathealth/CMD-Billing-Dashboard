@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   ALLOWLIST_CREATED,
+  ALLOWLIST_INITIAL_PATHS,
   ALLOWLIST_INITIAL_SIZE,
   REPO_ROOT,
   UNREGISTERED_DOC_ALLOWLIST,
@@ -204,6 +205,16 @@ test('the dated allowlist may only shrink — it is a ratchet, never a growth su
       `${ALLOWLIST_CREATED} size of ${ALLOWLIST_INITIAL_SIZE}. Adding a path is a rule ` +
       'violation: register the doc in the Canonical Context Set, or delete it.',
   );
+  for (const path of UNREGISTERED_DOC_ALLOWLIST) {
+    assert.ok(ALLOWLIST_INITIAL_PATHS.includes(path), `allowlist entry is not in the original baseline: ${path}`);
+  }
+});
+
+test('the allowlist ratchet rejects replacing an original entry', () => {
+  const replacement = 'newly-tracked-but-unregistered.md';
+  const replaced = [...ALLOWLIST_INITIAL_PATHS.slice(1), replacement];
+  assert.ok(!ALLOWLIST_INITIAL_PATHS.includes(replacement));
+  assert.ok(replaced.some((path) => !ALLOWLIST_INITIAL_PATHS.includes(path)));
 });
 
 test('every allowlist entry is a real, still-unregistered tracked doc', () => {

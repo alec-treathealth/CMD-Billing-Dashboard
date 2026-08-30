@@ -329,7 +329,8 @@ const OUT_OF_SCOPE_PREFIXES: readonly string[] = ['.claude/rules/'];
  * which should be deleted is 52 separate judgements that belong to Alec, not to the change
  * that installs the guard.
  */
-export const UNREGISTERED_DOC_ALLOWLIST: readonly string[] = [
+/** Exact membership baseline captured when the allowlist was created. Entries may only be removed. */
+export const ALLOWLIST_INITIAL_PATHS: readonly string[] = [
   'INT-INGEST-DIAGNOSIS-ROUND2.md',
   'MARKET_VALIDATION.md',
   'NO-FACILITY-ATTRIBUTION-FEASIBILITY.md',
@@ -382,7 +383,10 @@ export const UNREGISTERED_DOC_ALLOWLIST: readonly string[] = [
   'qualify-v3-search-rearchitecture-PROMPT.md',
   'scripts/payer-ml/README.md',
   'test/fixtures/kipu-billing-report/README.md',
-];
+] as const;
+
+/** The current exemption set is a copy so it can shrink, but never replace baseline paths. */
+export const UNREGISTERED_DOC_ALLOWLIST: readonly string[] = [...ALLOWLIST_INITIAL_PATHS];
 
 /** The size of the allowlist on the day it was created. It may go DOWN; never up. */
 export const ALLOWLIST_CREATED = '2026-08-30';
