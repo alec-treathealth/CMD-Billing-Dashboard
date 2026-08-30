@@ -47,32 +47,89 @@ function payload(canRevealPhi: boolean, rules = DEFAULT_RULES) {
 
 /* ------------------------------- the PHI gate ------------------------------ */
 
-test('without canRevealPhi the name, auth number and topic are ABSENT, not merely hidden', () => {
+test('without canRevealPhi the name, auth number, topic and provider are ABSENT, not merely hidden', () => {
   const p = payload(false);
   assert.equal(p.phiIncluded, false);
   assert.ok(p.rows.length > 0, 'fixture produced no rows');
   for (const r of p.rows) {
     assert.equal(r.name, null);
     for (const a of r.auths) assert.equal(a.no, null);
-    for (const d of r.days) for (const s of d.sessions) assert.equal(s.topic, null);
+    for (const d of r.days) for (const s of d.sessions) {
+      assert.equal(s.topic, null);
+      assert.equal(s.provider, null);
+    }
   }
   // ⚠ THE REAL LEAK CHECK, and it must not be vacuous: take the names the PRIVILEGED
   // payload exposes and assert not one of them appears anywhere in the masked payload's
   // serialized form — not in a row, not in a note, not in a diagnostic string.
-  const names = payload(true)
-    .rows.map((r) => r.name)
+  const full = payload(true);
+  const names = full.rows
+    .map((r) => r.name)
     .filter((n): n is string => typeof n === 'string' && n.trim().length > 0);
   assert.ok(names.length > 0, 'fixture exposed no names to test against');
   const json = JSON.stringify(p);
   for (const n of names) {
     assert.equal(json.includes(n), false, 'a patient name reached the masked payload');
   }
+
+  // Same sweep for PROVIDER (ruled 2026-08-29). Asserting `s.provider === null` above only
+  // proves the field is nulled at the one site the mapper writes; this proves the VALUE is
+  // nowhere in the response at all — not in a note, a diagnostic, or a warn string. Sourced
+  // from the privileged payload so it can never go vacuously green on a hardcoded guess.
+  const providers = [
+    ...new Set(
+      full.rows.flatMap((r) =>
+        r.days.flatMap((d) =>
+          d.sessions
+            .map((x) => x.provider)
+            .filter((v): v is string => typeof v === 'string' && v.trim().length > 0),
+        ),
+      ),
+    ),
+  ];
+  assert.ok(providers.length > 0, 'fixture exposed no providers to test against');
+  for (const v of providers) {
+    assert.equal(json.includes(v), false, `a provider name reached the masked payload: ${v}`);
+  }
 });
 
-test('with canRevealPhi those three fields are present', () => {
+test('with canRevealPhi those four fields are present', () => {
   const p = payload(true);
   assert.equal(p.phiIncluded, true);
   assert.ok(p.rows.some((r) => typeof r.name === 'string' && r.name.length > 0));
+  assert.ok(
+    p.rows.some((r) => r.days.some((d) => d.sessions.some((x) => typeof x.provider === 'string' && x.provider.length > 0))),
+    'gating provider must not blank it for a privileged viewer',
+  );
+});
+
+test('gating provider changes NOTHING for a privileged viewer', () => {
+  // The ruling gates provider; it must not degrade the reveal path. Pinned as COUNTS rather
+  // than a `typeof` check, which would pass just as happily on a payload that had quietly
+  // nulled everything. Same discipline as this file's engine-number assertions.
+  const sessions = payload(true).rows.flatMap((r) => r.days.flatMap((d) => d.sessions));
+  assert.equal(sessions.length, 182);
+  assert.equal(sessions.filter((x) => x.provider === null).length, 0, 'no null for a privileged viewer');
+  // The engine trims a blank source column to ''. The gate passes that through untouched
+  // rather than converting it to null — '' means "Kipu had no Provider", null means withheld.
+  assert.equal(sessions.filter((x) => x.provider === '').length, 1);
+  assert.equal(new Set(sessions.map((x) => x.provider).filter(Boolean)).size, 18);
+});
+
+test('provider and topic are driven by the SAME gate — neither can drift from the other', () => {
+  // The defect this fixes: provider sat UNGATED three lines above a gated topic in the same
+  // object. Withholding a group's topic while disclosing who led it lets the topic be
+  // inferred from the clinician, so the topic gate was leaking through provider. Both fields
+  // must answer to canRevealPhi and to nothing else.
+  for (const canRevealPhi of [false, true]) {
+    const p = payload(canRevealPhi);
+    const sessions = p.rows.flatMap((r) => r.days.flatMap((d) => d.sessions));
+    assert.ok(sessions.length > 0, 'fixture produced no sessions');
+    for (const x of sessions) {
+      assert.equal(x.provider === null, !canRevealPhi, 'provider must be null iff ungated');
+      assert.equal(x.topic === null, !canRevealPhi, 'topic must be null iff ungated');
+    }
+  }
 });
 
 test('non-PHI detail is present for EVERY viewer — masking must not blank the grid', () => {
