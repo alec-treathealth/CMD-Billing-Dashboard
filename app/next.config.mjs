@@ -29,11 +29,23 @@ const nextConfig = {
     // ~2.6 MB) — so the default silently rejected every genuine import.
     //
     // This is a global ceiling, not a per-action one, which is why it is deliberately a
-    // FLOOR rather than the real control: `app/lib/billing-audit/kipu-actions.ts` enforces
-    // max file count, max bytes per file and max total BEFORE it reads a single byte. Raise
-    // that module's constants first if a larger import is ever needed; this number only has
-    // to stay >= its MAX_TOTAL_BYTES.
-    serverActions: { bodySizeLimit: '32mb' },
+    // FLOOR rather than the real control: `app/lib/billing-audit/kipu-import-bounds.ts`
+    // holds max file count, max bytes per file and max total, and the import action enforces
+    // all three BEFORE it reads a single byte. Raise those constants first if a larger import
+    // is ever needed.
+    //
+    // ⚠ IT MUST EXCEED MAX_TOTAL_BYTES, NOT EQUAL IT (Qodo #11 on PR #268). This was '32mb',
+    // byte-for-byte equal to MAX_TOTAL_BYTES, and Next measures the RAW MULTIPART BODY —
+    // which is strictly larger than the files inside it (per-part boundaries, filenames,
+    // content types, plus the `view` and `week` fields). An upload at the action's documented
+    // ceiling was therefore refused by Next BEFORE the action ran, making that ceiling
+    // unreachable and surfacing as the panel's generic "could not be sent" rather than as
+    // `total-too-large` — the user told to upload less by a limit they had not exceeded.
+    //
+    // 33 MiB = MAX_TOTAL_BYTES (32 MiB) + a 1 MiB multipart allowance, ~150x the measured
+    // worst case. `app/test/kipuImportBodyLimit.test.tsx` holds the two in agreement: this
+    // file is .mjs and cannot import the TypeScript bounds, so nothing else can.
+    serverActions: { bodySizeLimit: '33mb' },
   },
   async headers() {
     return [{ source: '/:path*', headers: SECURITY_HEADERS }];
