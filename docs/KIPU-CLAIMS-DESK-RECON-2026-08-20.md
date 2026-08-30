@@ -149,9 +149,31 @@ instance decide it. Do not ship a hand-maintained LOC map until this route has b
 - **No webhooks. None.** Kipu is GET/POST/PATCH only; every "webhook" is a poll-to-event bridge we own.
 - `start_date`/`end_date` are **calendar-day granularity** everywhere. Always overlap the window
   (`[yesterday, today]`), dedupe by content hash, advance the cursor only after the last page succeeds.
-- Signing: `APIAuth {access_id}:{signature}`; the signed `request_uri` must be byte-identical to what is
-  sent (param reordering ⇒ 401, never retryable). `Date` is a forbidden header in browsers/some runtimes →
-  `X-Auth-Date`. 403 = the credential owner's EMR permissions. 410 = endpoint disabled for the instance.
+- **Signing: `APIAuth-HMAC-SHA256 {access_id}:{signature}`.** ⚠ Corrected 2026-08-30 — this line
+  prescribed bare `APIAuth` until then, and that is wrong in a way that costs days. **The scheme prefix
+  selects the digest server-side** in the Ruby `api_auth` gem: bare `APIAuth` means **SHA-1**, so a
+  correctly-computed SHA-256 signature sent under it is verified against the wrong algorithm and fails
+  every single time. Falsified by PR #272 and by a live **HTTP 200** on 2026-08-28.
+- The signed `request_uri` must be byte-identical to what is sent (param reordering ⇒ failure, never
+  retryable). `Date` is a forbidden header in browsers/some runtimes → `X-Auth-Date`.
+- **⚠ Kipu returns `403` — NOT `401` — for signature-verification failure**, and the body
+  (`"Access Denied - API Client app failed to authenticate"`) reads as an identity or provisioning
+  problem. **It is not diagnostic.** This line previously said `403 = the credential owner's EMR
+  permissions`, which sent an investigation at credentials and API-client enablement for days while the
+  actual cause was the scheme above.
+
+  Work the causes in this order — cheapest and most likely first:
+
+  1. **Scheme / digest mismatch** (the 2026-08-30 cause).
+  2. **Signed-vs-sent `request_uri` drift** — param order, encoding, or a re-formatted `Date`.
+  3. **Mixed credential triple, or the connection still Pending** — all three of access_id, secret_key
+     and app_id must come from the SAME Kipu instance; Kipu validates each independently, so "both are
+     recognised" does not mean "they belong together".
+  4. **The credential owner's EMR permissions** — the original claim, demoted to last.
+
+  Reading the pattern: a **uniform 403 across every route** points at 1–3. A **per-route 403 while other
+  routes return 200** points at 4. **If a raw `curl` succeeds where the client fails, it is 1 or 2 — always.**
+- `410` = endpoint disabled for the instance.
 - No documented rate limit (Kipu's stated position, not a guarantee); no public sandbox.
 
 ---

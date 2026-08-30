@@ -87,6 +87,16 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BASE_URL = 'https://api.kipuapi.com';
+
+/**
+ * The Authorization scheme. `api_auth` reads the DIGEST ALGORITHM out of this prefix —
+ * bare `APIAuth` means SHA-1 — so this is load-bearing, not decoration. One constant so the
+ * value that is SENT and the value that is DISPLAYED cannot drift apart.
+ */
+const AUTH_SCHEME = 'APIAuth-HMAC-SHA256';
+
+/** Schemes we will ever print. A value not on this list is shown as a placeholder, never echoed. */
+const KNOWN_SCHEMES: readonly string[] = [AUTH_SCHEME, 'APIAuth', 'APIAuth-HMAC-SHA1'];
 const LIVE = process.argv.includes('--live');
 const AS_JSON = process.argv.includes('--json');
 const DIAGNOSE = process.argv.includes('--diagnose');
@@ -94,27 +104,87 @@ const EXPLAIN = process.argv.includes('--explain');
 
 type Creds = { accessId: string; secretKey: string; appId: string };
 
+/**
+ * Resolve the FIRST of `names` that is set, returning the NAME alongside the value.
+ *
+ * ⚠ THE NAME AND THE VALUE MUST TRAVEL TOGETHER (Qodo finding 3). Validation errors name a
+ * variable for an operator to go and edit. Reporting the canonical `KIPU_TREAT_*` name for
+ * a value that actually came from a legacy fallback sends them to a variable that is not
+ * set, while the one carrying the stray newline sits untouched in the same file — the error
+ * does not merely fail to help, it actively misdirects the fix.
+ *
+ * Pure and env-injected so it is testable without touching process.env.
+ */
+export function pickEnv(
+  env: Record<string, string | undefined>,
+  names: readonly string[],
+): { name: string; value: string | undefined; tried: readonly string[] } {
+  for (const n of names) {
+    const v = env[n];
+    if (v !== undefined) return { name: n, value: v, tried: names };
+  }
+  return { name: names[0]!, value: undefined, tried: names };
+}
+
 function creds(): Creds {
   // KIPU_TREAT_* is the current per-INSTANCE spelling; the unprefixed names are the
   // pre-2026-08-26 globals, kept as a fallback so an older .env still probes.
   // ⚠ All three must come from the SAME Kipu instance. A triple assembled from two
   // instances 403s with the same body as a disabled client — see the bottom note.
-  const accessId = process.env.KIPU_TREAT_ACCESS_ID ?? process.env.KIPU_ACCESS_ID;
-  const secretKey = process.env.KIPU_TREAT_SECRET_KEY ?? process.env.KIPU_SECRET_KEY;
-  // Kipu's own name for this is app_id (aka recipient_id). The retired global .env spelled
-  // it KIPU_APP_API; accept every spelling so this probe works before/after the rename.
-  const appId =
-    process.env.KIPU_TREAT_APP_ID ?? process.env.KIPU_APP_API ?? process.env.KIPU_APP_ID;
-  const missing = [
-    !accessId && 'KIPU_TREAT_ACCESS_ID (or KIPU_ACCESS_ID)',
-    !secretKey && 'KIPU_TREAT_SECRET_KEY (or KIPU_SECRET_KEY)',
-    !appId && 'KIPU_TREAT_APP_ID (or KIPU_APP_API / KIPU_APP_ID)',
-  ].filter(Boolean);
+  // ⚠ RESOLVE THE NAME ALONGSIDE THE VALUE (Qodo finding 3). Every message below must name
+  // the variable that ACTUALLY supplied the value. Reporting the canonical KIPU_TREAT_* name
+  // for a value that came from a legacy fallback sends an operator to edit a variable that
+  // is not set, while the one with the stray newline sits untouched in the same file — the
+  // error actively misdirects the fix. `pick` returns the name and the value together so
+  // they cannot drift apart.
+  const pick = (...names: string[]) => pickEnv(process.env, names);
+
+  // KIPU_TREAT_* is the current per-INSTANCE spelling; the unprefixed names are the
+  // pre-2026-08-26 globals, kept as a fallback so an older .env still probes.
+  // ⚠ All three must come from the SAME Kipu instance. A triple assembled from two
+  // instances 403s with the same body as a disabled client — see the bottom note.
+  //
+  // Kipu's own name for the third is app_id (aka recipient_id); the retired global .env
+  // spelled it KIPU_APP_API, so every spelling is accepted.
+  const accessId = pick('KIPU_TREAT_ACCESS_ID', 'KIPU_ACCESS_ID');
+  const secretKey = pick('KIPU_TREAT_SECRET_KEY', 'KIPU_SECRET_KEY');
+  const appId = pick('KIPU_TREAT_APP_ID', 'KIPU_APP_API', 'KIPU_APP_ID');
+
+  const missing = [accessId, secretKey, appId]
+    .filter((e) => e.value === undefined)
+    .map((e) => `${e.tried[0]} (or ${e.tried.slice(1).join(' / ')})`);
   if (missing.length) {
     // Never echo a value — only which name is absent.
     throw new Error(`Missing env: ${missing.join(', ')} (set in .env; never hardcode or log it)`);
   }
-  return { accessId: accessId!, secretKey: secretKey!, appId: appId! };
+
+  // ⚠ SHAPE VALIDATION. `creds()` did none, so a value carrying a stray newline out of
+  // `.env` flowed straight into the Authorization header and into every redactor that
+  // assumed a well-formed shape.
+  //
+  // Surrounding whitespace is TRIMMED — a trailing newline is an ordinary `.env` artifact and
+  // failing the run over it helps nobody. Anything left that would break the header's
+  // `scheme access_id:signature` grammar is REJECTED loudly. Only the variable NAME is ever
+  // named in the error; the value is never echoed, not even a fragment of it.
+  //
+  // This is defence in depth, NOT the fix: `authHeaderDisplay` no longer reads the access_id
+  // at all, so a malformed value cannot leak through the display even if validation is
+  // removed. Two independent barriers, deliberately.
+  const triple = [
+    { ...accessId, value: accessId.value!.trim(), isSecret: false },
+    { ...secretKey, value: secretKey.value!.trim(), isSecret: true },
+    { ...appId, value: appId.value!.trim(), isSecret: false },
+  ];
+  for (const { name, value, isSecret } of triple) {
+    if (value.length === 0) throw new Error(`${name} is empty after trimming (never hardcode or log it)`);
+    if (/[\s\u0000-\u001f]/.test(value)) {
+      throw new Error(`${name} contains whitespace or a control character inside the value — refusing to send it`);
+    }
+    if (!isSecret && value.includes(':')) {
+      throw new Error(`${name} contains ':' which would break the Authorization header grammar`);
+    }
+  }
+  return { accessId: triple[0]!.value, secretKey: triple[1]!.value, appId: triple[2]!.value };
 }
 
 /**
@@ -176,7 +246,7 @@ function signedUri(c: Creds, requestUri: string, acceptVersion: 3 | 4, opts: Sig
     signature,
     headers: {
       Accept: `application/vnd.kipusystems+json; version=${acceptVersion}`,
-      Authorization: `APIAuth-HMAC-SHA256 ${accessId}:${signature}`,
+      Authorization: `${AUTH_SCHEME} ${accessId}:${signature}`,
       Date: date,
     } as Record<string, string>,
   };
@@ -199,7 +269,38 @@ function fingerprint(v: string): string {
 
 /** Mask the app_id value inside a request_uri before it is ever printed. */
 function maskUri(uri: string): string {
-  return uri.replace(/app_id=[^&]+/, 'app_id=[REDACTED]');
+  const masked = uri.replace(/app_id=[^&]*/g, 'app_id=[REDACTED]');
+  // ⚠ FAIL CLOSED, because String.replace FAILS OPEN. It returns its input UNCHANGED when
+  // the pattern does not match, so a URI whose app_id is shaped unexpectedly would be
+  // printed verbatim by a function whose whole job is to redact it. Verify the invariant
+  // rather than trusting the substitution: if any app_id= survives with a value, withhold
+  // the entire string. A withheld URI costs a diagnostic; a leaked one costs an identifier.
+  if (/app_id=(?!\[REDACTED\])/.test(masked)) return '[URI WITHHELD — app_id could not be masked]';
+  return masked;
+}
+
+/**
+ * The Authorization header as it is SAFE to display — CONSTRUCTED from fields we already
+ * hold, never parsed back out of the assembled header.
+ *
+ * ⚠ THIS REPLACES A FAIL-OPEN REGEX MASK (Qodo finding 2). The previous version ran
+ * `.replace(/^(\S+)\s+([^:]+):(.*)$/, …)` over the assembled header. `String.replace`
+ * returns its input UNCHANGED when the pattern does not match, so any access_id that broke
+ * the pattern — a trailing newline out of `.env` is enough, and `creds()` did no shape
+ * validation — printed the FULL access ID and signature, under a comment promising neither
+ * would ever reach stdout. A redactor that emits its input on the unhappy path is worse
+ * than none, because it is trusted.
+ *
+ * The access_id is not read here AT ALL, so no input shape can leak it. The scheme is
+ * echoed only when it matches a fixed allowlist — the printed value is chosen from a table,
+ * never taken from the header.
+ */
+export function authHeaderDisplay(headerValue: string, signature: string): string {
+  const scheme = KNOWN_SCHEMES.find((k) => headerValue.startsWith(k + ' ')) ?? '[UNRECOGNISED SCHEME]';
+  const sig = typeof signature === 'string' && signature.length > 0
+    ? `${signature.slice(0, 8)}…`
+    : '[SIGNATURE UNAVAILABLE]';
+  return `${scheme} [ACCESS_ID REDACTED]:${sig}`;
 }
 
 /**
@@ -631,15 +732,14 @@ function explainOneCall(c: Creds): void {
 
   console.log('2. AUTHORIZATION HEADER (signature truncated to 8)');
   const auth = req.headers['Authorization'] ?? '';
-  const scheme = auth.split(' ')[0] ?? '';
-  // ⚠ MASK THE ACCESS_ID TOO, not just the signature. maskUri only redacts app_id, so an
-  // earlier version of this line put the full access_id on stdout — exactly what this
-  // file's header forbids. The SCHEME is the only part of this header under inspection.
-  const shown = auth
-    .replace(/^(\S+)\s+([^:]+):(.*)$/, (_m, sch, _id, sig) =>
-      `${sch} [ACCESS_ID REDACTED]:${String(sig).slice(0, 8)}…`);
+  // Built from the scheme constant and the signature signedUri already returned — the
+  // assembled header is never parsed apart, so no access_id shape can leak. See
+  // authHeaderDisplay.
+  const shown = authHeaderDisplay(auth, req.signature);
+  const scheme = KNOWN_SCHEMES.find((k) => auth.startsWith(k + ' ')) ?? '[UNRECOGNISED SCHEME]';
   console.log(`   raw    : ${JSON.stringify(shown)}`);
-  console.log(`   scheme : ${JSON.stringify(scheme)}   <-- compare to the working curl\n`);
+  console.log(`   scheme : ${JSON.stringify(scheme)}   <-- compare to the working curl`);
+  console.log(`   scheme is the SHA-256 one ? ${scheme === AUTH_SCHEME}\n`);
 
   console.log('3. URL PASSED TO fetch()');
   console.log(`   raw    : ${JSON.stringify(maskUri(req.url))}`);
