@@ -694,6 +694,22 @@
   overscroll-behavior: contain;
 }
 
+/* INSIDE A MODAL the height bound above is the wrong constraint and has to be lifted.
+   Its 30rem cap exists to stop an INLINE panel from pushing the Master chart off the page —
+   a concern that does not exist once the panel is a dialog over the page, where the cap just
+   forces scrolling inside a mostly-empty overlay (reported 2026-08-31: "the popups are too
+   small"). Bounding moves UP to the dialog shell, which is capped to the viewport and lays its
+   body out as a flex column; `max-height: none` here lets `flex: 1; min-height: 0` on the body
+   do the work, so the scroller is exactly as tall as the dialog allows.
+
+   Declared AFTER .ths-panel-scroll on purpose — same specificity, later wins — and the class is
+   ADDITIVE, so the sticky thead/TOTALS rules keyed to .ths-panel-scroll keep applying. */
+[data-ths='v2'] .ths-dialog-scroll {
+  max-height: none;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* Inside a bounded panel, the two rows a reader navigates BY stay put: the
    header names the columns and the TOTALS row is the figure the whole table
    exists to produce. Letting either scroll away turns a bounded table into a

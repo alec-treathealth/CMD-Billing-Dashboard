@@ -13,9 +13,11 @@
  * which the Overview page opts into with data-ths='v2'. Data scoping per selection:
  *
  *  • Facility · MTD  → cached loadCollectionsKpis(), reshaped by mtdGrossRows() into
- *                      the same Checks+EFT bars every other month renders.
- *  • Facility · YTD  → the same cached aggregate, as a separate horizontal ranking
- *                      chart below the month chart (FacilityYtdBars).
+ *                      the same Checks+EFT bars every other month renders. That reshape also
+ *                      carries each facility's YTD gross into the tooltip (context row only,
+ *                      never a bar segment); the standalone YTD ranking chart that used to sit
+ *                      below this one was removed 2026-08-31 — see the note at the end of the
+ *                      component, and the All Facility Revenue Table's YTD column.
  *  • Facility · past → loadCollectionsDailyRange({year,month}) aggregated to a
  *                      single gross bar per facility (tooltip: Gross/Checks/EFT).
  *  • Payer · any month → month-scoped for EVERY month incl. the current one:
@@ -84,13 +86,13 @@ import { viewTitle, type DashboardView } from '@/lib/views';
  * EFT takes the primary teal because it is the dominant payment type in every
  * month of this data; Checks takes coral, which in v2 is explicitly DECORATION and
  * carries no severity — a coral segment must never read as "something is wrong".
- * The YTD ranking chart takes the deep teal so the two facility charts on this page
- * can never be confused at a glance.
+ *
+ * `ytd` was dropped 2026-08-31 with the YTD ranking chart. Year-to-date is now a tooltip row
+ * and a table column, neither of which is color-encoded, so it needs no token.
  */
 const CHART = {
   eft: 'var(--chart-1)',
   checks: 'var(--chart-2)',
-  ytd: 'var(--chart-5)',
   grid: 'var(--chart-grid)',
   axis: 'var(--chart-axis)',
   /**
@@ -287,8 +289,9 @@ function FacilityGrossTooltip({
  * mixed two time bases in one stack, so the amber residual was 80–95% of every bar
  * and dwarfed the segments the reader came for — and because `ytd_remaining` is a
  * derived residual that exists nowhere else in the product, the tooltip never named
- * it. Year-to-date now has its own chart (FacilityYtdBars) where the comparison is
- * the point, instead of riding along on top of a month.
+ * it. Year-to-date is now a NAMED TOOLTIP ROW here and a column in the All Facility Revenue
+ * Table — never a segment on these bars. (It briefly had its own ranking chart below this one;
+ * that was removed 2026-08-31 as a third copy of the same numbers.)
  */
 function FacilityGrossBars({
   rows,
@@ -314,7 +317,10 @@ function FacilityGrossBars({
         // ths-chart-clickable is what actually lands the pointer cursor — recharts sets
         // cursor:default inline on its own wrapper, which beats inheritance from here.
         className={onBarClick ? 'ths-chart-clickable' : undefined}
-        style={{ width: '100%', height: 380 }}
+        // 380 → 560 (2026-08-31): the YTD ranking chart that used to sit below this one is gone,
+        // and this is the chart the reader actually came for. ~29 facilities at 380px left the
+        // bars too short to compare; the reclaimed space goes here rather than to whitespace.
+        style={{ width: '100%', height: 560 }}
       >
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
@@ -390,133 +396,6 @@ function FacilityGrossBars({
   );
 }
 
-/**
- * Axis-label guard for the YTD chart. Facilities without a display acronym fall back
- * to their full CMD name ("CROWN VIEW CO-OCCURRING INSTITUTE - 612335"), and recharts
- * has no ellipsis of its own — an over-long tick just overlaps its neighbours. The
- * tooltip always shows the untruncated name, so nothing is lost.
- */
-function truncateLabel(value: string): string {
-  return value.length > 26 ? `${value.slice(0, 25)}…` : value;
-}
-
-/** A facility's year-to-date gross (the YTD ranking chart's row shape). */
-interface FacilityYtdRow {
-  facility: string;
-  facility_code: string | null;
-  ytd_gross: number;
-}
-
-/**
- * Map the KPI aggregate to YTD rows, richest first. Same source as the month
- * chart (kpis.by_facility), so the two charts can never disagree.
- */
-function ytdRows(data: CollectionsKpis): FacilityYtdRow[] {
-  return data.by_facility
-    .map((r) => ({
-      facility: overviewFacilityLabel(r),
-      facility_code: r.facility_code,
-      ytd_gross: r.ytd_gross,
-    }))
-    .sort((a, b) => b.ytd_gross - a.ytd_gross);
-}
-
-function FacilityYtdTooltip({
-  active,
-  payload,
-}: {
-  active?: boolean;
-  payload?: { payload: FacilityYtdRow }[];
-}) {
-  if (!active || !payload || payload.length === 0) return null;
-  const r = payload[0]!.payload;
-  return (
-    <div className="ths-tooltip">
-      <div className="ths-card-title mb-1">{r.facility}</div>
-      <dl className="grid grid-cols-[auto_auto] gap-x-4 gap-y-0.5">
-        <dt>YTD gross</dt>
-        <dd className="total">{money(r.ytd_gross)}</dd>
-      </dl>
-    </div>
-  );
-}
-
-/**
- * "YTD gross by facility" — a single-series HORIZONTAL ranking chart.
- *
- * Horizontal on purpose, and it is the accessibility win in this pass: the vertical
- * month chart has to rotate its category labels -35° and still truncates them, which
- * is unreadable for Indigo's 30 facilities with names like "CROWN VIEW CO-OCCURRING
- * INSTITUTE - 612335". Here every label is horizontal, left-aligned and read at a
- * normal angle. The differing form is also what keeps this chart from being confused
- * with the month chart above it.
- *
- * Deliberately NOT clickable: the drill-down panel shows one MONTH's daily rows, so a
- * click here would open a month panel from a year-to-date bar. One chart, one claim.
- */
-/** Rows shown before the reader opts into the full roster (density pass, 2026-08-31). */
-const YTD_TOP_N = 12;
-
-function FacilityYtdBars({ rows, year }: { rows: FacilityYtdRow[]; year: number }) {
-  // DENSITY (2026-08-31): default to the top-N ranking with an explicit expand, instead of a
-  // ~29-row full-height chart that dominated the page. Top-N-with-expand was chosen over
-  // shrinking the row height (22px/row is already the legibility floor the comment below
-  // defends) or horizontal compaction (which reintroduces the rotated-label problem this chart
-  // exists to avoid). The chart is not the sole carrier: the All Facilities table carries YTD
-  // per facility for every facility, accessibly.
-  const [showAll, setShowAll] = useState(false);
-  const visible = showAll ? rows : rows.slice(0, YTD_TOP_N);
-  const hiddenCount = rows.length - visible.length;
-  // 22px per row keeps the bars legible without a scroll; the floor stops a
-  // one-facility filter from rendering a single absurdly fat bar.
-  const height = Math.max(140, visible.length * 22 + 32);
-  return (
-    <>
-      <div
-        role="img"
-        aria-label={
-          showAll || hiddenCount === 0
-            ? `Year-to-date ${year} gross collections by facility`
-            : `Year-to-date ${year} gross collections — top ${visible.length} facilities of ${rows.length}`
-        }
-        style={{ width: '100%', height }}
-      >
-        <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={visible} layout="vertical" margin={{ top: 4, right: 64, bottom: 4, left: 8 }} barCategoryGap="22%">
-            <CartesianGrid horizontal={false} stroke={CHART.grid} />
-            <XAxis type="number" tickFormatter={moneyAxis} tick={{ fontSize: 11, fill: CHART.axis }} stroke={CHART.grid} />
-            <YAxis
-              type="category"
-              dataKey="facility"
-              width={168}
-              interval={0}
-              tickFormatter={truncateLabel}
-              tick={{ fontSize: 10, fill: CHART.axis }}
-              stroke={CHART.grid}
-            />
-            <Tooltip content={<FacilityYtdTooltip />} cursor={{ fill: BAR_CURSOR_FILL }} />
-            <Bar dataKey="ytd_gross" name={`YTD ${year} gross`} fill={CHART.ytd} radius={[0, 3, 3, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-
-      <div className="ths-card-meta flex flex-wrap items-center gap-4">
-        <LegendDot color={CHART.ytd} label={`YTD ${year} gross`} />
-        {rows.length > YTD_TOP_N && (
-          <button
-            type="button"
-            onClick={() => setShowAll((s) => !s)}
-            aria-expanded={showAll}
-            className="ths-btn ths-btn-ghost ths-btn-sm"
-          >
-            {showAll ? `Show top ${YTD_TOP_N}` : `Show all ${rows.length} (${hiddenCount} more)`}
-          </button>
-        )}
-        <span className="ml-auto">Bar length = year-to-date gross.</span>
-      </div>
-    </>
-  );
-}
 
 /** Async state for the past-month fetch (skipped entirely for the MTD option). */
 type PastState =
@@ -1254,12 +1133,6 @@ function OverviewBarChartSingle({
   }
 
   // YTD ranking rows — same KPI aggregate as the month chart, narrowed by the same
-  // Setting/Facility filters so the two charts always describe the same set of
-  // facilities. Independent of the Month picker on purpose: year-to-date is anchored
-  // to as_of, not to the month being inspected above, and the heading says so.
-  const ytdChartRows =
-    kpisState.status === 'ready' ? filterFacilityRows(ytdRows(kpisState.data)) : [];
-
   const facilityFiltersActive = careFilter !== 'ALL' || facilityFilter !== '';
   const resetFacilityFilters = () => {
     setCareFilter('ALL');
@@ -1542,40 +1415,14 @@ function OverviewBarChartSingle({
         )}
       </div>
 
-      {/* ── Second chart: year-to-date. Its own heading, its own form (horizontal),
-             its own single series — so it reads as a separate claim about the data
-             rather than a segment sitting on top of the month above it. ────────── */}
-      {view === 'facility' && kpisState.status === 'ready' && (
-        <>
-          <hr className="ths-hr" />
-          <section>
-            <header className="mb-1 flex flex-wrap items-center justify-between gap-2">
-              <h3 className="ths-card-title">YTD gross by facility</h3>
-              <span className="ths-card-meta">
-                {anchorYear} year to date{asOf ? ` · as of ${asOf}` : ''}
-              </span>
-            </header>
-            <p className="ths-card-body mb-3">
-              Every facility&apos;s {anchorYear} collections to date, richest first. Not clickable —
-              the daily breakdown above belongs to the selected month.
-            </p>
-            {ytdChartRows.length === 0 ? (
-              <ChartEmpty
-                variant={facilityFiltersActive ? 'filtered' : undefined}
-                title={facilityFiltersActive ? 'No facilities match' : 'No collections yet'}
-                subtitle={
-                  facilityFiltersActive
-                    ? 'Adjust the IP/OP setting or facility filter to see year-to-date gross.'
-                    : `No ${anchorYear} collections have posted yet.`
-                }
-                action={facilityFiltersActive ? { label: 'Reset filters', onClick: resetFacilityFilters } : undefined}
-              />
-            ) : (
-              <FacilityYtdBars rows={ytdChartRows} year={anchorYear} />
-            )}
-          </section>
-        </>
-      )}
+      {/* THE SECOND CHART ("YTD gross by facility") WAS REMOVED 2026-08-31, deliberately and
+          not as cleanup. Year-to-date per facility now lives in the All Facility Revenue Table
+          (a column, sortable-by-eye, screen-reader-navigable) and on this chart's own hover
+          tooltip, so the horizontal ranking chart was a third copy of the same numbers — and
+          the most expensive one, since ~29 full-height bars dominated the page and pushed the
+          month chart the reader came for off-screen. Removing it is what buys the month chart
+          its height back. If YTD-by-facility ever needs a chart again, build it where the
+          comparison is the point; do not re-add a second ranking under this one. */}
     </section>
   );
 }

@@ -59,12 +59,59 @@ test('month-chart tooltip carries YTD as context only — never a bar segment', 
   assert.doesNotMatch(chartSrc, /dataKey="ytd"[^_]/, 'ytd is never charted as a series on the month chart');
 });
 
-test('YTD chart defaults to top-N with an expand control — STRUCTURAL wiring only', () => {
-  assert.match(chartSrc, /const YTD_TOP_N = 12;/);
-  assert.match(chartSrc, /rows\.slice\(0, YTD_TOP_N\)/, 'default view is the top-N ranking');
-  // Structural assertions only: these prove the attributes are WIRED, deliberately not that
-  // anything is ANNOUNCED — what a screen reader announces is browser-verified per the repo's
-  // jsdom boundary (CLAUDE.md) and compliance rule 2726594, never claimed from source regexes.
-  assert.match(chartSrc, /aria-expanded=\{showAll\}/, 'aria-expanded attribute is wired to the toggle state');
-  assert.match(chartSrc, /top \$\{visible\.length\} facilities of \$\{rows\.length\}/, 'the role=img aria-label string includes the truncation');
+test('the standalone YTD ranking chart is GONE, and nothing it owned is left behind', () => {
+  // Removed 2026-08-31: YTD per facility lives in the All Facility Revenue Table column and on
+  // the month chart's tooltip, so the ranking chart was a third copy of the same numbers.
+  for (const sym of ['FacilityYtdBars', 'FacilityYtdTooltip', 'FacilityYtdRow', 'ytdRows', 'YTD_TOP_N', 'truncateLabel']) {
+    assert.doesNotMatch(chartSrc, new RegExp(sym), `${sym} must be deleted with the chart`);
+  }
+  // The rendered heading, not the word — the explanatory note left in its place names it.
+  assert.doesNotMatch(chartSrc, /<h3 className="ths-card-title">YTD gross by facility/, 'the chart heading is gone');
+  // The dead color token went with it — YTD is not color-encoded anywhere now.
+  assert.doesNotMatch(chartSrc, /ytd: 'var\(--chart/, 'the CHART.ytd token is removed');
+  // ...and the reclaimed space went to the month chart the reader came for.
+  assert.match(chartSrc, /height: 560/, 'month chart is taller now that the YTD chart is gone');
+});
+
+test('the two panel buttons open DIALOGS: no chevron, aria-haspopup, no aria-expanded', () => {
+  // A down-chevron promises content unfolding in place below the button; these open modals.
+  assert.match(kpisSrc, /kind\?: 'dialog' \| 'disclosure'/, 'the button distinguishes the two kinds');
+  assert.match(kpisSrc, /aria-haspopup=\{isDialog \? 'dialog' : undefined\}/, 'dialog triggers announce a popup');
+  assert.match(kpisSrc, /aria-expanded=\{isDialog \? undefined : open\}/, 'aria-expanded only for the real disclosure');
+  assert.match(kpisSrc, /\{!isDialog && <ChevronDown/, 'the chevron renders only for the disclosure');
+  // Both panel buttons opt in; the inline Add-expected-payment form stays a disclosure.
+  assert.equal((kpisSrc.match(/kind="dialog"/g) ?? []).length, 2, 'exactly the two panel buttons are dialogs');
+});
+
+test('button + dialog names are renamed and share one source', () => {
+  assert.match(kpisSrc, /const FACILITY_REVENUE_TITLE = 'All Facility Revenue Table';/);
+  assert.doesNotMatch(kpisSrc, /All Facilities Table/, 'the old button label is gone');
+  // "Incoming ... (ERA)" replaces "Future ...": the dominant half is ERA-confirmed, i.e. in
+  // flight rather than predicted. The tenant is still named per view.
+  assert.match(kpisSrc, /return 'Incoming BXR Payments \(ERA\)';/);
+  assert.match(kpisSrc, /return 'Incoming Indigo Payments \(ERA\)';/);
+  assert.match(kpisSrc, /return 'Incoming Payments \(ERA\)';/);
+  assert.doesNotMatch(kpisSrc, /'Future (BXR |Indigo )?Payments'/, 'no "Future Payments" label survives');
+});
+
+test('modals are sized to the viewport, not to the inline 30rem content cap', () => {
+  // Two dialogs, each a flex column bounded by the shell with a scrolling body.
+  assert.equal((kpisSrc.match(/max-w-\[88rem\]/g) ?? []).length, 2, 'both dialogs use the wide shell');
+  assert.equal((kpisSrc.match(/ths-card ths-elev-sm flex min-h-0 flex-1 flex-col/g) ?? []).length, 2);
+  assert.equal(
+    (kpisSrc.match(/ths-panel-scroll ths-dialog-scroll/g) ?? []).length,
+    2,
+    'both bodies lift the inline height cap (additive, so the sticky thead/total rules still apply)',
+  );
+});
+
+test('YTD is shown on the CURRENT-month view only — a past month cannot print a partial total', () => {
+  // Pre-merge review finding: on a past month the rows are only the facilities that had a
+  // deposit that month, so summing their YTD renders a PARTIAL year-to-date as complete money
+  // (and pairs two time bases in one row). Gating the column removes both, rather than
+  // captioning around them.
+  assert.match(kpisSrc, /const showYtd = isCurrent;/, 'YTD visibility is tied to the current month');
+  assert.match(kpisSrc, /\{showYtd && <th className="num">YTD /, 'header gated');
+  assert.match(kpisSrc, /\{showYtd && <td className="num">\{r\.ytd != null/, 'row cells gated');
+  assert.match(kpisSrc, /\{showYtd && <td className="num">\{totals\.ytd != null/, 'totals cell gated');
 });

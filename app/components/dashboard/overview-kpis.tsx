@@ -5,10 +5,10 @@
  *   • MTD Gross   — month-to-date collections gross, with a MoM trend.
  *   • YTD Gross   — year-to-date gross split IP / OP / IP+OP, with a YoY trend.
  *   • Year Forecast — a live linear-YTD run-rate projection, with a YoY-vs-prior-year trend.
- * Plus a toggle-button row: "All Facilities Table" (per-facility table for a selected
- * month) and "Future <tenant> Payments" (835-confirmed remits plus the operator-keyed
- * forecast, fetched only when opened). Each button reveals its panel below the row,
- * All-Facilities-style.
+ * Plus a button row: "All Facility Revenue Table" (per-facility table for a selected month)
+ * and "Incoming <tenant> Payments (ERA)" (835-confirmed remits plus the operator-keyed
+ * forecast, fetched only when opened). Both open as MODAL DIALOGS over the page, one at a
+ * time (2026-08-31); the third button, "Add expected payment", is still an inline disclosure.
  *
  * Data sources (all NON-PHI, reader-only; no row fetch, no LLM):
  *   • MTD/YTD gross, per-facility rows, the anchor date  → loadCollectionsKpis (live
@@ -84,12 +84,23 @@ const MONTH_NAMES = [
 ];
 
 /**
- * The Future-Payments panel title, per view.
+ * The Incoming-Payments panel title, per view.
+ *
+ * "INCOMING", NOT "FUTURE" (renamed 2026-08-31). The dominant half of this panel is
+ * ERA-CONFIRMED: an 835 exists, so the payer has already committed the money and it is in
+ * flight. "Future" reads as *predicted* and undersold that certainty; "incoming" is also the
+ * word the panel's own subhead already uses ("41 incoming"). The "(ERA)" qualifier names where
+ * that confirmation comes from.
+ *
+ * ⚠ "(ERA)" IS TRUE OF THE TOTAL, NOT OF EVERY ROW. The panel also carries operator-keyed
+ * FORECAST rows (migration 023/024), which have no 835 behind them — they are labelled
+ * "forecasted" per row and excluded from the headline total, which is what keeps the qualifier
+ * honest. If forecast rows ever join the total, this title has to stop saying ERA.
  *
  * NAMES THE TENANT rather than hardcoding "BXR", for the same reason chartTitleFor does in
  * overview-bar-chart.tsx: the 835-confirmed half of this panel is view-scoped, so on the
- * Indigo view a "Future BXR Payments" heading would sit directly above Indigo's remits, and on
- * Consolidated it would name one of the two books on screen. Consolidated stays unqualified
+ * Indigo view an "Incoming BXR Payments" heading would sit directly above Indigo's remits, and
+ * on Consolidated it would name one of the two books on screen. Consolidated stays unqualified
  * because it is both books and is not a tenant.
  *
  * NOTE the FORECAST half is BXR-only today regardless of this label — the sheet cron passes
@@ -100,13 +111,17 @@ const MONTH_NAMES = [
 function futurePaymentsTitle(view: DashboardView): string {
   switch (view) {
     case 'bxr':
-      return 'Future BXR Payments';
+      return 'Incoming BXR Payments (ERA)';
     case 'indigo':
-      return 'Future Indigo Payments';
+      return 'Incoming Indigo Payments (ERA)';
     case 'consolidated':
-      return 'Future Payments';
+      return 'Incoming Payments (ERA)';
   }
 }
+
+/** The All-Facility-Revenue panel title. One constant so the button, the dialog's accessible
+ *  name and the heading cannot drift apart. */
+const FACILITY_REVENUE_TITLE = 'All Facility Revenue Table';
 
 /** All Facilities care-setting filter. */
 type FacilitySetting = 'ALL' | 'IP' | 'OP';
@@ -261,25 +276,42 @@ function KpiSkeletonRow() {
 }
 
 /**
- * The shared reveal-toggle (All Facilities / ERA). These two are the only way into their
- * panels, so they are sized and colored to be found: accent-outlined and tinted when
- * shut, filled accent when open (7.1:1 white-on-accent). The chevron flips with the
- * state — a conventional disclosure affordance — and aria-expanded carries the same fact
- * to assistive tech, so the state is never conveyed by color alone.
+ * The shared panel-opening button. Accent-outlined and tinted so it is found: these buttons are
+ * the ONLY way into their panels.
+ *
+ * TWO KINDS, and the difference is not cosmetic (2026-08-31). A `dialog` button opens a MODAL —
+ * it gets `aria-haspopup="dialog"` and NO chevron, because a down-chevron promises content
+ * unfolding in place directly below the button and that is now a lie: the content appears in a
+ * dialog over the page. `aria-expanded` is likewise dropped for that kind — the button does not
+ * expand anything, and the ARIA dialog pattern gives the open state to the dialog itself (which
+ * carries role/aria-modal and takes focus), not to its trigger.
+ *
+ * A `disclosure` button (the inline "Add expected payment" form) keeps both the chevron and
+ * `aria-expanded`: it really does unfold in place, the chevron flips with the state, and
+ * aria-expanded carries that same fact to assistive tech so state is never color-only.
  */
 function PanelToggleButton({
   open,
   onToggle,
   children,
+  kind = 'disclosure',
 }: {
   open: boolean;
   onToggle: () => void;
   children: ReactNode;
+  kind?: 'dialog' | 'disclosure';
 }) {
+  const isDialog = kind === 'dialog';
   return (
-    <button type="button" onClick={onToggle} aria-expanded={open} className="ths-toggle">
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-haspopup={isDialog ? 'dialog' : undefined}
+      aria-expanded={isDialog ? undefined : open}
+      className="ths-toggle"
+    >
       {children}
-      <ChevronDown className="ths-toggle-chevron h-4 w-4" aria-hidden />
+      {!isDialog && <ChevronDown className="ths-toggle-chevron h-4 w-4" aria-hidden />}
     </button>
   );
 }
@@ -479,6 +511,7 @@ export function OverviewKpis({
             either closes the other. The Add reveal below stays inline (it is a create form
             the modals' lists depend on, not a disclosure of the same rank). */}
         <PanelToggleButton
+          kind="dialog"
           open={facilitiesOpen}
           onToggle={() => {
             setFacilitiesOpen((s) => !s);
@@ -486,9 +519,10 @@ export function OverviewKpis({
           }}
         >
           <Table2 className="h-4 w-4" aria-hidden />
-          All Facilities Table
+          {FACILITY_REVENUE_TITLE}
         </PanelToggleButton>
         <PanelToggleButton
+          kind="dialog"
           open={eraOpen}
           onToggle={() => {
             setEraOpen((s) => !s);
@@ -1010,11 +1044,9 @@ function EraUpcomingPanel({
   if (!open) return null;
   return (
     // MODAL (2026-08-31): overlay click and Escape both close; focus behavior via dialogRef.
-    <div
-      className="fixed inset-0 z-50 overflow-y-auto bg-ink900/50 p-4 sm:p-8"
-      onClick={onClose}
-      role="presentation"
-    >
+    // SIZED TO THE VIEWPORT, not to a content cap — the dialog is a flex column bounded by
+    // max-h, its header is fixed, and the body below scrolls (see .ths-dialog-scroll).
+    <div className="fixed inset-0 z-50 bg-ink900/50 p-3 sm:p-6" onClick={onClose} role="presentation">
       <div
         ref={dialogRef}
         role="dialog"
@@ -1022,9 +1054,9 @@ function EraUpcomingPanel({
         aria-label={futurePaymentsTitle(view)}
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
-        className="mx-auto w-full max-w-5xl outline-none"
+        className="mx-auto flex h-full w-full max-w-[88rem] flex-col outline-none"
       >
-        <div className="ths-card ths-elev-sm">
+        <div className="ths-card ths-elev-sm flex min-h-0 flex-1 flex-col">
           <div className="mb-3 flex items-center justify-between gap-3">
             <h3 className="ths-card-title">{futurePaymentsTitle(view)}</h3>
         <button
@@ -1063,17 +1095,19 @@ function EraUpcomingPanel({
           the two never read as different rules. */}
       {hasEditRole && !canEdit && status === 'ready' && (
         <p className="ths-card-meta mb-3">
-          Switch to the BXR or Indigo view to change future payments — an edit has to name one
+          Switch to the BXR or Indigo view to change incoming payments — an edit has to name one
           company&apos;s book.
         </p>
       )}
       {status === 'error' ? (
-        <div className="ths-alert">Unable to load future payments.</div>
+        <div className="ths-alert">Unable to load incoming payments.</div>
       ) : status === 'ready' && data ? (
-        // Same height bound as the All Facilities table. This tile is the taller of the two —
-        // a group list, an overdue strip, a stale strip, a hidden strip and a reconciled strip
-        // can all be on screen at once — so unbounded it buried the Master chart entirely.
-        <div className="ths-panel-scroll">
+        // Scrolls to fill the dialog, not to a 30rem cap (.ths-dialog-scroll). The old cap
+        // existed because this panel was INLINE and is the taller of the two — a group list,
+        // an overdue strip, a stale strip, a hidden strip and a reconciled strip can all be on
+        // screen at once, which unbounded buried the Master chart. In a dialog there is no
+        // chart underneath to bury, so the cap only cost the reader scrolling.
+        <div className="ths-panel-scroll ths-dialog-scroll">
           <EraUpcomingBody
             data={data}
             overrides={overrides}
@@ -1121,10 +1155,10 @@ interface FacilityMonthTotals {
 }
 
 /**
- * "All Facilities Table" — the full (un-paginated) per-facility table summed for a
- * selected month, with an IP/OP setting filter and — on the Consolidated view only — a
- * BXR/Indigo book filter. `open` is owned by OverviewKpis (the
- * toggle button lives in its button row). Aggregate, non-PHI:
+ * "All Facility Revenue Table" — the full (un-paginated) per-facility table summed for a
+ * selected month, plus each facility's year-to-date gross on the current-month view. Carries an
+ * IP/OP setting filter and — on the Consolidated view only — a BXR/Indigo book filter. `open` is
+ * owned by OverviewKpis (the button lives in its button row). Aggregate, non-PHI:
  * the current month reads the already-loaded MTD KPI rows; a past month fetches that
  * month's daily rows (loadCollectionsDailyRange) and sums them per facility. Joined to
  * the facility dimension for acronym labels + the IP/OP (care_setting) filter.
@@ -1333,6 +1367,20 @@ function AllFacilitiesTable({
     return { unfiltered, diff, filtered: setting !== 'ALL' || effectiveBook !== 'ALL' };
   }, [isCurrent, kpis, totals.gross, setting, effectiveBook]);
 
+  /**
+   * ⚠ YTD IS SHOWN ON THE CURRENT-MONTH VIEW ONLY, and that restriction is correctness, not
+   * tidiness (pre-merge review finding, 2026-08-31). On a PAST month the rows come from
+   * loadCollectionsDailyRange, so the table contains only facilities that had a deposit IN THAT
+   * MONTH — a facility with no February deposit and $400k of 2026 collections is not a row at
+   * all. Summing YTD over that subset prints a PARTIAL year-to-date as complete money, and the
+   * null-poison guard cannot catch it because the missing facilities are absent rather than
+   * null. It also put two time bases in one row (February checks beside YTD-through-August)
+   * under a heading naming February — the exact pairing chart-series.ts says never to make.
+   * On the current month, rows ARE the full KPI roster and MTD/YTD share the same right edge,
+   * so both problems vanish instead of being captioned around.
+   */
+  const showYtd = isCurrent;
+
   // Month options: current month + every preceding month of the current year (reverse-chron).
   const monthOptions = currentMonth ? Array.from({ length: currentMonth }, (_, i) => currentMonth - i) : [];
   const monthName = month ? MONTH_NAMES[month - 1] : null;
@@ -1343,26 +1391,23 @@ function AllFacilitiesTable({
   return (
     // MODAL (2026-08-31): overlay click and Escape both close; focus behavior via dialogRef
     // above. stopPropagation keeps in-dialog clicks from reaching the overlay's onClose.
-    <div
-      className="fixed inset-0 z-50 overflow-y-auto bg-ink900/50 p-4 sm:p-8"
-      onClick={onClose}
-      role="presentation"
-    >
+    // SIZED TO THE VIEWPORT: flex column bounded by the shell, fixed header, scrolling body.
+    <div className="fixed inset-0 z-50 bg-ink900/50 p-3 sm:p-6" onClick={onClose} role="presentation">
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label="All facilities table"
+        aria-label={FACILITY_REVENUE_TITLE}
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
-        className="mx-auto w-full max-w-5xl outline-none"
+        className="mx-auto flex h-full w-full max-w-[88rem] flex-col outline-none"
       >
-        <div className="ths-card ths-elev-sm">
+        <div className="ths-card ths-elev-sm flex min-h-0 flex-1 flex-col">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <h3 className="ths-card-title">
           {/* The heading names the active book so a narrowed table is never mistaken for the
               whole consolidated roster. */}
-          {effectiveBook === 'ALL' ? 'All facilities' : `${BOOK_LABEL[effectiveBook]} facilities`}
+          {effectiveBook === 'ALL' ? 'All facility revenue' : `${BOOK_LABEL[effectiveBook]} facility revenue`}
           {monthName && currentYear ? ` — ${monthName} ${currentYear}` : ''}
           {isCurrent ? (isComplete ? ' (final)' : ' (MTD)') : ''}
         </h3>
@@ -1410,7 +1455,7 @@ function AllFacilitiesTable({
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close all facilities table"
+            aria-label={`Close ${FACILITY_REVENUE_TITLE.toLowerCase()}`}
             className="ths-btn ths-btn-ghost ths-btn-icon ths-btn-sm"
           >
             <X className="h-4 w-4" aria-hidden />
@@ -1457,7 +1502,7 @@ function AllFacilitiesTable({
         // Bounded height + sticky head/total: 15 facilities plus a header pushed the Master
         // chart off the page, so opening this to read a number cost you the chart you were
         // comparing it to. See .ths-panel-scroll in ths-v2.css.
-        <div className="ths-scroll-x ths-panel-scroll">
+        <div className="ths-scroll-x ths-panel-scroll ths-dialog-scroll">
           <table className="ths-table ths-table-sticky">
             <thead>
               <tr>
@@ -1468,7 +1513,7 @@ function AllFacilitiesTable({
                 <th className="num">Checks</th>
                 <th className="num">EFT</th>
                 <th className="num">Gross</th>
-                <th className="num">YTD {currentYear ?? ''} gross</th>
+                {showYtd && <th className="num">YTD {currentYear ?? ''} gross</th>}
               </tr>
             </thead>
             <tbody>
@@ -1482,7 +1527,7 @@ function AllFacilitiesTable({
                   <td className="num">{money(r.checks)}</td>
                   <td className="num">{money(r.eft)}</td>
                   <td className="num">{money(r.gross)}</td>
-                  <td className="num">{r.ytd != null ? money(r.ytd) : '—'}</td>
+                  {showYtd && <td className="num">{r.ytd != null ? money(r.ytd) : '—'}</td>}
                 </tr>
               ))}
               <tr className="ths-table-total">
@@ -1492,7 +1537,7 @@ function AllFacilitiesTable({
                 <td className="num">{money(totals.checks)}</td>
                 <td className="num">{money(totals.eft)}</td>
                 <td className="num">{money(totals.gross)}</td>
-                <td className="num">{totals.ytd != null ? money(totals.ytd) : '—'}</td>
+                {showYtd && <td className="num">{totals.ytd != null ? money(totals.ytd) : '—'}</td>}
               </tr>
             </tbody>
           </table>
