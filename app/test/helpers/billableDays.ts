@@ -14,9 +14,33 @@ import type {
   KipuRowDTO,
   KipuSessionDTO,
 } from '../../lib/billing-audit/kipu-import';
+import { overrideScope } from '../../components/billing-audit/billable-days/overrides';
+import type { DashboardView } from '../../lib/views';
 
 export const WEEK_A = '2026-08-10';
 export const WEEK_B = '2026-08-17';
+
+/**
+ * The two tenants the Claims Desk offers, and the four (entity, week) scopes they make. An
+ * override key is scoped by BOTH halves, so a test that fixes one and varies the other proves
+ * exactly one axis of isolation — see `overrides.ts` for why both are load-bearing.
+ *
+ * `overrideScope` is the ONLY constructor for a scope — `OverrideScope` is branded, so a bare
+ * week string does not typecheck. That is deliberate: `view` and `week` are both strings, and a
+ * two-string signature would accept them reversed without complaint.
+ *
+ * These four constants are a convenience for tests whose weeks are fixtures, NOT the only
+ * permitted route to a scope. A test whose week comes from parsed data must call the constructor
+ * directly — `kipuImportPayload.test.tsx` does exactly that with the week off its CSV payload,
+ * which no fixture constant could supply.
+ */
+export const VIEW_BXR: DashboardView = 'bxr';
+export const VIEW_INDIGO: DashboardView = 'indigo';
+
+export const SCOPE_BXR_A = overrideScope(VIEW_BXR, WEEK_A);
+export const SCOPE_BXR_B = overrideScope(VIEW_BXR, WEEK_B);
+export const SCOPE_INDIGO_A = overrideScope(VIEW_INDIGO, WEEK_A);
+export const SCOPE_INDIGO_B = overrideScope(VIEW_INDIGO, WEEK_B);
 
 export function session(over: Partial<KipuSessionDTO> = {}): KipuSessionDTO {
   return {

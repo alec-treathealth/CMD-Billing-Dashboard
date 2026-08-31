@@ -28,7 +28,7 @@ import {
 } from '../components/billing-audit/billable-days/legend';
 import { BillableDaysGrid } from '../components/billing-audit/billable-days/grid';
 import { CA_CLAIM_CODES, claimCodeFor } from '../../src/kipu/claimCodes.js';
-import { WEEK_A, makeRow } from './helpers/billableDays';
+import { WEEK_A, makeRow, VIEW_BXR } from './helpers/billableDays';
 
 /** Every code the CA seed refuses to resolve, and the alternates it refuses to pick from. */
 const NEVER_SHOWN_AS_A_CODE = ['S9480', 'H0015', 'H2013', 'H2019', 'H2020'] as const;
@@ -132,6 +132,7 @@ test('RENDERED: no alternate reaches the grid’s markup for an I day', () => {
   const html = renderToStaticMarkup(
     <BillableDaysGrid
       rows={[row]}
+      view={VIEW_BXR}
       weekStart={WEEK_A}
       phiIncluded={false}
       revealed={false}

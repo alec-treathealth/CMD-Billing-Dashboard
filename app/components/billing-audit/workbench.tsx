@@ -89,16 +89,27 @@ export function BillingAuditWorkbench(props: BillingAuditWorkbenchProps) {
 
       <div role="tabpanel" id={`billing-audit-panel-${active}`} aria-labelledby={`billing-audit-tab-${active}`}>
         {active === 'billable' ? (
+          /* ⚠ DELIBERATELY NOT KEYED BY `view`, unlike the ScopePanels below — the two panels hold
+             different KINDS of state and a tenant switch must treat them differently.
+
+             This panel's state is a corpus the USER uploaded, whose overrides are keyed by
+             (entity, week) in `billable-days/overrides.ts`. Those entries are isolated by
+             construction, so they can safely outlive an entity switch — and they should: keying
+             here would destroy a biller's parsed export and unsaved edits on a BXR → Indigo →
+             BXR glance, forcing a re-upload of all four CSVs to recover work that was never in
+             danger. `billableDaysEntityScope.test.tsx` is where that isolation is pinned. */
           <BillableDaysPanel view={view} canRevealPhi={canRevealPhi} />
         ) : active === 'flags' ? (
           <FlagQueueEmptyState />
         ) : active === 'ip' ? (
           <ScopePanel
+            key={view}
             scope="ip" view={view} canRevealPhi={canRevealPhi} initialFilter={initialFilter}
             facilities={props.ipFacilities} payers={props.ipPayers} initialPage={props.ipPage}
           />
         ) : (
           <ScopePanel
+            key={view}
             scope="op" view={view} canRevealPhi={canRevealPhi} initialFilter={initialFilter}
             facilities={props.opFacilities} payers={props.opPayers} initialPage={null}
           />

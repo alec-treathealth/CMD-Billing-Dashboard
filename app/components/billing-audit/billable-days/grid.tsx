@@ -21,6 +21,7 @@
  */
 import { useState } from 'react';
 import type { KipuRowDTO, KipuDayDTO } from '@/lib/billing-audit/kipu-import';
+import type { DashboardView } from '@/lib/views';
 import { codeTitle, WEEK_STATUSES, type WeekStatus } from './legend';
 import {
   OVERRIDE_CODES,
@@ -28,6 +29,7 @@ import {
   cellKey,
   effectiveCodes,
   isApproximate,
+  overrideScope,
   rowHasOverride,
   statusKey,
   type CellOverrides,
@@ -186,6 +188,7 @@ function AuthPill({ r }: { r: KipuRowDTO }) {
 
 export function BillableDaysGrid({
   rows,
+  view,
   weekStart,
   phiIncluded,
   revealed,
@@ -196,13 +199,15 @@ export function BillableDaysGrid({
   onOpen,
 }: {
   rows: readonly KipuRowDTO[];
+  /** The tenant this export was imported under. Half of the override scope — see `overrides.ts`. */
+  view: DashboardView;
   weekStart: string;
   phiIncluded: boolean;
   revealed: boolean;
   cellOv: CellOverrides;
   statusOv: StatusOverrides;
   onSetCell: (key: string, codes: readonly string[] | null) => void;
-  /** Receives the WEEK-SCOPED key, not a bare row id — see overrides.ts. */
+  /** Receives the SCOPED key — (entity, week, row), not a bare row id. See overrides.ts. */
   onSetStatus: (key: string, status: WeekStatus | null) => void;
   onOpen: (row: KipuRowDTO, dayIndex: number | null) => void;
 }) {
@@ -213,6 +218,13 @@ export function BillableDaysGrid({
       </div>
     );
   }
+
+  // ONE scope for every key on this render, derived here rather than passed in. `view` and
+  // `weekStart` are both plain strings, so accepting a pre-built scope alongside `weekStart`
+  // would let the keys and the caption describe different weeks with no type error — the
+  // two-values-must-agree hazard this repo keeps paying for. Deriving it means there is one
+  // week on this render, by construction.
+  const scope = overrideScope(view, weekStart);
 
   const dates = rows[0]!.days.map((d) => d.date);
 
@@ -249,9 +261,9 @@ export function BillableDaysGrid({
         </thead>
         <tbody>
           {rows.map((r) => {
-            const adjusted = adjustedBillableDays(r, cellOv, weekStart);
-            const edited = rowHasOverride(r, cellOv, weekStart);
-            const approx = isApproximate(r, cellOv, weekStart);
+            const adjusted = adjustedBillableDays(r, cellOv, scope);
+            const edited = rowHasOverride(r, cellOv, scope);
+            const approx = isApproximate(r, cellOv, scope);
             const over = adjusted > r.capDays;
             return (
               <tr key={r.id} className="border-b border-line last:border-0 hover:bg-ground/40">
@@ -288,12 +300,12 @@ export function BillableDaysGrid({
                   <AuthPill r={r} />
                 </td>
                 {r.days.map((d) => {
-                  const key = cellKey(weekStart, r.id, d.i);
+                  const key = cellKey(scope, r.id, d.i);
                   return (
                     <DayCell
                       key={d.i}
                       d={d}
-                      codes={effectiveCodes(r, d.i, cellOv, weekStart)}
+                      codes={effectiveCodes(r, d.i, cellOv, scope)}
                       overridden={cellOv.has(key)}
                       onOpen={() => onOpen(r, d.i)}
                       onSet={(codes) => onSetCell(key, codes)}
@@ -329,9 +341,9 @@ export function BillableDaysGrid({
                   </label>
                   <select
                     id={`ws-${r.id}`}
-                    value={statusOv.get(statusKey(weekStart, r.id)) ?? ''}
+                    value={statusOv.get(statusKey(scope, r.id)) ?? ''}
                     onChange={(e) =>
-                      onSetStatus(statusKey(weekStart, r.id), (e.target.value || null) as WeekStatus | null)
+                      onSetStatus(statusKey(scope, r.id), (e.target.value || null) as WeekStatus | null)
                     }
                     title="Billing workflow state — set by hand, not saved"
                     className="rounded-md border border-line bg-card px-1.5 py-0.5 text-xs text-ink900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

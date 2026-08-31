@@ -27,55 +27,56 @@ import {
   type CellOverrides,
   type StatusOverrides,
 } from '../components/billing-audit/billable-days/overrides';
-import { WEEK_A, WEEK_B, makeRow } from './helpers/billableDays';
+import { SCOPE_BXR_A, SCOPE_BXR_B, VIEW_BXR, WEEK_A, WEEK_B, makeRow } from './helpers/billableDays';
 
 const ROW = makeRow();
 /** Tuesday (index 1) is empty in the fixture, so setting it to `G` moves the count 1 → 2. */
 const TUESDAY = 1;
-const editedOnA: CellOverrides = new Map([[cellKey(WEEK_A, ROW.id, TUESDAY), ['G'] as readonly string[]]]);
-const statusOnA: StatusOverrides = new Map([[statusKey(WEEK_A, ROW.id), 'NEEDS BILLED' as const]]);
+const editedOnA: CellOverrides = new Map([[cellKey(SCOPE_BXR_A, ROW.id, TUESDAY), ['G'] as readonly string[]]]);
+const statusOnA: StatusOverrides = new Map([[statusKey(SCOPE_BXR_A, ROW.id), 'NEEDS BILLED' as const]]);
 
 test('a cell override made on week A does not reach week B', () => {
   assert.deepEqual(
-    effectiveCodes(ROW, TUESDAY, editedOnA, WEEK_B),
+    effectiveCodes(ROW, TUESDAY, editedOnA, SCOPE_BXR_B),
     [],
     "week A's override is showing on week B's Tuesday",
   );
-  assert.equal(rowHasOverride(ROW, editedOnA, WEEK_B), false, 'week B claims an edit it never had');
+  assert.equal(rowHasOverride(ROW, editedOnA, SCOPE_BXR_B), false, 'week B claims an edit it never had');
 });
 
 test('the recount on week B is the ENGINE number, not week A’s adjusted one', () => {
   // The wrong value is 2 (1 engine day + the phantom Tuesday). Name it, so the assertion cannot
   // pass by the function happening to return something else that is also not 1.
   const wrong = ROW.billableDays + 1;
-  const got = adjustedBillableDays(ROW, editedOnA, WEEK_B);
+  const got = adjustedBillableDays(ROW, editedOnA, SCOPE_BXR_B);
   assert.notEqual(got, wrong, 'week B counted an override made on another week');
   assert.equal(got, ROW.billableDays);
 });
 
 test('a week STATUS set on week A does not reach week B', () => {
-  assert.notEqual(statusKey(WEEK_A, ROW.id), statusKey(WEEK_B, ROW.id), 'both weeks share one status key');
-  assert.equal(statusOnA.get(statusKey(WEEK_B, ROW.id)), undefined, "week A's status is set on week B");
-  assert.equal(statusOnA.get(statusKey(WEEK_A, ROW.id)), 'NEEDS BILLED');
+  assert.notEqual(statusKey(SCOPE_BXR_A, ROW.id), statusKey(SCOPE_BXR_B, ROW.id), 'both weeks share one status key');
+  assert.equal(statusOnA.get(statusKey(SCOPE_BXR_B, ROW.id)), undefined, "week A's status is set on week B");
+  assert.equal(statusOnA.get(statusKey(SCOPE_BXR_A, ROW.id)), 'NEEDS BILLED');
 });
 
 test('the override still applies on the week it was made on — the fix must not break editing', () => {
-  assert.deepEqual(effectiveCodes(ROW, TUESDAY, editedOnA, WEEK_A), ['G']);
-  assert.equal(rowHasOverride(ROW, editedOnA, WEEK_A), true);
-  assert.equal(adjustedBillableDays(ROW, editedOnA, WEEK_A), ROW.billableDays + 1);
+  assert.deepEqual(effectiveCodes(ROW, TUESDAY, editedOnA, SCOPE_BXR_A), ['G']);
+  assert.equal(rowHasOverride(ROW, editedOnA, SCOPE_BXR_A), true);
+  assert.equal(adjustedBillableDays(ROW, editedOnA, SCOPE_BXR_A), ROW.billableDays + 1);
 });
 
 test('the approximate marker is week-scoped too — an unedited week is not "≈"', () => {
   const multi = makeRow({ multiLoc: true });
-  const ov: CellOverrides = new Map([[cellKey(WEEK_A, multi.id, TUESDAY), ['G'] as readonly string[]]]);
-  assert.equal(isApproximate(multi, ov, WEEK_A), true);
-  assert.equal(isApproximate(multi, ov, WEEK_B), false, 'week B is labelled approximate over another week’s edit');
+  const ov: CellOverrides = new Map([[cellKey(SCOPE_BXR_A, multi.id, TUESDAY), ['G'] as readonly string[]]]);
+  assert.equal(isApproximate(multi, ov, SCOPE_BXR_A), true);
+  assert.equal(isApproximate(multi, ov, SCOPE_BXR_B), false, 'week B is labelled approximate over another week’s edit');
 });
 
 test('RENDERED: week B shows neither the override chip nor the "overridden" / "adjusted" labels', () => {
   const html = renderToStaticMarkup(
     <BillableDaysGrid
       rows={[ROW]}
+      view={VIEW_BXR}
       weekStart={WEEK_B}
       phiIncluded={false}
       revealed={false}
@@ -103,6 +104,7 @@ test('RENDERED: week A shows the override, so the assertions above are not vacuo
   const html = renderToStaticMarkup(
     <BillableDaysGrid
       rows={[ROW]}
+      view={VIEW_BXR}
       weekStart={WEEK_A}
       phiIncluded={false}
       revealed={false}
