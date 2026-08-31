@@ -89,8 +89,9 @@ test('dropFuturePaymentRows: horizon crosses a month boundary by real calendar d
 
 test('dropFuturePaymentRows: the SHIPPED default is the 14-day horizon', () => {
   // The paired read-split (futurePaymentBound in daily.ts) is what makes ingesting these rows
-  // safe: Collections bounds at today, Overview does not. Setting this back to 0 is the kill
-  // switch if forward-dated deposits prove unreliable.
+  // safe: the Collections tab bounds at BUSINESS-today (America/Los_Angeles since #306), Overview
+  // passes no bound at all. Setting this back to 0 is the kill switch if forward-dated deposits
+  // prove unreliable.
   const rows = [row({ 'Payment Received': '2026-07-09', 'Check Payment': '$1.00' })];
   assert.equal(FUTURE_PAYMENT_HORIZON_DAYS, 14);
   assert.equal(dropFuturePaymentRows(rows, '2026-07-08').dropped, 0, 'tomorrow is real money, keep it');
