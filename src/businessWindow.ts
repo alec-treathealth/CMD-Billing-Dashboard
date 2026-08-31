@@ -124,6 +124,35 @@ export interface BusinessWindowBounds {
   windowDays: number;
 }
 
+/**
+ * Supported calendar-year range for month and year windows — INCLUSIVE, and validated rather than
+ * assumed. Matches the server-side bound this repo already enforces on the Collections month filter
+ * (app/lib/actions.ts, `year < 2000 || year > 2100`).
+ *
+ * ⚠ THIS GUARD IS NOT PEDANTRY — WITHOUT IT `Date` SILENTLY LIES, in two different ways (both
+ * reproduced 2026-08-30, Qodo review of PR #296):
+ *
+ *   - `Date.UTC` REMAPS YEARS 0-99 TO 1900-1999. `{ kind: 'year', year: 50 }` returned
+ *     `from: '1950-01-01'` — well-formed, plausible, and off by nineteen centuries. It even passed
+ *     the ISO-shape assertion in this module's own test suite, because that test only ever ran on
+ *     2026. Plausible wrong output is the failure mode this module exists to prevent.
+ *   - `toISOString()` SWITCHES TO EXTENDED YEARS above 9999, and `.slice(0, 10)` then truncates
+ *     `+010000-01-01T…` to `'+010000-01'`. `{ kind: 'year', year: 10000 }` produced exactly that,
+ *     AND an incoherent prior window (`priorFrom: '9999-01-01'`, `priorTo: '+010000-01'`) — the two
+ *     no longer meet, breaking the adjacency invariant every Δ depends on.
+ *
+ * The bound also keeps the NEIGHBOURING years well-formed, which is what makes it sufficient rather
+ * than merely narrow: `to` reaches year+1 and `priorFrom` reaches year-1, so 1999-2101 must all
+ * serialize as four digits. They do.
+ *
+ * ⚠ DELIBERATELY NOT Qualify's 2024-2035 (`QUALIFY_CAL_YEAR_MIN`/`MAX`, app/lib/qualify/contract.ts).
+ * That is a CLIENT TRUST BOUNDARY for a user-supplied window — policy, and it expires. This is a
+ * general primitive that src/veris/ and Collections will also consume; rejecting 2036 would be a
+ * bug in 2036. The two guards answer different questions and should stay separate.
+ */
+export const BUSINESS_YEAR_MIN = 2000;
+export const BUSINESS_YEAR_MAX = 2100;
+
 /** Milliseconds in a day. Exact for UTC-midnight arithmetic — UTC has no DST, which is precisely
  *  why every calculation below happens in UTC AFTER the civil date has been resolved. */
 const MS_PER_DAY = 86_400_000;
@@ -134,6 +163,11 @@ const MS_PER_DAY = 86_400_000;
  *  prior-window arithmetic needs no year-boundary special case. */
 const utcMidnight = (year: number, month1to12: number, day: number): Date =>
   new Date(Date.UTC(year, month1to12 - 1, day));
+
+/** An integer year this module can serialize correctly — see BUSINESS_YEAR_MIN/MAX for why the
+ *  range exists at all. Integer-ness alone is NOT enough; that was the original defect. */
+const isSupportedYear = (year: number): boolean =>
+  Number.isInteger(year) && year >= BUSINESS_YEAR_MIN && year <= BUSINESS_YEAR_MAX;
 
 /** ISO yyyy-mm-dd of a UTC-midnight Date. */
 const iso = (d: Date): string => d.toISOString().slice(0, 10);
@@ -163,7 +197,7 @@ export function businessWindowBounds(
   now: Date = new Date(),
 ): BusinessWindowBounds {
   if (window.kind === 'month') {
-    if (!Number.isInteger(window.year) || !Number.isInteger(window.month) || window.month < 1 || window.month > 12) {
+    if (!isSupportedYear(window.year) || !Number.isInteger(window.month) || window.month < 1 || window.month > 12) {
       throw new Error(`businessWindowBounds: invalid month window ${window.year}-${window.month}`);
     }
     const from = utcMidnight(window.year, window.month, 1);
@@ -181,7 +215,7 @@ export function businessWindowBounds(
   }
 
   if (window.kind === 'year') {
-    if (!Number.isInteger(window.year)) {
+    if (!isSupportedYear(window.year)) {
       throw new Error(`businessWindowBounds: invalid year window ${window.year}`);
     }
     const from = utcMidnight(window.year, 1, 1);

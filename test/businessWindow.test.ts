@@ -19,6 +19,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   BUSINESS_TZ,
+  BUSINESS_YEAR_MAX,
+  BUSINESS_YEAR_MIN,
   businessDayIso,
   businessWindowBounds,
   type BusinessWindow,
@@ -202,6 +204,53 @@ test('a nonsensical window THROWS rather than returning plausible garbage', () =
   assert.throws(() => businessWindowBounds({ kind: 'month', year: 2026, month: 13 }), /invalid month/);
 });
 
+// ── THE YEAR RANGE — regression, found by Qodo on PR #296 ───────────────────────────────────────
+test('REGRESSION: a two-digit year is REJECTED, not silently remapped to the 1900s', () => {
+  // `Date.UTC` remaps years 0-99 to 1900-1999. Before the guard, { kind: 'year', year: 50 }
+  // returned from '1950-01-01' — well-formed, plausible, and off by nineteen centuries. It even
+  // passed the ISO-shape test below, because that test only ever ran on 2026. THAT is why
+  // integer-ness alone was not enough: the output was not malformed, it was WRONG.
+  assert.throws(() => businessWindowBounds({ kind: 'year', year: 50 }), /invalid year/);
+  assert.throws(() => businessWindowBounds({ kind: 'year', year: 99 }), /invalid year/);
+  assert.throws(() => businessWindowBounds({ kind: 'month', year: 50, month: 3 }), /invalid month/);
+  assert.throws(() => businessWindowBounds({ kind: 'year', year: 0 }), /invalid year/);
+});
+
+test('REGRESSION: an extended year is REJECTED, not truncated into a malformed string', () => {
+  // Above 9999 `toISOString()` switches to extended years and `.slice(0, 10)` truncates
+  // '+010000-01-01T…' to '+010000-01'. Worse, the PRIOR window then stopped meeting this one:
+  // priorFrom was '9999-01-01' while priorTo was '+010000-01', breaking the adjacency invariant.
+  assert.throws(() => businessWindowBounds({ kind: 'year', year: 10000 }), /invalid year/);
+  assert.throws(() => businessWindowBounds({ kind: 'month', year: 10000, month: 1 }), /invalid month/);
+  assert.throws(() => businessWindowBounds({ kind: 'year', year: -1 }), /invalid year/);
+});
+
+test('the supported year range is inclusive at BOTH edges, and its NEIGHBOURS still serialize', () => {
+  // The edges must WORK, not merely not-throw — a guard that quietly narrowed the usable range
+  // would be its own bug. The neighbouring years are the real test: `to` reaches year+1 and
+  // `priorFrom` reaches year-1, so 1999 and 2101 must both come out as four digits.
+  const lo = businessWindowBounds({ kind: 'year', year: BUSINESS_YEAR_MIN });
+  assert.equal(lo.from, '2000-01-01');
+  assert.equal(lo.priorFrom, '1999-01-01', 'the year BELOW the minimum still serializes correctly');
+  const hi = businessWindowBounds({ kind: 'year', year: BUSINESS_YEAR_MAX });
+  assert.equal(hi.to, '2101-01-01', 'the year ABOVE the maximum still serializes correctly');
+  for (const v of [lo.from, lo.to, lo.priorFrom, lo.priorTo, hi.from, hi.to, hi.priorFrom, hi.priorTo]) {
+    assert.match(v, /^\d{4}-\d{2}-\d{2}$/, `${v} must be a bare four-digit calendar date`);
+  }
+  // And just outside is refused, in both directions.
+  assert.throws(() => businessWindowBounds({ kind: 'year', year: BUSINESS_YEAR_MIN - 1 }), /invalid year/);
+  assert.throws(() => businessWindowBounds({ kind: 'year', year: BUSINESS_YEAR_MAX + 1 }), /invalid year/);
+});
+
+test('the year guard is NOT Qualify\'s client trust boundary — 2036 is valid here', () => {
+  // Qodo proposed adopting QUALIFY_CAL_YEAR_MIN/MAX (2024-2035). Deliberately not: that is a
+  // policy bound on a USER-SUPPLIED window and it expires. This is a general primitive that
+  // src/veris/ and Collections will also consume, so rejecting 2036 would be a bug in 2036.
+  // Pinned so a future "harmonisation" has to argue with this test rather than silently narrow it.
+  assert.equal(businessWindowBounds({ kind: 'year', year: 2036 }).from, '2036-01-01');
+  assert.equal(businessWindowBounds({ kind: 'year', year: 2023 }).from, '2023-01-01');
+});
+
 test('every returned bound is a plain ISO date string, never a timestamp', () => {
   const all = [
     businessWindowBounds({ kind: 'trailing', days: 30 }, new Date('2026-08-30T19:00:00Z')),
@@ -226,6 +275,14 @@ test('EQUIVALENCE: identical bounds to qualifyWindowBounds across the shared inp
   // windowDays is EXCLUDED from the comparison because qualifyWindowBounds does not return it.
   // That absence is the reason this module exists (ratingV2 is fed a resolved day-count), so it is
   // an addition, not a divergence.
+  //
+  // ⚠ ONE DELIBERATE, ONE-WAY DIVERGENCE OUTSIDE THIS GRID (added 2026-08-30 for the PR #296
+  // review): businessWindowBounds is now STRICTER than the incumbent on calendar years — it refuses
+  // anything outside BUSINESS_YEAR_MIN..MAX, where qualifyWindowBounds would happily return
+  // '1950-01-01' for year 50. The divergence is entirely in the fail-loud direction and only on
+  // inputs the incumbent gets WRONG, so it is not a behaviour change for any real caller — Qualify's
+  // own trust boundary (isQualifyWindow) already rejects those before they reach either function.
+  // Stated here so "equivalence passes" is not read as "identical on every input".
   const instants = [
     '2026-08-30T19:00:00Z', // midday Pacific
     '2026-08-31T02:00:00Z', // 19:00 PDT — UTC already tomorrow
