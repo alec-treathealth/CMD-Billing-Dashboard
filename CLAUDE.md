@@ -612,8 +612,19 @@ Top nav is built from `app/lib/nav-model.ts` — `nav-links.tsx` (bar) and
 The link set is role-dependent:
 
 - `admin` / `user` / unknown — Overview · Collections · Claims Audit (Beta) · Code Reference
-- `super_admin` — the above plus Qualify (Beta), between Overview and Collections
-- `admissions_seat` — Qualify only (single-surface persona)
+- `super_admin` — Overview · **Payer Intel** · Collections · Claims Desk · Code Reference
+- `admissions_seat` — **Payer Intel only** (single-surface persona)
+
+⚠ **NO ROLE SEES QUALIFY.** These two bullets said "the above plus Qualify (Beta)"
+and "Qualify only" until 2026-08-31 — both false since the **Qualify tab was taken
+down 2026-08-17** and folded into Payer Intel (#239). Verified against `linksFor`
+(`app/lib/nav-model.ts:100-105`), which is the single source both shells read.
+This file also contradicted itself, calling `admissions_seat` "a Payer-Intel-only
+persona" a few lines below while these bullets still said Qualify.
+**Taken down is NOT deleted, and the distinction is load-bearing** (the takedown
+note at `nav-model.ts:61-76` says so): `/qualify` and `/qualify/m` still render by
+direct URL and their loaders are still wired, so Qualify code paths remain live
+and must still be reasoned about — they simply have no nav entry.
 
 Surfaces:
 
@@ -829,13 +840,42 @@ These are wrong in the code today. Fix opportunistically; never copy them.
   `FUTURE_PAYMENT_HORIZON_DAYS = 0` and warned against flipping it to 14. It has
   been **14 and ACTIVE since 2026-08-03**, and flipping it was correct, because
   the precondition the warning named was met in the same change: the read-time
-  split now exists (`futurePaymentBound`, `src/collections/daily.ts:65`), so
-  **Collections bounds at `<= today` while Overview does not**, and both still
-  read one row set through `collections.daily_collections_resolved`. Ingest keeps
-  near-future rows deliberately. Setting the constant back to `0` remains the
-  correct kill switch if forward-dated deposits turn out to be unreliable —
-  nothing else needs reverting. The authoritative note is the docblock at
-  `src/collections/cmdExplorer.ts:405-413`; trust it over this file.
+  split now exists (`futurePaymentBound`, `src/collections/daily.ts:65`).
+  ⚠ **"COLLECTIONS" IS TWO SURFACES WITH TWO DIFFERENT UPPER BOUNDS — SAY WHICH
+  ONE YOU MEAN.** This bullet read "Collections bounds at `<= today` while
+  Overview does not" until 2026-08-31, which was true of one of them and false of
+  the other, and the false half was the one a reader would act on:
+  - **The daily/deposit path** — `collections.daily_collections_resolved`, read by
+    `src/collections/daily.ts`. Bounds at `<= today`; Overview opts out by passing
+    `include_future_payments: true`. Both surfaces still read ONE row set, which
+    is why the split has to live at read time and cannot live in the ingest.
+  - **The explorer grid** — `collections.cmd_explorer_charge_rollup`, read by
+    `buildCmdExplorerQuery` / `buildCmdExplorerGroupedQuery`. It had **NO upper
+    bound at all** until PR #298 (2026-08-30): the recency branch set only `from`
+    and returned early, so every preset was `today-N .. unbounded` and swept
+    future-dated payments into totals read as settled cash. It is now half-open
+    `[from, to)` with `to` = business-today + 1, resolved by `applyDateWindow` →
+    `businessWindowBounds` (`src/businessWindow.ts`). The "Include scheduled"
+    toggle extends that bound to business-today + `FUTURE_PAYMENT_HORIZON_DAYS`
+    + 1 **for trailing presets only** — never for a custom range, where the end
+    date the user picked stands unmodified.
+
+  ⚠ **AND THE TWO DO NOT USE THE SAME CALENDAR.** The daily bound is
+  `ctx.now().toISOString().slice(0, 10)` — a **UTC** civil date
+  (`src/collections/daily.ts:70`). The explorer grid anchors on
+  **America/Los_Angeles** via `businessDayIso`. They therefore disagree about what
+  "today" is from ~17:00 Pacific until midnight. Nobody has ruled on aligning
+  them; it is recorded here as an OBSERVED divergence, not as a design. Do not
+  assume it is deliberate, and do not "fix" it as a drive-by.
+
+  Ingest keeps near-future rows deliberately. Setting the constant back to `0`
+  remains the correct kill switch if forward-dated deposits turn out to be
+  unreliable — nothing else needs reverting. The authoritative note is the
+  docblock immediately above `FUTURE_PAYMENT_HORIZON_DAYS` in
+  `src/collections/cmdExplorer.ts` — cited here as `:405-413` until 2026-08-31,
+  which PRs #291 and #298 had shifted out from under it. That docblock carried
+  the identical imprecision and was corrected in the same change, so "trust it
+  over this file" is safe again.
 - `src/collections/cmdExplorer.ts` says the row fingerprint hashes 14 fields — it
   hashes **18** (15 non-PHI + 3 PHI, see `mapReportRows`).
 - `supabase/migrations/0067_*` looks applicable but is **stale**: as authored it
