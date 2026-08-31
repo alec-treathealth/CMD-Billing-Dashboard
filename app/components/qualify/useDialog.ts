@@ -50,6 +50,15 @@ export function useDialog<T extends HTMLElement>(
       }
       const first = els[0]!;
       const last = els[els.length - 1]!;
+      // Focus can sit on the CONTAINER itself — the hook focuses it on open, and FOCUSABLE
+      // excludes [tabindex="-1"], so the boundary checks below never match it. Un-intercepted,
+      // the first Shift+Tab after opening walks backwards OUT of the dialog into the page behind
+      // the modal (review finding, PR #311). Route both directions to the proper end.
+      if (document.activeElement === node) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+        return;
+      }
       if (e.shiftKey && document.activeElement === first) {
         e.preventDefault();
         last.focus();
