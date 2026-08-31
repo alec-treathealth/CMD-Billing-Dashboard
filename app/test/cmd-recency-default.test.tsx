@@ -23,6 +23,7 @@ import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 const explorerSrc = readFileSync(join(here, '../components/dashboard/cmd-explorer.tsx'), 'utf8');
 const actionsSrc = readFileSync(join(here, '../lib/actions.ts'), 'utf8');
+const querySrc = readFileSync(join(here, '../../src/collections/cmdExplorerQuery.ts'), 'utf8');
 
 test('Explorer first-load recency default is 90d (index-path window), not 0 (all-time scan)', () => {
   assert.match(
@@ -32,18 +33,43 @@ test('Explorer first-load recency default is 90d (index-path window), not 0 (all
   );
 });
 
-test('90 is an offered recency chip on the client', () => {
+// ⚠ RE-AFFIRMED 2026-08-30, WHICH IS THIS FILE'S OWN DESIGN WORKING. The window control was
+// rewired onto src/businessWindow.ts and the two identifiers these tests pinned were renamed:
+// RECENCY_OPTIONS -> WINDOW_PRESETS (now objects, and 180/365 added), CMD_RECENCY_DAYS ->
+// CMD_WINDOW_PRESETS. Both assertions failed, exactly as the docblock above says a rename should.
+// The INVARIANT is unchanged — 90 is still the default and still admitted on both sides — so the
+// tests are re-pointed rather than deleted, and the perf guard survives the refactor.
+test('90 is an offered window preset on the client', () => {
   assert.match(
     explorerSrc,
-    /const\s+RECENCY_OPTIONS\s*=\s*\[\s*7,\s*14,\s*30,\s*90\s*\]/,
-    'RECENCY_OPTIONS must include 90 so the default chip renders + is toggleable',
+    /\{\s*days:\s*90,/,
+    'WINDOW_PRESETS must include 90 so the default chip renders + is selectable',
   );
 });
 
-test('90 is in the server-side recency allowlist (client/server symmetry)', () => {
+test('90 is in the server-side preset allowlist (client/server symmetry)', () => {
   assert.match(
     actionsSrc,
-    /const\s+CMD_RECENCY_DAYS\s*=\s*new\s+Set\(\s*\[\s*7,\s*14,\s*30,\s*90\s*\]\s*\)/,
-    'CMD_RECENCY_DAYS must admit 90, else the default client window is rejected server-side and falls back to all-time',
+    /const\s+CMD_WINDOW_PRESETS\s*=\s*new\s+Set\(\s*\[[^\]]*\b90\b[^\]]*\]\s*\)/,
+    'CMD_WINDOW_PRESETS must admit 90, else the default client window is rejected server-side',
   );
+});
+
+test('there is no longer an unbounded window to fall back to', () => {
+  // The original failure message here warned that a rejected window "falls back to all-time". That
+  // fallback no longer exists (ruled 2026-08-30): every Collections window is closed at both ends,
+  // and cmdExplorerBaseConds THROWS on a half-open one. Pinned so the escape hatch is not quietly
+  // reintroduced — an unbounded scan is how the consolidated-scope spill becomes a timeout.
+  // Target the CONSTRUCT, not the phrase: the control's own docblock legitimately mentions "All
+  // months" while explaining that it was removed, and an earlier version of this assertion matched
+  // that prose and failed on a correct tree. Assert the <option> and the state setter are gone.
+  assert.doesNotMatch(explorerSrc, /<option value=\{0\}>/, 'the "All months" option element is gone');
+  assert.doesNotMatch(explorerSrc, /RECENCY_OPTIONS|monthYearOpen/, 'the old control is fully removed');
+  // The boundary always assigns BOTH bounds — `to` via applyScheduledBound, which returns the
+  // window's own upper bound unless the scheduled override is on.
+  assert.match(actionsSrc, /applyScheduledBound/, 'the boundary must always assign an upper bound');
+  // The closed-window guard exists and is exercised; see test/collectionsWindow.test.ts. It is
+  // NOT switched on inside the shared builders — that reached Payer Intel, which is out of scope
+  // and calls buildCmdExplorerQuery with its own filter. See the PR body.
+  assert.match(querySrc, /requireWindow/, 'the closed-window guard exists');
 });

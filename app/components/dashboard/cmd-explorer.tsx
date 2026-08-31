@@ -125,6 +125,7 @@ import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cm
 // The Facility cell lives in its own PURE module so the hermetic render suite can assert it
 // directly — this file is a hooks-and-effects client island that renderToStaticMarkup cannot run.
 import { FacilityCell } from './facility-cell';
+import { PaymentDateCell } from './payment-date-cell';
 import { deriveGridLayout, isAutoGridView } from '../../../src/collections/gridViewLayout';
 import { facilityCodesForEntity } from '../../../src/collections/cmdCustomers';
 import { INDIGO_ENTITY_ID } from '../../../src/tenants';
@@ -289,6 +290,10 @@ function toGridRow(g: CmdExplorerGroupRow): GridRow {
     // the same Facility cell its lines would.
     facility_resolved: g.facility_resolved,
     facility_method: g.facility_method,
+    // A grouped row IS one payment date, so the server's per-row predicate holds exactly. Dropping
+    // it here would let the scheduled toggle move a total with no marker — the failure the badge
+    // exists to prevent.
+    is_scheduled: g.is_scheduled,
     ingested_at: '',
     __lines: g.line_count,
     __chargeDateEnd: g.charge_date_end,
@@ -313,13 +318,25 @@ const MONTH_NAMES = [
 ];
 const YEAR_OPTIONS = [2026, 2025, 2024];
 /** Rolling recency quick-filters (days). Mutually exclusive with the Month/Year window. */
-const RECENCY_OPTIONS = [7, 14, 30, 90] as const;
-const RECENCY_LABEL: Record<number, string> = {
-  7: 'Past 7 days',
-  14: 'Past 14 days',
-  30: 'Past 30 days',
-  90: 'Past 90 days',
-};
+/**
+ * The window presets. 6m/1y are TRAILING 180/365-day spans, not calendar periods — the chip label
+ * is a shorthand, and src/businessWindow.ts reports windowDays accordingly.
+ *
+ * There is deliberately NO "all time" chip (ruled 2026-08-30): the consolidated-scope grouped sort
+ * already spills to disk at 1y, and an unbounded scan is how that becomes a timeout.
+ */
+const WINDOW_PRESETS = [
+  { days: 7, chip: '7d', label: 'Past 7 days' },
+  { days: 14, chip: '14d', label: 'Past 14 days' },
+  { days: 30, chip: '30d', label: 'Past 30 days' },
+  { days: 90, chip: '90d', label: 'Past 90 days' },
+  { days: 180, chip: '6m', label: 'Past 180 days' },
+  { days: 365, chip: '1y', label: 'Past 365 days' },
+] as const;
+
+/** Mirrors CMD_CUSTOM_MAX_DAYS at the server boundary. The SERVER is authoritative and rejects an
+ *  over-wide range; this copy exists only so the user is told BEFORE a round-trip. */
+const CUSTOM_MAX_DAYS = 366;
 
 const MONEY = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const MONEY0 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
@@ -507,8 +524,6 @@ export function CmdCollectionsExplorer({
   // combo drill from the summary combo table — facility/payer summary clicks add tags instead of
   // setting a single refinement (see applyRefinement).
   const [refinement, setRefinement] = useState<Refinement | null>(null);
-  const [year, setYear] = useState(YEAR_OPTIONS[0]!);
-  const [month, setMonth] = useState(0); // 0 = All months
   // Recency quick-filter: a rolling window of 7/14/30/90 days, or 0 = off (all months). DEFAULT 90 —
   // the default nav carries a payment_received window so the summary aggregates hit the
   // (business_entity_id, payment_received) index path instead of an all-time seq scan of the whole
@@ -516,9 +531,22 @@ export function CmdCollectionsExplorer({
   // worst-case with a 90d window). Re-clicking the active chip (or picking a Month/Year) still
   // returns to all-time. Mutually exclusive with Month/Year.
   const [recencyDays, setRecencyDays] = useState(90);
+  /** Custom range, INCLUSIVE dates as picked. Empty strings = no custom range active. */
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customError, setCustomError] = useState('');
+  /** Off by default, and NEVER hidden or disabled — see the toggle's comment. */
+  const [includeScheduled, setIncludeScheduled] = useState(false);
+  const customActive = customFrom !== '' && customTo !== '';
+  /** Draft values while the popover is open — the applied range only changes on Apply, so a
+   *  half-typed date never fires a fetch. */
+  const [draftFrom, setDraftFrom] = useState('');
+  const [draftTo, setDraftTo] = useState('');
   // Month/Year picker popover — the [Month/Year ▾] segment of the unified time control (A).
-  const [monthYearOpen, setMonthYearOpen] = useState(false);
-  const monthYearRef = useRef<HTMLDivElement>(null);
+  /** The custom-range popover's outside-click ref. Named for what it holds now, not what it held
+   *  before the 2026-08-30 fold. */
+  const customRef = useRef<HTMLDivElement>(null);
 
   // Facility multi-select. Empty selection = ALL facilities (no restriction), NOT zero rows. Options
   // are tenant-scoped (loaded per view); the selection is tenant-specific, so it resets on view change.
@@ -889,7 +917,9 @@ export function CmdCollectionsExplorer({
   // Invalidation key: any filter / search / prefix / view change remounts the AI panel (→ idle, and
   // its unmount cleanup aborts an in-flight stream), so a stale summary can never describe a new
   // selection. Mirrors the summary-fetch dep tuple.
-  const aiKey = [view, recencyDays, month > 0 ? year : 0, month, facilityKey, payerKey, dMember, dAlpha, dGroup].join('|');
+  // The window is now (preset | custom range) + the scheduled override — all four dimensions must
+  // key the AI panel, or a re-analysis after changing the window would return the previous answer.
+  const aiKey = [view, recencyDays, customFrom, customTo, includeScheduled, facilityKey, payerKey, dMember, dAlpha, dGroup].join('|');
 
   // Raw CMD facility text → curated friendly name from the already-loaded dimension options, for
   // DISPLAY only (the Top facilities summary card). Drill/filter values stay the raw facility text
@@ -1019,12 +1049,12 @@ export function CmdCollectionsExplorer({
   // the tenant switcher that used to live in the top bar (D). Listeners attach only while it's open. (The popover holds
   // focusable selects, so Escape is a document listener rather than a trigger-local keydown.)
   useEffect(() => {
-    if (!monthYearOpen) return;
+    if (!customOpen) return;
     function onPointerDown(e: PointerEvent) {
-      if (!monthYearRef.current?.contains(e.target as Node)) setMonthYearOpen(false);
+      if (!customRef.current?.contains(e.target as Node)) setCustomOpen(false);
     }
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') setMonthYearOpen(false);
+      if (e.key === 'Escape') setCustomOpen(false);
     }
     document.addEventListener('pointerdown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
@@ -1032,7 +1062,7 @@ export function CmdCollectionsExplorer({
       document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKeyDown);
     };
-  }, [monthYearOpen]);
+  }, [customOpen]);
 
   /**
    * STICKY COLUMNS — auto-save the live layout after every change (2026-08-17).
@@ -1143,15 +1173,16 @@ export function CmdCollectionsExplorer({
     };
   }, []);
 
-  // The filter passed to the grid action: date window (recency OR month/year) + facility set +
+  // The filter passed to the grid action: date window (preset OR custom range) + facility set +
   // (debounced) substring + chip refinement + gated PHI lookup. PHI terms are sent raw ONLY to the
   // server action, which HMACs them into blind-index tokens, gates to canRevealPhi, and audits —
   // never matched client-side.
   const filterArg = useMemo(() => {
     const f: {
-      year?: number;
-      month?: number;
-      recencyDays?: number;
+      windowDays?: number;
+      customFrom?: string;
+      customTo?: string;
+      includeScheduled?: boolean;
       facility?: string[];
       primary_payer?: string;
       primary_payers?: string[];
@@ -1161,13 +1192,17 @@ export function CmdCollectionsExplorer({
       phiSearch?: { memberId?: string; alphaPrefix?: string; groupNumber?: string };
       patient_members?: Array<{ entity: string; member: string }>;
     } = {};
-    // Recency wins over Month/Year (they're mutually exclusive in the UI, but be explicit).
-    if (recencyDays > 0) {
-      f.recencyDays = recencyDays;
-    } else if (month > 0) {
-      f.year = year;
-      f.month = month;
+    // A custom range wins over a preset — they are mutually exclusive windows.
+    if (customActive) {
+      f.customFrom = customFrom;
+      f.customTo = customTo;
+    } else if (recencyDays > 0) {
+      f.windowDays = recencyDays;
     }
+    // The scheduled toggle is an upper-bound OVERRIDE, not a different window — it never changes
+    // which preset is active, only how far the fetch reaches. Sent only when ON so the wire payload
+    // (and therefore the cache key) is unchanged for the default view.
+    if (includeScheduled) f.includeScheduled = true;
     if (payerSelection.length > 0) f.primary_payers = payerSelection;
     // Employer segment (0101). 'all' emits NOTHING — the server treats absent as unrestricted, and
     // sending an explicit 'all' would only add a no-op branch to every query plan.
@@ -1205,10 +1240,9 @@ export function CmdCollectionsExplorer({
       };
     }
     return f;
-    // year only matters when a specific month is chosen (see original rationale); facilityKey is the
     // stable proxy for facilitySelection's contents (payerKey likewise).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, nameMatchKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
+  }, [recencyDays, customFrom, customTo, includeScheduled, facilityKey, payerKey, employerKey, nameMatchKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
   const loadPage = useCallback(
     async (
@@ -1292,9 +1326,10 @@ export function CmdCollectionsExplorer({
       prev.kind === 'ready' || prev.kind === 'refreshing' ? { kind: 'refreshing', data: prev.data } : { kind: 'loading' },
     );
     const f: {
-      year?: number;
-      month?: number;
-      recencyDays?: number;
+      windowDays?: number;
+      customFrom?: string;
+      customTo?: string;
+      includeScheduled?: boolean;
       facility?: string[];
       primary_payers?: string[];
       employer_names?: string[];
@@ -1312,12 +1347,16 @@ export function CmdCollectionsExplorer({
     // Top-level scope (date window + facility set) applies to the summary too — so the drill lists
     // describe the SAME population the grid shows. The chip refinement does NOT (it's a within-
     // results drill; the chips stay a stable facet navigator while drilling).
-    if (recencyDays > 0) {
-      f.recencyDays = recencyDays;
-    } else if (month > 0) {
-      f.year = year;
-      f.month = month;
+    if (customActive) {
+      f.customFrom = customFrom;
+      f.customTo = customTo;
+    } else if (recencyDays > 0) {
+      f.windowDays = recencyDays;
     }
+    // The scheduled toggle is an upper-bound OVERRIDE, not a different window — it never changes
+    // which preset is active, only how far the fetch reaches. Sent only when ON so the wire payload
+    // (and therefore the cache key) is unchanged for the default view.
+    if (includeScheduled) f.includeScheduled = true;
     if (facilitySelection.length > 0) f.facility = expandFacilityKeys(facilitySelection, facilityGroups);
     if (hasPhiSearch) {
       f.phiSearch = {
@@ -1338,7 +1377,7 @@ export function CmdCollectionsExplorer({
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, month, month > 0 ? year : 0, facilityKey, payerKey, employerKey, nameMatchKey, view]);
+  }, [hasPhiSearch, dMember, dAlpha, dGroup, recencyDays, customFrom, customTo, includeScheduled, facilityKey, payerKey, employerKey, nameMatchKey, view]);
 
   // Fetch the alpha-prefix cohort curve when a ≥3-char alpha-prefix search is active (PHI-gated).
   // Independent of the term/window/facility filters: the cohort is defined solely by the prefix +
@@ -1471,9 +1510,62 @@ export function CmdCollectionsExplorer({
   }
 
   /** Pick a rolling recency window (toggle off if re-clicked); clears any Month/Year selection. */
+  /**
+   * Validate and apply a custom range.
+   *
+   * ⚠ THE SERVER IS AUTHORITATIVE — applyDateWindow re-validates every one of these rules and
+   * returns false on any violation. This is a UX pre-check so the reader is told BEFORE a
+   * round-trip, not a trust boundary. Never relax the server side to match a client change here.
+   *
+   * REJECTS, never clamps: a clamped range would return different data than the one asked for,
+   * without saying so.
+   */
+  function applyCustomRange() {
+    if (draftFrom === '' || draftTo === '') {
+      setCustomError('Pick both a start and an end date.');
+      return;
+    }
+    if (draftFrom > draftTo) {
+      setCustomError('The start date must be on or before the end date.');
+      return;
+    }
+    // Both dates are INCLUSIVE, so an N-day span is (to - from) + 1.
+    const span =
+      Math.round((Date.parse(`${draftTo}T00:00:00Z`) - Date.parse(`${draftFrom}T00:00:00Z`)) / 86_400_000) + 1;
+    if (!Number.isFinite(span) || span < 1) {
+      setCustomError('That range is not a valid pair of dates.');
+      return;
+    }
+    if (span > CUSTOM_MAX_DAYS) {
+      setCustomError(`That range is ${span} days. The maximum is ${CUSTOM_MAX_DAYS}.`);
+      return;
+    }
+    setCustomError('');
+    setCustomFrom(draftFrom);
+    setCustomTo(draftTo);
+    setRecencyDays(0); // a custom range and a preset are mutually exclusive
+    setCustomOpen(false);
+  }
+
+  /** Drop back to the 90-day default — never to an unbounded window, which no longer exists. */
+  function clearCustomRange() {
+    setCustomFrom('');
+    setCustomTo('');
+    setDraftFrom('');
+    setDraftTo('');
+    setCustomError('');
+    setRecencyDays(90);
+    setCustomOpen(false);
+  }
+
   function selectRecency(days: number) {
-    setRecencyDays((prev) => (prev === days ? 0 : days));
-    setMonth(0);
+    // A preset and a custom range are mutually exclusive windows, exactly as the preset and the old
+    // Month/Year picker were. Re-clicking the active chip no longer toggles to an unbounded "all
+    // months" state — there is no such state any more (ruled: no unbounded window).
+    setCustomFrom('');
+    setCustomTo('');
+    setCustomError('');
+    setRecencyDays(days);
   }
 
   /** Apply (or toggle off) a single-field drill-down refinement from a summary chip. */
@@ -1611,11 +1703,11 @@ export function CmdCollectionsExplorer({
   }
 
   const windowLabel =
-    recencyDays > 0
-      ? RECENCY_LABEL[recencyDays]!
-      : month > 0
-        ? `${MONTH_NAMES[month - 1]} ${year}`
-        : 'All months';
+    customActive
+      ? `${customFrom} → ${customTo}`
+      : recencyDays > 0
+      ? (WINDOW_PRESETS.find((p) => p.days === recencyDays)?.label ?? `Past ${recencyDays} days`)
+      : 'Past 90 days';
   const facilityLabel =
     facilitySelection.length === 0
       ? 'All facilities'
@@ -1678,16 +1770,24 @@ export function CmdCollectionsExplorer({
               onClear={clearEmployers}
             />
           )}
-          {/* Unified time window (A): ONE segmented control — [7d][14d][30d][90d][Month/Year ▾].
-              DEFAULT is 90d (see recencyDays init) so the first-load summary hits the index path;
-              re-clicking the active chip or picking a Month/Year reaches the "All months" state (no
-              segment active). Each segment drives the SAME state setters the three old controls did
-              (selectRecency for the chips; the Month/Year selects' unchanged onChange), preserving the
-              exact recency⇄Month/Year mutual exclusion. Because neither filterArg nor the summary
-              effect is touched, the wire payload is byte-identical to the old three controls for any
-              given selection — a presentational consolidation, plus the 90d default window.
-              Reaching "All months": re-click the active chip (toggles off) or pick "All months"
-              in the Month select — exactly as before. */}
+          {/* Time window: ONE segmented control — [7d][14d][30d][90d][6m][1y][Custom ▾] plus the
+              "Include scheduled" toggle beneath it.
+
+              DEFAULT is 90d (see recencyDays init) so the first-load summary hits the index path.
+
+              ⚠ THERE IS NO UNBOUNDED STATE ANY MORE (ruled 2026-08-30). Re-clicking the active chip
+              used to toggle to "All months" — an unbounded scan, which is how the consolidated-scope
+              sort spill becomes a timeout. A chip now simply stays selected, and Clear on the custom
+              popover returns to 90d rather than to nothing.
+
+              ⚠ THE MONTH/YEAR PICKER IS GONE, FOLDED INTO CUSTOM. A calendar month is expressible as
+              a custom range and resolves to byte-identical bounds (pinned in
+              test/businessWindow.test.ts), so the fold costs the LABEL and nothing else. `year` and
+              `month` are removed from the wire — two ways to say one window is how drift starts.
+
+              Every bound comes from src/businessWindow.ts. This component does NO date arithmetic
+              and reads no clock: even the "scheduled" flag arrives pre-computed per row, so there is
+              no timezone dependency here and nothing to go stale across midnight Pacific. */}
           {/* ⚠ THIS WAS "small and unnoticeable" (Alec, 2026-08-18). Three causes, all fixed here:
                 · the group's border was `border-line` (#E4E9E6) — 1.23:1 against the white surface
                   it sits on — so the control had no perceptible boundary and read as loose text
@@ -1714,15 +1814,15 @@ export function CmdCollectionsExplorer({
               role="group"
               aria-label="Time window"
             >
-            {RECENCY_OPTIONS.map((d) => {
-              const active = recencyDays === d;
+            {WINDOW_PRESETS.map((p) => {
+              const active = !customActive && recencyDays === p.days;
               return (
                 <button
-                  key={d}
+                  key={p.days}
                   type="button"
                   aria-pressed={active}
-                  title={RECENCY_LABEL[d]}
-                  onClick={() => selectRecency(d)}
+                  title={p.label}
+                  onClick={() => selectRecency(p.days)}
                   className={[
                     'rounded-md px-3 py-1.5 text-sm transition-colors',
                     active
@@ -1730,61 +1830,104 @@ export function CmdCollectionsExplorer({
                       : 'font-medium text-muted-foreground hover:bg-[var(--brand-soft)] hover:text-ink900',
                   ].join(' ')}
                 >
-                  {d}d
+                  {p.chip}
                 </button>
               );
             })}
-            {/* [Month/Year ▾] — opens a popover holding the SAME Month + Year selects (onChange bodies
-                unchanged). Highlighted + labelled with the chosen window when a specific month is active. */}
-            <div ref={monthYearRef} className="relative">
+            {/* [Custom ▾] — replaces the Month/Year popover (ruled 2026-08-30). A calendar month is
+                expressible as a custom range and resolves to byte-identical bounds
+                (test/businessWindow.test.ts pins it), so the fold costs the LABEL and nothing else.
+                Two ways to say one window is how the next drift starts. */}
+            <div ref={customRef} className="relative">
               <button
                 type="button"
-                aria-expanded={monthYearOpen}
+                aria-expanded={customOpen}
                 aria-haspopup="true"
-                onClick={() => setMonthYearOpen((o) => !o)}
+                onClick={() => setCustomOpen((o) => !o)}
                 className={[
                   'flex items-center gap-1 rounded-md px-3 py-1.5 text-sm transition-colors',
-                  month > 0
+                  customActive
                     ? 'bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)] ring-1 ring-inset ring-[var(--brand-ink)]'
                     : 'font-medium text-muted-foreground hover:bg-[var(--brand-soft)] hover:text-ink900',
                 ].join(' ')}
               >
-                {month > 0 ? `${MONTH_NAMES[month - 1]} ${year}` : 'Month/Year'}
+                {customActive ? `${customFrom} → ${customTo}` : 'Custom'}
                 <ChevronDown className="h-3.5 w-3.5 opacity-70" aria-hidden />
               </button>
-              {monthYearOpen && (
+              {customOpen && (
                 <div
                   role="dialog"
-                  aria-label="Choose month and year"
-                  className="absolute right-0 top-full z-50 mt-2 flex items-center gap-2 animate-ths-reveal rounded-lg border border-line bg-surface p-3 shadow-ths"
+                  aria-label="Choose a custom date range"
+                  className="absolute right-0 top-full z-50 mt-2 w-[22rem] animate-ths-reveal rounded-lg border border-line bg-surface p-3 shadow-ths"
                 >
-                  <ControlSelect
-                    label="Month"
-                    value={month}
-                    ariaLabel="Month"
-                    onChange={(v) => {
-                      setMonth(Number(v));
-                      setRecencyDays(0); // Month/Year and recency are mutually exclusive windows.
-                    }}
-                  >
-                    <option value={0}>All months</option>
-                    {MONTH_NAMES.map((name, i) => (
-                      <option key={name} value={i + 1}>
-                        {name}
-                      </option>
-                    ))}
-                  </ControlSelect>
-                  <ControlSelect label="Year" value={year} ariaLabel="Year" onChange={(v) => setYear(Number(v))}>
-                    {YEAR_OPTIONS.map((y) => (
-                      <option key={y} value={y}>
-                        {y}
-                      </option>
-                    ))}
-                  </ControlSelect>
+                  <div className="flex items-end gap-2">
+                    <label className="flex-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      From
+                      <input
+                        type="date"
+                        value={draftFrom}
+                        onChange={(e) => setDraftFrom(e.target.value)}
+                        className="mt-1 w-full rounded-md border border-ink400 bg-surface px-2 py-1.5 text-sm font-normal normal-case text-ink900"
+                      />
+                    </label>
+                    <label className="flex-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      To
+                      <input
+                        type="date"
+                        value={draftTo}
+                        onChange={(e) => setDraftTo(e.target.value)}
+                        className="mt-1 w-full rounded-md border border-ink400 bg-surface px-2 py-1.5 text-sm font-normal normal-case text-ink900"
+                      />
+                    </label>
+                  </div>
+                  {/* Both dates are INCLUSIVE, and saying so matters: the server turns `to` into a
+                      half-open bound of to+1, and a reader who assumes exclusive would think the
+                      last day was missing. */}
+                  <p className="mt-2 text-xs text-ink400">
+                    Both dates included. Maximum {CUSTOM_MAX_DAYS} days.
+                  </p>
+                  {customError !== '' && (
+                    <p role="alert" className="mt-2 text-xs font-medium text-coral600">
+                      {customError}
+                    </p>
+                  )}
+                  <div className="mt-3 flex justify-end gap-2">
+                    {customActive && (
+                      <button
+                        type="button"
+                        onClick={clearCustomRange}
+                        className="rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground hover:bg-[var(--brand-soft)] hover:text-ink900"
+                      >
+                        Clear
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={applyCustomRange}
+                      className="rounded-md bg-[var(--brand-ink)] px-3 py-1.5 text-sm font-semibold text-white"
+                    >
+                      Apply
+                    </button>
+                  </div>
                 </div>
               )}
               </div>
             </div>
+            {/* INCLUDE SCHEDULED — an upper-bound override, off by default.
+                ⚠ NEVER HIDDEN OR DISABLED, even when it currently changes nothing (ruled
+                2026-08-30). All 106 future-dated charges today are Indigo, so on the BXR tab this
+                toggle is inert — but a control that appears and disappears with the data is worse
+                than an inert one: the reader cannot learn what it does, and its absence looks like
+                a bug rather than an empty set. */}
+            <label className="mt-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={includeScheduled}
+                onChange={(e) => setIncludeScheduled(e.target.checked)}
+                className="h-4 w-4 rounded border-ink400"
+              />
+              Include scheduled payments
+            </label>
           </div>
         </div>
 
@@ -2118,6 +2261,11 @@ export function CmdCollectionsExplorer({
                         >
                           {c === 'facility' ? (
                             <FacilityCell row={row} fallback={cellText(c, row)} />
+                          ) : c === 'payment_received' ? (
+                            /* One render site serves BOTH row and grouped mode — toGridRow passes
+                               is_scheduled straight through, and a grouped row IS one payment date
+                               so the flag is exact there too. */
+                            <PaymentDateCell row={row} text={cellText(c, row)} />
                           ) : (
                             cellText(c, row)
                           )}
