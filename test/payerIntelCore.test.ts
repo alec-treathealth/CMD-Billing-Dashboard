@@ -188,6 +188,10 @@ function makeDeps(principal: () => ReturnType<typeof SEAT>, over?: Partial<Payer
           cpt_code: 'H0035',
           revenue_code: '0913',
           facility: 'LONESTAR MENTAL HEALTH LLC',
+          // CMD named this facility, so 0086 never covers the row: both fields are null, and they
+          // are null rather than absent so a `!== null` guard cannot take the resolved branch.
+          facility_resolved: null,
+          facility_method: null,
           charge_amount: GRID_CHARGE_STR,
           allowed_amount: '1041.00',
           insurance_payments: '900.00',

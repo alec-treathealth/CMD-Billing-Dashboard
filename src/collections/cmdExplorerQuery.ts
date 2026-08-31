@@ -10,6 +10,16 @@
  * bound `$n` parameter via the `add` closure — never interpolated.
  */
 import type { CmdExplorerRow } from './cmdExplorer.js';
+// The SQL layer's one copy of the 'No Facility' literal. Imported rather than re-typed, per that
+// module's own rule that "a site opts in by naming it".
+//
+// ⚠ THIS USE IS A FALLBACK, NOT THE SUPPRESSION THAT CONSTANT WAS MINTED FOR. Its docblock rules
+// that ENTITY SURFACES suppress the placeholder while DENOMINATORS keep it, and explicitly
+// disqualifies folding that logic into cmdExplorerBaseConds. Nothing here suppresses anything: the
+// placeholder population is fully preserved and merely RE-PARTITIONED between "still unattributed"
+// (branch 3) and "attributed by 0086" (branch 2), and only when a facility filter is active and the
+// caller opted in. Collections' 2026-08-10 raw-grain ruling — that the grid keeps NF — is intact.
+import { QUALIFY_NO_FACILITY_SQL } from './qualifyFacilityPlaceholder.js';
 
 // --- filters + search allowlist ---------------------------------------------
 
@@ -231,10 +241,72 @@ function isPgBigintText(v: unknown): v is string {
   return BigInt(v) <= PG_BIGINT_MAX;
 }
 
+/**
+ * The 0086 facility-attribution matview — every 'No Facility' charge, at the SAME charge grain and
+ * keyed by the SAME `id` as CMD_EXPLORER_CHARGE_ROLLUP (both are rebuilt from that rollup, and
+ * `cmd_facility_resolution_id` is UNIQUE, so a join on id is 1:1 and can never fan out).
+ *
+ * ⚠ THE 1:1 CLAIM IS A REFRESH-CYCLE PROPERTY, NOT A PROPERTY OF `id`. veris-data-notes.md is
+ * explicit that the rollup's `id` "is the latest snapshot's line id and shifts when new snapshots
+ * arrive" — which is exactly why 0085 keys ASSIGNMENTS on the composite group key instead.
+ *
+ * ── WHAT HAPPENS WHEN THE TWO MATVIEWS DESYNC (verified 2026-08-30, do not re-derive) ──────────
+ * They CAN desync. The hourly :45 route refreshes the rollup and this matview as TWO INDEPENDENT
+ * statements in two transactions, and the second sits inside a catch that logs and swallows
+ * (app/lib/server.ts, the refresh-charge-rollup handler) — deliberately, so a satellite refresh
+ * cannot roll back the production rollup. So "rollup fresh, resolution stale" is a reachable state.
+ *
+ * IT IS FAIL-SAFE: a stale row matches NOTHING; it never matches the WRONG charge.
+ *   - cmd_explorer_rows is append-only with a never-reused bigserial `id`, and a posting's 0059
+ *     group membership is a pure function of its own immutable columns. So a posting id is either
+ *     ITS OWN group's representative (max(id)) or not a representative at all — it can never become
+ *     the representative of a DIFFERENT charge.
+ *   - Measured, not assumed: of 27,907 placeholder postings, 11,446 are current representatives and
+ *     **16,461 are superseded** — precisely the population a stale matview would be keyed on — and
+ *     **0 of them land on a different charge** (group key compared column by column).
+ * The failure mode is therefore UNDER-CLAIMING: the cell reverts to the raw 'No Facility', which is
+ * the pre-2026-08-30 behaviour. Never misattribution — a charge cannot render another patient's
+ * facility. The desync is also one-directional: this matview is DEFINED over the rollup, so it can
+ * only lag, never lead.
+ *
+ * ⚠ WHAT IS MISSING, AND IT IS INVISIBLE: there is NO watermark, NO generation marker and NO drift
+ * check on this matview — no `refreshed_at`, no `_state` table (contrast 0105's
+ * cmd_patient_directory_state, which has both and a freshness query). Combined with the swallowing
+ * catch, a failed refresh has NO reader-visible signal: charges simply go back to saying
+ * 'No Facility'. A staleness proxy is derivable — count this matview's ids that are absent from the
+ * rollup, 0 today — but nothing computes or surfaces it. Follow-up, not this change.
+ *
+ * Declared here rather than imported from facilityResolutionQuery.ts to keep the dependency
+ * one-way: that module already imports `likeContains` from THIS one, so the reverse import would
+ * close a cycle. It consumes this constant instead.
+ */
+export const CMD_FACILITY_RESOLUTION = 'collections.cmd_facility_resolution';
+
+/**
+ * Opt-ins for cmdExplorerBaseConds. Absent/false reproduces the pre-2026-08-30 SQL BYTE FOR BYTE.
+ *
+ * ⚠ THE DEFAULT IS OFF ON PURPOSE, AND IT IS THE WHOLE REASON THIS FLAG EXISTS. These conds are
+ * shared with Qualify (`qualifyQuery.ts`) and Payer Intel (`payerIntelSearch.ts`), which have their
+ * own, separately-ruled treatment of the 'No Facility' placeholder — see qualifyFacilityPlaceholder
+ * .ts, whose docblock disqualifies folding placeholder logic into this helper precisely because it
+ * "would silently change both". Flipping the default would do exactly that. Only the three
+ * COLLECTIONS builders in this module opt in, and they opt in TOGETHER so the grid, the grouped
+ * view and the search summary can never disagree about which rows a facility selection covers.
+ */
+export interface CmdExplorerCondOptions {
+  /**
+   * Resolve the facility filter through the 0086 matview, so a facility selection also returns the
+   * 'No Facility' charges ATTRIBUTED to it — and so selecting 'No Facility' returns only the ones
+   * still unattributed. Off = plain `facility = any(...)` against the raw CMD cell.
+   */
+  resolveFacility?: boolean;
+}
+
 export function cmdExplorerBaseConds(
   filter: CmdExplorerFilter,
   entityIds: string[],
   add: ParamAdder,
+  opts?: CmdExplorerCondOptions,
 ): string[] {
   const conds: string[] = [];
   // Tenant scope FIRST — server-derived entitled entity ids, applied to every read.
@@ -267,7 +339,70 @@ export function cmdExplorerBaseConds(
   // null/undefined) is NO restriction — the condition is omitted so the result set is ALL
   // facilities, never zero rows. (Emitting `= any(ARRAY[]::text[])` on empty would match nothing.)
   if (Array.isArray(filter.facility) && filter.facility.length > 0) {
-    conds.push(`facility = any(${add(filter.facility)}::text[])`);
+    if (opts?.resolveFacility === true) {
+      // RESOLUTION-AWARE facility membership (2026-08-30). Logically this is one predicate —
+      //
+      //     coalesce(<0086 facility_alias>, facility) = any($sel)
+      //
+      // — spelled as three OR'd branches so each one stays index-usable and so the sort tuple never
+      // widens. It is NOT written as a join: the pre-LIMIT sort in the grouped builder already
+      // spills (measured 2026-08-30, CONSOLIDATED scope, 90d: `external merge` Disk 4,544 kB leader
+      // / 4,528 kB worker, 46,636 shared buffers), and adding a joined text column to that sort key
+      // would deepen a spill we are not here to fix. A semi-join adds a filter; a join adds columns.
+      //
+      // ⚠ THE TWO SIDES SPEAK DIFFERENT NAMESPACES, which is the whole reason branch 2 is not a
+      // plain equality. `filter.facility` carries CMD DISPLAY TEXT ('TREAT MENTAL HEALTH WASHINGTON
+      // LLC') — the vocabulary buildCmdFacilityOptionsQuery emits — while `facility_alias` carries a
+      // facility CODE ('TREAT_WA'). Measured 2026-08-30: all 13 live aliases are codes and NONE is
+      // a selectable option today. So the labels are translated to codes INSIDE the predicate,
+      // set-valued in both directions: one code can have several CMD spellings (LSMH is live proof
+      // — 'LONESTAR MENTAL HEALTH' and 'LONESTAR MENTAL HEALTH LLC' both map to it), so selecting
+      // EITHER spelling must reach the same resolved rows. Unioning codes into the dropdown instead
+      // was rejected: it would list the label and the code as two options for one facility, which is
+      // precisely the grid/filter disagreement this change exists to remove.
+      // Each value bound ONCE and the placeholder re-referenced — a $n may appear any number of
+      // times in one statement. Three separate add() calls for the same literal would work and
+      // would be three copies of it on the wire.
+      const sel = add(filter.facility);
+      const scope = add(entityIds);
+      const nf = add(QUALIFY_NO_FACILITY_SQL);
+      conds.push(
+        '(' +
+          // 1. CMD named a facility: unchanged behaviour, still served by the rollup's own indexes.
+          //    Guarded by `<> placeholder` so a row CMD left blank can never satisfy this branch and
+          //    short-circuit branches 2/3 — those two own the placeholder population exclusively.
+          `(facility <> ${nf} and facility = any(${sel}::text[])) or ` +
+          // 2. The charge is attributed by 0086 to one of the selected facilities. `id in (...)`
+          //    rather than EXISTS, for the reason the employer narrow below already records: it
+          //    builds one bounded id set and hash-semi-joins it, instead of probing per outer row.
+          `id in (select fr.id from ${CMD_FACILITY_RESOLUTION} fr ` +
+          `where fr.business_entity_id = any(${scope}::uuid[]) and fr.facility_alias in (` +
+          `select coalesce(fe.facility_code, a.facility_code) from unnest(${sel}::text[]) as s(label) ` +
+          'left join collections.facilities fe on upper(fe.facility_name) = upper(s.label) ' +
+          'left join collections.cmd_facility_aliases a on upper(a.facility_text) = upper(s.label) ' +
+          'where coalesce(fe.facility_code, a.facility_code) is not null)) or ' +
+          // 3. 'No Facility' is itself selected AND this charge is still unattributed — so the
+          //    selection returns the rows that still DISPLAY the placeholder, not every row that
+          //    merely STORES it. Without this branch the grid would show a facility name in the cell
+          //    and 'No Facility' would still select it, which is the defect in the opposite
+          //    direction. Measured 2026-08-30: 6,064 of 11,446 placeholder charges are unresolved.
+          //
+          //    ⚠ `id NOT IN (<resolved ids>)`, NOT a correlated `not exists (… where fr2.id = id)`.
+          //    These conds emit UNQUALIFIED column names (callers alias the rollup differently), so
+          //    inside a subquery an unqualified `id` binds to the INNER relation and the correlation
+          //    silently degrades to `fr2.id = fr2.id` — always true, so the branch would match
+          //    nothing and every resolved row would vanish from a 'No Facility' selection. The
+          //    uncorrelated anti-set has no such trap. NOT IN is safe here specifically because
+          //    `cmd_facility_resolution.id` cannot be NULL (it carries a UNIQUE index and is the
+          //    rollup's own key); a NULL in that set would make the predicate UNKNOWN for every row.
+          `(facility = ${nf} and ${nf} = any(${sel}::text[]) ` +
+          `and id not in (select fr2.id from ${CMD_FACILITY_RESOLUTION} fr2 ` +
+          `where fr2.business_entity_id = any(${scope}::uuid[]) and fr2.facility_alias is not null))` +
+          ')',
+      );
+    } else {
+      conds.push(`facility = any(${add(filter.facility)}::text[])`);
+    }
   }
   if (filter.cpt_code) conds.push(`cpt_code = ${add(filter.cpt_code)}`);
   if (filter.revenue_code) conds.push(`revenue_code = ${add(filter.revenue_code)}`);
@@ -851,6 +986,30 @@ export function sanitizeGridColumns(input: unknown): CmdExplorerColumnKey[] {
  * the PHYSICAL allowed_reliable column via CMD_EXPLORER_SORT_SQL below — never the raw netted
  * allowed_amount column, which the grid no longer displays.
  */
+/**
+ * ⚠ `facility` SORTS ON THE RAW CMD VALUE, NOT ON WHAT THE CELL DISPLAYS. Ruled 2026-08-30; this is
+ * a known, accepted divergence, not an oversight. Read this before "fixing" it.
+ *
+ * WHAT IT SORTS ON: the physical `facility` column of the 0059 rollup — the value CMD sent.
+ *
+ * WHAT THE CELL SHOWS: `coalesce(<0086 facility_alias>, facility)`. For a charge CMD named, those
+ * are the SAME STRING, so the ordering is exactly what the reader sees for all but one population.
+ * They differ only inside the 'No Facility' bucket — 11,446 charges of which 5,382 are attributed
+ * (measured 2026-08-30) — where the rows sort under the placeholder while displaying a facility.
+ *
+ * WHY NOT SORT ON THE DISPLAYED VALUE: it would have to enter the PRE-LIMIT sort key, and that sort
+ * already spills on the consolidated scope (measured 2026-08-30, 90d: `external merge` Disk 4,544 kB
+ * leader / 4,528 kB worker, 46,636 shared buffers, temp written 1,136). Widening a spilling sort
+ * with a joined text column is a real regression traded for a cosmetic gain in one bucket. The fix
+ * is gated on the per-entity UNION ALL rewrite already named in cmdExplorerBaseConds — the change
+ * that makes the consolidated shape index-servable — after which the widening is affordable.
+ *
+ * This is a DELIBERATE exception to the rule CMD_EXPLORER_SORT_SQL's docblock states for
+ * allowed_amount ("the grid DISPLAYS allowed_reliable … so its ORDER BY must bind allowed_reliable").
+ * The exception is bounded in a way that one is not: allowed_amount differed on 5,412 charges with
+ * no visible marker, whereas every row where facility diverges is RENDERED with a resolution pill
+ * and a method badge, so the reader can see which rows are the exception.
+ */
 export const CMD_EXPLORER_SORTABLE_COLUMNS = [
   'payment_received',
   'charge_date',
@@ -882,6 +1041,8 @@ const CMD_EXPLORER_SORT_SQL: Record<CmdExplorerSortColumn, string> = {
   cpt_code: 'cpt_code',
   revenue_code: 'revenue_code',
   primary_payer: 'primary_payer',
+  // Binds the RAW rollup column on purpose — the cell may display a 0086-resolved value instead.
+  // See the accepted-divergence note on CMD_EXPLORER_SORTABLE_COLUMNS.
   facility: 'facility',
   charge_amount: 'charge_amount',
   allowed_amount: 'allowed_reliable',
@@ -956,6 +1117,18 @@ export const CMD_EXPLORER_SELECT =
   "to_char(payment_received, 'YYYY-MM-DD') as payment_received, cpt_code, revenue_code, " +
   'facility, charge_amount, allowed_amount, insurance_payments, adjustments, ' +
   'patient_balance_due, primary_payer, pct_allowed, pct_paid, employer_name, ' +
+  // FACILITY RESOLUTION IS NOT APPLIED ON THIS PROJECTION — literal NULLs, stated rather than
+  // omitted. This select feeds the COHORT DRILLDOWN's patient table (buildCohortDrilldownQueries),
+  // which reads the BASE table and has no resolution join; the 0086 fallback shipped 2026-08-30
+  // scoped to the Collections Facility column only.
+  //
+  // The consequence is real and is a KNOWN, NAMED inconsistency rather than an oversight: a charge
+  // the grid shows as 'TREAT_WA · Manual' still reads 'No Facility' in the drilldown table. It is
+  // projected as NULL rather than left off the row shape entirely because CmdExplorerRow declares
+  // both fields REQUIRED and nullable — an ABSENT field would arrive as `undefined`, and
+  // `undefined !== null` is true, so every `facility_resolved !== null` guard downstream would take
+  // the resolved branch on a row that has no resolution. Null is the honest, safe value.
+  'null::text as facility_resolved, null::text as facility_method, ' +
   `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
   // Aliased `t` SO THE ORDER BY CAN TARGET THE RAW COLUMN: the two date columns are projected as
   // `to_char(<date>, 'YYYY-MM-DD') AS <date>` (output name == column name), and an UNQUALIFIED
@@ -1010,7 +1183,7 @@ export function buildCmdExplorerQuery(
   };
   // Tenant scope + the exact/window/substring filters (shared with the search summary). Every column
   // referenced here exists on the rollup, so the same conds apply unchanged.
-  const conds = cmdExplorerBaseConds(filter, entityIds, add);
+  const conds = cmdExplorerBaseConds(filter, entityIds, add, { resolveFacility: true });
 
   // Physical sort column (fixed literal from the map — allowed_amount → allowed_reliable).
   const col = CMD_EXPLORER_SORT_SQL[sort.column];
@@ -1069,8 +1242,28 @@ export function buildCmdExplorerQuery(
   //
   // `p.*` is safe here (not a `select *` over a table): `p` is this function's own fixed projection
   // immediately above, so the column list stays explicit and allowlisted.
+  // FACILITY-RESOLUTION JOIN — same side of the LIMIT as `e`, and for the same reason.
+  //
+  // `fr` supplies the 0086 attribution for charges whose raw CMD cell is the 'No Facility'
+  // placeholder. It is PROJECTION ONLY: the filter half of this feature is a semi-join emitted by
+  // cmdExplorerBaseConds INSIDE `p`, because a filter must narrow before the LIMIT or the page
+  // walks the wrong set — while a projection must not, or it widens a sort that already spills.
+  //
+  // 50 lookups on the UNIQUE cmd_facility_resolution_id, exactly like the `e` join above; the
+  // relation is 11,446 rows / 3,568 kB total (measured 2026-08-30), so even a mis-plan is bounded.
+  //
+  // LEFT, never INNER — same rule as `e`: a lookup miss must render the raw CMD facility, never one
+  // fewer row. Every non-placeholder charge misses by construction (0086 only covers placeholders),
+  // so an INNER join here would delete the entire book except the 11,446.
+  //
+  // ⚠ `p.facility` IS NOT OVERWRITTEN. The raw CMD value keeps its own column and its own meaning;
+  // the resolved value arrives ALONGSIDE it as facility_resolved. The UI composes them (resolved as
+  // primary text, raw reachable on hover) — this layer hands over both and decides nothing. Doing
+  // the coalesce in SQL would destroy the raw value for every consumer of this row shape, including
+  // the audited PHI reveal path and any future export.
   const sql =
-    `select p.*, e.employer_name from (` +
+    `select p.*, e.employer_name, fr.facility_alias as facility_resolved, ` +
+    `fr.method as facility_method from (` +
     `select t.id, to_char(t.charge_date, 'YYYY-MM-DD') as charge_date, ` +
     `to_char(t.payment_received, 'YYYY-MM-DD') as payment_received, t.cpt_code, t.revenue_code, ` +
     `t.facility, t.charge_amount, t.allowed_reliable as allowed_amount, t.insurance_payments, ` +
@@ -1079,6 +1272,7 @@ export function buildCmdExplorerQuery(
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} ` +
     `order by t.${col} ${dir} nulls last, t.id ${dir} limit ${add(limit)}` +
     `) p left join collections.cmd_explorer_rows e on e.id = p.id ` +
+    `left join ${CMD_FACILITY_RESOLUTION} fr on fr.id = p.id ` +
     // Re-stated on the OUTER query: a LEFT JOIN does not preserve the subquery's ordering, and the
     // keyset cursor is built from the LAST ROW of this result set — an unordered page would hand
     // back a cursor for an arbitrary row and silently skip or repeat pages. This re-sort is over
@@ -1225,7 +1419,10 @@ export function buildCmdSearchSummaryQueries(
       params.push(v);
       return `$${params.length}`;
     };
-    const conds = cmdExplorerBaseConds(filter, entityIds, add);
+    // Opted in ALONGSIDE the grid and the grouped view (see CmdExplorerCondOptions): the summary
+    // counts the rows the grid shows, so if one resolves a facility selection and the other does
+    // not, the tile says one number and the table lists another.
+    const conds = cmdExplorerBaseConds(filter, entityIds, add, { resolveFacility: true });
     const where = ` where ${conds.join(' and ')}`;
     // CHARGE grain (0050 rollup), so counts are logical charges and sums are netted — the grid
     // below the summary still pages snapshot ROWS, which is why its copy says "posting rows".
@@ -1803,6 +2000,12 @@ export interface CmdExplorerGroupRow {
   patient_balance_due: string | null;
   pct_allowed: string | null;
   pct_paid: string | null;
+  /** 0086 attribution for the group — see CmdExplorerRow.facility_resolved. Resolved on the
+   *  REPRESENTATIVE row, which is exact here because facility_alias is functionally dependent on
+   *  this query's group key (measured; see the join's comment). */
+  facility_resolved: string | null;
+  /** The 0086 method behind facility_resolved. Null exactly when that is null. */
+  facility_method: string | null;
 }
 
 export interface CmdExplorerGroupPage {
@@ -1844,7 +2047,7 @@ export function buildCmdExplorerGroupedQuery(
     params.push(v);
     return `$${params.length}`;
   };
-  const conds = cmdExplorerBaseConds(filter, entityIds, add);
+  const conds = cmdExplorerBaseConds(filter, entityIds, add, { resolveFacility: true });
   const dir = direction === 'asc' ? 'asc' : 'desc';
   const cmp = direction === 'asc' ? '>' : '<';
 
@@ -1889,7 +2092,8 @@ export function buildCmdExplorerGroupedQuery(
     `select g.id, g.charge_date, g.charge_date_end, g.payment_received, g.line_count, ` +
     `g.cpt_code, g.cpt_mixed, g.revenue_code, g.revenue_mixed, g.facility, g.primary_payer, ` +
     `g.charge_amount, g.allowed_amount, g.insurance_payments, g.adjustments, ` +
-    `g.patient_balance_due, g.pct_allowed, g.pct_paid, e.employer_name from (` +
+    `g.patient_balance_due, g.pct_allowed, g.pct_paid, e.employer_name, ` +
+    `fr.facility_alias as facility_resolved, fr.method as facility_method from (` +
     `select max(t.id) as id, ` +
     `to_char(min(t.charge_date), 'YYYY-MM-DD') as charge_date, ` +
     `to_char(max(t.charge_date), 'YYYY-MM-DD') as charge_date_end, ` +
@@ -1929,6 +2133,27 @@ export function buildCmdExplorerGroupedQuery(
     `t.payment_received, t.facility, t.primary_payer${havingSql} ` +
     `order by t.payment_received ${dir} nulls last, max(t.id) ${dir} limit ${add(limit)}` +
     `) g left join collections.cmd_explorer_rows e on e.id = g.id ` +
+    // FACILITY RESOLUTION IN GROUPED MODE — resolved on the REPRESENTATIVE id, outside the LIMIT,
+    // exactly as employer_name is, and licensed by the same kind of argument.
+    //
+    // WHAT MAKES THE REPRESENTATIVE ROW REPRESENTATIVE: facility_alias is functionally dependent on
+    // this query's group key. MEASURED against live data before this line was written (2026-08-30,
+    // all 3,023 placeholder groups):
+    //   0 groups with >1 distinct facility_alias   (max distinct = 1)
+    //   0 groups with >1 distinct method
+    //   0 groups MIXING resolved and unresolved lines
+    // The third is the one that matters most and is easy to skip: without it, a group holding one
+    // attributed line and one unattributed line would take the attribution for the whole group. No
+    // such group exists. Re-run that check before trusting this after any change to 0086.
+    //
+    // ⚠ THREE FORMULATIONS WERE TRIED; TAKE THIS ONE. (a) `min(fr.facility_alias)` over a LEFT JOIN
+    // in the inner query is ALSO correct under the same FD — but joining `fr` there makes the
+    // UNQUALIFIED `id` / `business_entity_id` that cmdExplorerBaseConds emits AMBIGUOUS (42702),
+    // because both relations carry those names. (b) A correlated scalar subquery per line dodges
+    // that but runs ~47,000 index lookups on the consolidated 90-day scope instead of 50, inside
+    // the input to a sort that already spills. (c) This: 50 unique-index lookups after the LIMIT,
+    // zero effect on the group key, the sort key, or the spill.
+    `left join ${CMD_FACILITY_RESOLUTION} fr on fr.id = g.id ` +
     // Re-stated on the OUTER query: a LEFT JOIN does not preserve the subquery's ordering, and the
     // next cursor is built from the LAST ROW of this result set — an unordered page would hand back
     // a cursor for an arbitrary group and silently skip or repeat pages. Costs nothing over 50 rows.

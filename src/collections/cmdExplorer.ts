@@ -393,6 +393,29 @@ export interface CmdExplorerRow {
    * Null for any row the one-shot backfill did not match and that predates the new CMD reports.
    */
   employer_name: string | null;
+  /**
+   * FACILITY ATTRIBUTION for a charge whose raw CMD `facility` cell is the 'No Facility'
+   * placeholder — `collections.cmd_facility_resolution.facility_alias` (migration 0086), LEFT
+   * JOINed on `id`. Non-null ONLY for placeholder charges that 0086 could attribute; null for every
+   * normal charge (0086 covers placeholders only) AND for a placeholder it could not resolve.
+   *
+   * ⚠ THIS DOES NOT REPLACE `facility`, AND MUST NOT. `facility` stays the raw value CMD sent, so
+   * the two are readable against each other; the UI shows this one as primary text with the raw one
+   * reachable behind it. Anything that needs "what CMD actually said" — an export, a reconciliation
+   * against the report, the audited reveal — reads `facility`, unchanged.
+   */
+  facility_resolved: string | null;
+  /**
+   * Which 0086 method produced `facility_resolved` — one of RESOLUTION_METHODS. Null exactly when
+   * `facility_resolved` is null.
+   *
+   * ⚠ SHIPPED TOGETHER OR NOT AT ALL. An attributed facility rendered without its method is a
+   * conclusion presented as a fact: `member_inference` and `tie_break` are things we DERIVED from
+   * other rows about the same member, and they must never read like a value CMD supplied. Pass this
+   * through `resolutionClassOf()` (facilityResolutionQuery.ts) for the exact/inferred split rather
+   * than testing method strings at a call site.
+   */
+  facility_method: string | null;
 }
 
 /** Trim; empty string → null (so blanks render as an em dash, not ''). */

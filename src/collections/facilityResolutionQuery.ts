@@ -49,6 +49,67 @@ export const RESOLUTION_METHODS = [
 ] as const;
 export type ResolutionMethod = (typeof RESOLUTION_METHODS)[number];
 
+/**
+ * EVIDENCE CLASS of a resolution method — the exact/inferred split, defined HERE and nowhere else.
+ *
+ * WHY IT LIVES IN THIS MODULE. Until 2026-08-30 the split existed only as page copy, one sentence
+ * on app/app/billing-audit/facility-resolution/page.tsx ("attributed by exact-evidence methods or
+ * worked by hand"), and that sentence does not even draw this line — it groups `manual` AGAINST
+ * "exact-evidence methods" where the ruling puts them together. Prose in one component cannot be
+ * imported, so the Collections grid would have had to restate the method list to render a badge,
+ * and a seventh method added to 0086 would then have to be remembered in two places. It is stated
+ * once, keyed off RESOLUTION_METHODS, and imported.
+ *
+ *   EXACT EVIDENCE  'manual' — a human ruling with an audit trail (0085 facility_assignments)
+ *                   'named'  — 0084 pull provenance: the account the line was actually pulled from
+ *   INFERRED        'member_inference' | 'vob' | 'tie_break' — derived from OTHER rows about the
+ *                   same member. Defensible, deterministic, and still a conclusion we drew rather
+ *                   than a fact CMD or an operator gave us.
+ *   (neither)       'unresolved' — facility_alias is NULL iff this; the raw CMD value stands.
+ *
+ * ⚠ AN INFERRED FACILITY MUST NEVER RENDER IDENTICALLY TO ONE CMD NAMED (ruling 2026-08-30). The
+ * shipped workbench STATUS cell (facility-resolution-leaves.tsx) does exactly that — every resolved
+ * method gets the same teal pill — and is DELIBERATELY LEFT ALONE by that ruling; the two surfaces
+ * disagree visually on purpose today. Porting this class to the workbench is a named follow-up, not
+ * a drive-by: it is that page's whole visual language.
+ */
+export const EXACT_EVIDENCE_METHODS = ['manual', 'named'] as const;
+export const INFERRED_METHODS = ['member_inference', 'vob', 'tie_break'] as const;
+
+export type ResolutionClass = 'exact' | 'inferred' | 'unresolved';
+
+// Typed as the FULL method union rather than as its own literal set, so adding a seventh method to
+// RESOLUTION_METHODS without classifying it is a TYPECHECK FAILURE here — not a silent default to
+// 'unresolved' at runtime, which would quietly hide a new resolution from the grid.
+const RESOLUTION_CLASS_BY_METHOD: Record<ResolutionMethod, ResolutionClass> = {
+  manual: 'exact',
+  named: 'exact',
+  member_inference: 'inferred',
+  vob: 'inferred',
+  tie_break: 'inferred',
+  unresolved: 'unresolved',
+};
+
+/**
+ * Evidence class for a method string. Accepts `string | null | undefined` because callers read it
+ * off a LEFT JOIN that legitimately misses (a charge with no resolution row at all), and an
+ * unrecognised value fails CLOSED to 'unresolved' — an unknown method must never be presented as
+ * evidence. The Record above is what makes a KNOWN-but-unclassified method impossible.
+ */
+export function resolutionClassOf(method: string | null | undefined): ResolutionClass {
+  if (method === null || method === undefined) return 'unresolved';
+  return RESOLUTION_CLASS_BY_METHOD[method as ResolutionMethod] ?? 'unresolved';
+}
+
+/**
+ * Narrow a method string that came off the wire. The DB column is plain text, so every consumer
+ * reads it as `string | null` — and indexing a Record<ResolutionMethod, …> with that is an implicit
+ * `any` under the root tsconfig's strictness. This is the one place that cast is made, guarded.
+ */
+export function isResolutionMethod(method: string | null | undefined): method is ResolutionMethod {
+  return method !== null && method !== undefined && method in RESOLUTION_CLASS_BY_METHOD;
+}
+
 export const RESOLUTION_ERAS = ['seed', 'cron'] as const;
 export type ResolutionEra = (typeof RESOLUTION_ERAS)[number];
 

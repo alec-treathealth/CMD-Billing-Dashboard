@@ -64,9 +64,49 @@ test('shared predicate: Qualify cases + Collections summary derive the SAME WHER
   const expected = normParams(cmdExplorerBaseConds(filter, BOTH, add).join(' and '));
 
   const cases = normParams(buildFacilityCasesQuery(filter, BOTH).sql);
-  const summary = normParams(buildCmdSearchSummaryQueries(filter, BOTH).totals.sql);
   assert.ok(cases.includes(expected), 'Qualify cases query uses the shared predicate verbatim');
-  assert.ok(summary.includes(expected), 'Collections summary totals uses the SAME shared predicate');
+
+  // ⚠ COLLECTIONS DIVERGED HERE 2026-08-30, DELIBERATELY, AND THIS TEST CAUGHT IT. Read before
+  // "fixing" either side.
+  //
+  // The Collections surfaces now pass `{ resolveFacility: true }`, which resolves a facility
+  // selection through the 0086 attribution matview so the grid's filter agrees with what its
+  // Facility cell displays. Qualify does NOT, and must not: qualifyFacilityPlaceholder.ts rules
+  // that entity surfaces SUPPRESS the 'No Facility' placeholder while denominators keep it, and its
+  // docblock disqualifies folding placeholder logic into this shared helper precisely because it
+  // "would silently change both".
+  //
+  // So the invariant this test protects is NOT "the two surfaces always emit identical SQL" — that
+  // was never quite the claim, it was a proxy for it. The real claim is that any divergence is an
+  // EXPLICIT, NAMED opt-in rather than a fork, and it is now asserted directly: same options ⇒ same
+  // predicate, byte for byte, on every axis. Fork the builder for one surface and this still fails.
+  const collectionsOpts = { resolveFacility: true } as const;
+  const cParams: unknown[] = [];
+  const cAdd: ParamAdder = (v) => {
+    cParams.push(v);
+    return `$${cParams.length}`;
+  };
+  const expectedResolved = normParams(
+    cmdExplorerBaseConds(filter, BOTH, cAdd, collectionsOpts).join(' and '),
+  );
+  const summary = normParams(buildCmdSearchSummaryQueries(filter, BOTH).totals.sql);
+  assert.ok(
+    summary.includes(expectedResolved),
+    'Collections summary totals uses the shared predicate under ITS options, verbatim',
+  );
+
+  // And the divergence is confined to the facility clause: with the opt-in OFF, Collections and
+  // Qualify are still byte-identical. If resolveFacility ever leaks into another axis — or becomes
+  // the default and silently changes Qualify — this line fails.
+  assert.notEqual(expected, expectedResolved, 'the opt-in must actually change the facility clause');
+  assert.ok(
+    expected.includes('facility = any($?::text[])'),
+    'default (Qualify) path stays the plain raw-cell membership test',
+  );
+  assert.ok(
+    !expectedResolved.includes('facility = any($?::text[]) and'),
+    'the resolved path must not ALSO emit the bare clause — that would AND the two, matching nothing new',
+  );
 
   // The evidence-gauge client count (Qualify-owned) ALSO derives the SAME predicate — so the gauge and
   // the "N charge lines match" count describe the identical population. It does NOT touch the Collections
