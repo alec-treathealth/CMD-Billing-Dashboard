@@ -121,6 +121,19 @@ test('Escape closes, and closing RESTORES focus to the opener (SC 2.4.3)', async
 
 });
 
+test('Shift+Tab from the initially focused dialog enters at the last control', async (t) => {
+  await mount(t, <VobModal open query="AETNA" onClose={() => {}} />);
+  const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+  const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+    'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])',
+  ));
+  const last = focusable[focusable.length - 1]!;
+
+  assert.equal(document.activeElement, dialog);
+  pressKey('Tab', { shiftKey: true });
+  assert.equal(document.activeElement, last);
+});
+
 test('Tab CYCLES inside the modal instead of escaping to the page behind it (SC 2.1.1)', async (t) => {
   // A control outside the dialog. In a real browser Tab from the last dialog element would land
   // here if the trap were broken; jsdom does not traverse natively, so what we assert is that the
