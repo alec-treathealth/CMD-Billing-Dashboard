@@ -126,6 +126,7 @@ import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cm
 // directly — this file is a hooks-and-effects client island that renderToStaticMarkup cannot run.
 import { FacilityCell } from './facility-cell';
 import { PaymentDateCell } from './payment-date-cell';
+import { COMBO_RANKING_EXPLAINER, rankCombos } from '../../../src/collections/comboRanking';
 import { deriveGridLayout, isAutoGridView } from '../../../src/collections/gridViewLayout';
 import { facilityCodesForEntity } from '../../../src/collections/cmdCustomers';
 import { INDIGO_ENTITY_ID } from '../../../src/tenants';
@@ -3219,6 +3220,7 @@ function SearchSummaryPanel({
             activeCombo={refinement?.kind === 'combo' ? { cpt: refinement.cpt, revenue: refinement.revenue } : null}
             onDrill={onDrillCombo}
             revealDelayMs={180}
+            fallbackPctAllowed={s.yield_pct.pct_allowed}
           />
         </div>
       )}
@@ -3233,25 +3235,36 @@ function SearchSummaryPanel({
  * drillable only when BOTH codes are present (a partial-null combo can't be exact-matched, so it
  * shows as a non-interactive stat row — mirroring DrillList's blank-label convention). The two
  * percentages are already dollar-weighted server-side (ratio of sums, not average of ratios).
+ *
+ * DISPLAY ORDER (2026-08-31): rows render S-ranked via the pure scoring module
+ * (src/collections/comboRanking.ts) — shrunk allowed rate × charged, boosted for per-line
+ * earnings — instead of the server's charge-DESC order. Rendering only: the group rows, their
+ * drill values, handlers and query params are the server's, byte-identical. Recency decay is held
+ * at w = 1.0 because the payload carries no service-date aggregate (see the module header).
  */
 function ComboDrillList({
   groups,
   activeCombo,
   onDrill,
   revealDelayMs = 0,
+  fallbackPctAllowed = null,
 }: {
   groups: CmdComboGroup[];
   activeCombo: { cpt: string; revenue: string } | null;
   onDrill: (cpt: string, revenue: string) => void;
   revealDelayMs?: number;
+  /** Selection-wide %-allowed (0–100 or null) — the prior fallback for CPTs with no pooled rate. */
+  fallbackPctAllowed?: number | null;
 }) {
   if (groups.length === 0) return null;
+  const ranked = rankCombos(groups, fallbackPctAllowed);
   return (
     <div className="mt-3 animate-ths-reveal rounded-lg border border-line bg-surface p-3" style={{ animationDelay: `${revealDelayMs}ms` }}>
-      <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+      <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         <Layers className="h-3.5 w-3.5" aria-hidden />
         Top CPT × Revenue-code combinations
       </div>
+      <p className="mb-2 text-[10px] text-muted-foreground">{COMBO_RANKING_EXPLAINER}</p>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -3265,7 +3278,7 @@ function ComboDrillList({
             </tr>
           </thead>
           <tbody>
-            {groups.map((g, i) => {
+            {ranked.map(({ row: g }, i) => {
               const drillable = g.cpt !== null && g.cpt !== '' && g.revenue !== null && g.revenue !== '';
               const active = drillable && activeCombo?.cpt === g.cpt && activeCombo?.revenue === g.revenue;
               const key = `${g.cpt ?? '∅'}|${g.revenue ?? '∅'}|${i}`;
