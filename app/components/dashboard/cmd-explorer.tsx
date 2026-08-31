@@ -873,16 +873,14 @@ export function CmdCollectionsExplorer({
       : '';
   const facilityKey = facilitySelection.join(''); // control char can't appear in a facility name
 
-  // --- dual-mode yield + AI-analysis input assembly ------------------------
+  // --- cohort resolution + AI-analysis input assembly ----------------------
   // A prefix cohort is "resolved" when the alpha-prefix search is active AND the curve returned
-  // whole-cohort totals (i.e., it cleared COHORT_MIN_PATIENTS). Then the green cards + AI read the
-  // COHORT yield; otherwise the SELECTION yield (this summary's tile aggregate — never a new query).
+  // whole-cohort totals (i.e., it cleared COHORT_MIN_PATIENTS). The AI read then analyzes the
+  // COHORT yield; otherwise the SELECTION yield (this summary's tile aggregate — never a new
+  // query). The header cards no longer switch modes (cohort card mode retired 2026-08-31) — they
+  // always show the selection yield; the curve panel remains the cohort's visual surface.
   const cohortData = cohort.kind === 'ready' || cohort.kind === 'refreshing' ? cohort.data : null;
   const cohortResolved = cohortActive && cohortData !== null && cohortData.totals !== null;
-  const cohortYield =
-    cohortResolved && cohortData
-      ? { pct: cohortData.totals!, cohortPatients: cohortData.cohort_patients, prefix: dAlpha }
-      : null;
 
   const summaryData = summary.kind === 'ready' || summary.kind === 'refreshing' ? summary.data : null;
   // The non-PHI aggregate the AI panel analyzes — mirrors EXACTLY what's on screen (tiles + green
@@ -2112,7 +2110,6 @@ export function CmdCollectionsExplorer({
           onDrill={applyRefinement}
           onDrillCombo={applyComboRefinement}
           facilityDisplayName={facilityDisplayName}
-          cohortYield={cohortYield}
         />
       )}
 
@@ -2734,56 +2731,45 @@ function StatTile({ label, value }: { label: string; value: string }) {
   );
 }
 
-/** The three payer-behavior percentages both modes share (0–100 or null → "—"). */
+/** The three payer-behavior percentages (0–100 or null → "—"). */
 type YieldPct = { pct_allowed: number | null; pct_paid: number | null; pct_collected: number | null };
 
-/**
- * DUAL-MODE green cards, rendered directly beneath the money tiles. COHORT mode (a prefix cohort is
- * resolved) shows the prefix-wide, N-patient cohort yield; SELECTION mode shows the filter-wide yield
- * derived from the same rollup that feeds the CHARGED / INSURANCE PAID / PATIENT BALANCE tiles. The
- * header/scope pill make the population explicit so a biller never mistakes a cohort-of-N for the
- * whole filtered selection. Visual treatment (cardGreen + formatPercentNum) is byte-identical to the
- * retired cohort-panel cards — only POSITION and (in selection mode) the header label changed.
- */
-type YieldMode =
-  | { mode: 'cohort'; pct: YieldPct; cohortPatients: number; prefix: string }
-  | { mode: 'selection'; pct: YieldPct; chargeLines: number };
+/** The selection's dollar totals, folded into the percentage cards as secondary lines. */
+type YieldMoney = { charged: number; allowed: number; paid: number; balance: number };
 
-function YieldCardsPanel({ view }: { view: YieldMode }) {
-  const pct = view.pct;
+/**
+ * The consolidated selection header cards: each green percentage card carries its own dollar total
+ * as a secondary line (allowed / paid / charged), and Patient Balance stands as a fourth,
+ * dollar-only card — replacing the separate CHARGED / INSURANCE PAID / PATIENT BALANCE tile row
+ * (folded in 2026-08-31 to reclaim vertical space; the tile values are the SAME aggregate, so
+ * nothing new is fetched). The COHORT display mode was retired in the same change: a resolved
+ * prefix cohort still drives the curve panel and the AI read (cohortResolved/cohortData are
+ * untouched), but the header cards always show the filter-wide selection yield.
+ * Visual treatment (cardGreen + formatPercentNum) is unchanged from the dual-mode cards.
+ */
+function YieldCardsPanel({ pct, chargeLines, money }: { pct: YieldPct; chargeLines: number; money: YieldMoney }) {
   const round = (n: number) => Math.round(n);
   return (
     <div className="mt-3">
       <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
-        {view.mode === 'cohort' ? (
-          <>
-            <span className="text-xs font-semibold text-ink900">Cohort payer behavior — “{view.prefix}”</span>
-            <span className="rounded-full border border-line bg-surface px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-              prefix-wide · ignores Member ID, facility &amp; date filters
-            </span>
-          </>
-        ) : (
-          <>
-            <span className="text-xs font-semibold text-ink900">Selection payer behavior — all filtered charge lines</span>
-            <span className="rounded-full border border-line bg-surface px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-              matches the {view.chargeLines.toLocaleString()} charge lines &amp; filters above
-            </span>
-          </>
-        )}
+        <span className="text-xs font-semibold text-ink900">Selection payer behavior — all filtered charge lines</span>
+        <span className="rounded-full border border-line bg-surface px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+          matches the {chargeLines.toLocaleString()} charge lines &amp; filters above
+        </span>
       </div>
       <p className="mb-2 text-[11px] text-muted-foreground">
-        {view.mode === 'cohort'
-          ? `All ${view.cohortPatients.toLocaleString()} patients whose insurance member ID begins with “${view.prefix}” — dollar-weighted cohort averages, never one patient.`
-          : 'Dollar-weighted across every charge line in the current selection (facility · payer · date · search) — a filtered aggregate, not a patient cohort.'}
+        Dollar-weighted across every charge line in the current selection (facility · payer · date · search) — a filtered aggregate, not a patient cohort.
       </p>
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
         <div className={`rounded-lg p-3 ${cardGreen(pct.pct_allowed)}`}>
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">% allowed of billed</span>
             <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">allowed ÷ billed</span>
           </div>
           <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(pct.pct_allowed)}</div>
-          <div className="text-[11px] text-ink400">what payer agreed to</div>
+          <div className="text-[11px] tabular-nums text-ink600">
+            <span className="font-semibold">{MONEY0.format(money.allowed)}</span> allowed
+          </div>
         </div>
         <div className={`rounded-lg p-3 ${cardGreen(pct.pct_paid)}`}>
           <div className="flex flex-wrap items-center gap-1.5">
@@ -2791,7 +2777,9 @@ function YieldCardsPanel({ view }: { view: YieldMode }) {
             <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[10px] text-violet-700 dark:bg-violet-500/20 dark:text-violet-300">payer paid ÷ allowed</span>
           </div>
           <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(pct.pct_paid)}</div>
-          <div className="text-[11px] text-ink400">of what was allowed</div>
+          <div className="text-[11px] tabular-nums text-ink600">
+            <span className="font-semibold">{MONEY0.format(money.paid)}</span> insurance paid
+          </div>
         </div>
         <div className={`rounded-lg p-3 ${cardGreen(pct.pct_collected)}`}>
           <div className="flex flex-wrap items-center gap-1.5">
@@ -2799,7 +2787,17 @@ function YieldCardsPanel({ view }: { view: YieldMode }) {
             <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">paid ÷ billed</span>
           </div>
           <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{formatPercentNum(pct.pct_collected)}</div>
-          <div className="text-[11px] text-ink400">net yield end to end</div>
+          <div className="text-[11px] tabular-nums text-ink600">
+            <span className="font-semibold">{MONEY0.format(money.charged)}</span> charged
+          </div>
+        </div>
+        <div className="rounded-lg border border-line bg-surface p-3">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Patient balance</span>
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">owed by patients</span>
+          </div>
+          <div className="mt-0.5 text-2xl font-semibold tabular-nums text-ink900">{MONEY0.format(money.balance)}</div>
+          <div className="text-[11px] text-ink400">not a payer yield — collected separately</div>
         </div>
       </div>
       {pct.pct_allowed !== null && pct.pct_paid !== null && pct.pct_collected !== null && (
@@ -3086,9 +3084,10 @@ function PhiField({
 }
 
 /**
- * The search-engine result: headline count + money totals, the three single-dimension drill-down
- * lists, then the (CPT × Revenue-code) combination list full-width below them (it carries more
- * numbers per row — count, charge, %-allowed, %-paid — so it gets the full width to stay readable).
+ * The search-engine result: headline count + the consolidated %-with-dollar cards, the two
+ * single-dimension drill-down lists (payers, facilities), then the (CPT × Revenue-code)
+ * combination list full-width below them (it carries more numbers per row — count, charge,
+ * %-allowed, %-paid — so it gets the full width to stay readable).
  */
 function SearchSummaryPanel({
   state,
@@ -3097,7 +3096,6 @@ function SearchSummaryPanel({
   onDrill,
   onDrillCombo,
   facilityDisplayName,
-  cohortYield,
 }: {
   state: SummaryState;
   label: string;
@@ -3106,9 +3104,6 @@ function SearchSummaryPanel({
   onDrillCombo: (cpt: string, revenue: string) => void;
   /** Raw facility text → curated friendly name, for the Top facilities card display only. */
   facilityDisplayName?: (raw: string) => string;
-  /** When a prefix cohort is resolved, the green cards render its COHORT yield (+ framing) instead
-   *  of the selection yield. Null → SELECTION mode (cards derive from this summary's tile aggregate). */
-  cohortYield?: { pct: YieldPct; cohortPatients: number; prefix: string } | null;
 }) {
   // Fold/unfold the panel body below the header (Session F). Local, resets each session — not a
   // saved-view mechanism. Conditional render (not a max-height transition) so the drill buttons
@@ -3175,21 +3170,18 @@ function SearchSummaryPanel({
           {/* Staged reveal: the four groups arrive in ONE response (single Promise.all), so this is a
               bounded, capped visual settle (0→180ms), not a slow per-panel cascade. It runs once on
               mount; a refetch keeps the same mounted elements, so it doesn't re-animate on each keystroke. */}
-          <div className="mt-3 grid animate-ths-reveal grid-cols-2 gap-2 sm:grid-cols-3">
-            <StatTile label="Charged" value={MONEY0.format(s.total_charge)} />
-            <StatTile label="Insurance Paid" value={MONEY0.format(s.total_paid)} />
-            <StatTile label="Patient Balance" value={MONEY0.format(s.total_balance)} />
+          {/* Consolidated header cards — the three percentage cards each carry their own dollar
+              total as a secondary line, plus a dollar-only Patient Balance card. Replaces the
+              former CHARGED / INSURANCE PAID / PATIENT BALANCE tile row (same aggregate, no new
+              query) and always shows the filter-wide selection yield — the cohort display mode
+              was retired 2026-08-31 (the curve panel + AI read still consume the cohort data). */}
+          <div className="animate-ths-reveal">
+            <YieldCardsPanel
+              pct={s.yield_pct}
+              chargeLines={s.total_count}
+              money={{ charged: s.total_charge, allowed: s.total_allowed, paid: s.total_paid, balance: s.total_balance }}
+            />
           </div>
-
-          {/* Green payer-behavior cards — directly beneath the money tiles. Dual-mode: cohort yield
-              (prefix cohort resolved) or filter-wide yield (this summary's tile aggregate). */}
-          <YieldCardsPanel
-            view={
-              cohortYield
-                ? { mode: 'cohort', pct: cohortYield.pct, cohortPatients: cohortYield.cohortPatients, prefix: cohortYield.prefix }
-                : { mode: 'selection', pct: s.yield_pct, chargeLines: s.total_count }
-            }
-          />
 
           {/* Top Results groups: Payer + Facility single-dimension lists, then the full-width CPT×Rev
               combo below. The standalone CPT list was dropped here — the CPT×Rev combo table below
@@ -3987,11 +3979,13 @@ function SummaryPanelSkeleton() {
         <Skeleton className="h-5 w-64" />
         <Skeleton className="h-3.5 w-48" />
       </div>
-      <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {Array.from({ length: 3 }).map((_, i) => (
-          <div key={i} className="rounded-lg border border-line bg-surface px-3 py-2">
-            <Skeleton className="h-3 w-20" />
-            <Skeleton className="mt-2 h-6 w-24" />
+      {/* Footprint-matches the consolidated header cards: four %-with-dollar cards in one row. */}
+      <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <div key={i} className="rounded-lg border border-line bg-surface p-3">
+            <Skeleton className="h-3 w-24" />
+            <Skeleton className="mt-2 h-7 w-20" />
+            <Skeleton className="mt-1.5 h-3 w-28" />
           </div>
         ))}
       </div>
