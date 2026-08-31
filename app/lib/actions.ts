@@ -111,6 +111,13 @@ import { facilityBelongsToEntity, facilityIsActiveForEntity } from '../../src/co
 // A manual-deposit write MUST bust it: those reads are unstable_cache'd, so without this
 // the operator records a payment and keeps staring at the previous MTD figure.
 import { DASHBOARD_CACHE_TAG } from '../../src/cacheTags.js';
+import {
+  businessDayIso,
+  businessDayPlus,
+  businessWindowBounds,
+  type BusinessWindow,
+} from '../../src/businessWindow.js';
+import { FUTURE_PAYMENT_HORIZON_DAYS } from '../../src/collections/cmdExplorer.js';
 import { revalidateTag } from 'next/cache';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
@@ -1250,9 +1257,19 @@ export type CmdReportResult =
  */
 export interface CmdReportFilter {
   facility?: string[];
-  year?: number;
-  month?: number; // 1-12; requires year
-  recencyDays?: number; // 7 | 14 | 30 | 90 — rolling window (server clock); overrides year/month
+  /**
+   * Trailing window preset, in days: 7 | 14 | 30 | 90 | 180 | 365. Default 90. Half-open and
+   * EXACTLY this many days, anchored on the America/Los_Angeles ops day (src/businessWindow.ts).
+   * Ignored when customFrom/customTo are supplied.
+   */
+  windowDays?: number;
+  /** Custom range, INCLUSIVE dates as the user picked them ('YYYY-MM-DD'). Both or neither.
+   *  Capped at CMD_CUSTOM_MAX_DAYS at this boundary — rejected, never silently clamped. */
+  customFrom?: string;
+  customTo?: string;
+  /** Extend the upper bound to cover payments scheduled within the ingest horizon. Off by default:
+   *  future-dated money must not sit inside a total a reader takes as settled cash. */
+  includeScheduled?: boolean;
   /** Smart-search substring term (matched literally, ILIKE) across `searchColumns`. */
   q?: string;
   /** Which NON-PHI columns `q` searches (allowlisted server-side; PHI columns are rejected). */
@@ -1475,7 +1492,24 @@ const CMD_FACILITY_SET_MAX = 200;
 /** Max length of a single facility string (matches the exact-match bound used elsewhere). */
 const CMD_FACILITY_NAME_MAX = 200;
 /** Rolling recency windows offered by the quick-filter chips (server-computed; closed allowlist). */
-const CMD_RECENCY_DAYS = new Set([7, 14, 30, 90]);
+/**
+ * The Collections window presets, in days. 6m and 1y are 180/365 — trailing spans, NOT calendar
+ * periods; a "6m" chip means the last 180 days, and the primitive reports windowDays accordingly.
+ *
+ * There is deliberately NO unbounded "all time" option (ruled 2026-08-30): the consolidated-scope
+ * grouped sort already spills to disk at 1y, and an unbounded scan is how that becomes a timeout.
+ */
+const CMD_WINDOW_PRESETS = new Set([7, 14, 30, 90, 180, 365]);
+
+/**
+ * Hard cap on a CUSTOM range, in days, INCLUSIVE — 366 so a full leap year is expressible.
+ *
+ * ⚠ THE CAP LIVES HERE AND NOT IN THE PRIMITIVE, ON PURPOSE. src/businessWindow.ts enforces no
+ * maximum span because a span limit is a PRODUCT rule for one surface, not a property of the
+ * calendar; another consumer may legitimately want two years. Rejected, never silently clamped —
+ * a clamp would return a different window than the one the user asked for, without saying so.
+ */
+const CMD_CUSTOM_MAX_DAYS = 366;
 
 /**
  * Validate + copy the facility multi-select into the reader filter. An empty/absent array is a
@@ -1516,40 +1550,110 @@ function applyPayerFilter(filter: CmdReportFilter, readerFilter: { primary_payer
 }
 
 /**
- * Resolve the payment_received window into the reader's `from`/`to` (ISO 'YYYY-MM-DD'). A
- * `recencyDays` chip (7/14/30/90) takes precedence and is computed from the SERVER clock — the client
- * never supplies the date, so the window can't be spoofed — as an open-ended "on or after
- * today − N days" (future-dated rows are already dropped at ingest). Otherwise a year+month selects
- * that calendar month ([from, to) exclusive upper). Returns false on invalid input. `today` is
- * injectable for determinism. Consolidates the month logic that the grid + summary loaders shared.
+ * Resolve the payment_received window into the reader's `from`/`to` (ISO 'YYYY-MM-DD'), CLOSED at
+ * both ends, plus the `is_scheduled` anchor.
+ *
+ * ── EVERY DATE HERE COMES FROM src/businessWindow.ts. NO ARITHMETIC LIVES IN THIS FILE. ─────────
+ * Three things changed on 2026-08-30 and each is user-visible:
+ *
+ *  1. TIMEZONE. This used to do `today.setUTCDate(getUTCDate() - N)` off the RAW server clock.
+ *     Vercel runs TZ=UTC, so from ~17:00 Pacific to midnight the window was already a day ahead of
+ *     the ops calendar. Windows now anchor on America/Los_Angeles via businessWindowBounds.
+ *  2. AN UPPER BOUND, WHICH PRESETS NEVER HAD. The old recency branch set only `from` and returned
+ *     early — every preset was `today-N .. ∞`, silently including future-dated payments (106 exist
+ *     today, all Indigo, all at business-today + 1) inside totals read as settled cash. Windows are
+ *     now half-open [from, to) spanning EXACTLY N days.
+ *  3. THE MONTH/YEAR PICKER IS GONE. A calendar month is expressible as a custom range and resolves
+ *     to byte-identical bounds (pinned in test/businessWindow.test.ts), so the fold costs the label
+ *     and nothing else. `year`/`month` are removed from CmdReportFilter — two ways to say one thing
+ *     is how the next drift starts.
+ *
+ * The client still never supplies "today", so the window cannot be spoofed by a crafted request;
+ * only the SHAPE (preset days, or an explicit custom range) crosses the boundary.
+ *
+ * Returns false on invalid input — REJECTED, never clamped. `now` is injectable for determinism.
  */
 function applyDateWindow(
   filter: CmdReportFilter,
-  readerFilter: { from?: string; to?: string },
-  today: Date = new Date(),
+  readerFilter: { from?: string; to?: string; businessToday?: string },
+  now: Date = new Date(),
 ): boolean {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  if (filter.recencyDays !== undefined) {
-    if (!CMD_RECENCY_DAYS.has(filter.recencyDays)) return false;
-    const from = new Date(today);
-    from.setUTCDate(from.getUTCDate() - filter.recencyDays);
-    readerFilter.from = `${from.getUTCFullYear()}-${pad(from.getUTCMonth() + 1)}-${pad(from.getUTCDate())}`;
-    return true;
-  }
-  if (filter.year !== undefined || filter.month !== undefined) {
-    const { year, month } = filter;
-    if (
-      !Number.isInteger(year) || year! < 2000 || year! > 2100 ||
-      !Number.isInteger(month) || month! < 1 || month! > 12
-    ) {
+  const businessToday = businessDayIso(now);
+  let window: BusinessWindow;
+
+  if (filter.customFrom !== undefined || filter.customTo !== undefined) {
+    const { customFrom, customTo } = filter;
+    if (typeof customFrom !== 'string' || typeof customTo !== 'string') return false;
+    let bounds;
+    try {
+      // The primitive validates shape, real-ness (2026-02-30 is refused, not rolled forward),
+      // from <= to, and the supported year range. It throws rather than returning a sentinel.
+      bounds = businessWindowBounds({ kind: 'custom', from: customFrom, to: customTo }, now);
+    } catch {
       return false;
     }
-    const nextYear = month === 12 ? year! + 1 : year!;
-    const nextMonth = month === 12 ? 1 : month! + 1;
-    readerFilter.from = `${year}-${pad(month!)}-01`;
-    readerFilter.to = `${nextYear}-${pad(nextMonth)}-01`; // exclusive upper bound
+    // The SPAN cap is this surface's rule, applied after the primitive has confirmed the range is
+    // representable at all. Reject, do not clamp.
+    if (bounds.windowDays > CMD_CUSTOM_MAX_DAYS) return false;
+    readerFilter.from = bounds.from;
+    // ⚠ NO applyScheduledBound HERE, DELIBERATELY — see that helper's docblock. An explicit range
+    // already answers the scheduled question in both directions, and overriding `to` would both
+    // bypass the cap just checked above and silently empty a future-dated range. The bounds the
+    // user asked for are the bounds they get.
+    readerFilter.to = bounds.to;
+    readerFilter.businessToday = businessToday;
+    return true;
   }
+
+  const days = filter.windowDays ?? 90;
+  if (!CMD_WINDOW_PRESETS.has(days)) return false;
+  window = { kind: 'trailing', days };
+  const bounds = businessWindowBounds(window, now);
+  readerFilter.from = bounds.from;
+  readerFilter.to = applyScheduledBound(filter, bounds.to, now);
+  readerFilter.businessToday = businessToday;
   return true;
+}
+
+/**
+ * The "Include scheduled" upper-bound OVERRIDE — **TRAILING PRESETS ONLY**.
+ *
+ * ⚠ AN OVERRIDE, NOT A WIDER WINDOW, and the distinction is load-bearing. It was tempting to model
+ * this as grace days on the window itself; that was rejected (2026-08-30) because
+ * BusinessWindowBounds.windowDays is the TRUE day-count of the resolved bounds, so a "90d +
+ * scheduled" window would honestly report 104 — and 104 crosses windowAgeMultiplier's <=90 → <=180
+ * tier, cutting Qualify's data-confidence factor 0.9 → 0.75 the moment it adopts this primitive.
+ * The window the user chose stays 90 days; only the fetch reaches further.
+ *
+ * The bound is business-today + FUTURE_PAYMENT_HORIZON_DAYS + 1 — the +1 because the window is
+ * half-open and the horizon is the last day ingest will accept, which must be INCLUDED.
+ *
+ * ⚠ IT DOES NOT APPLY TO A CUSTOM RANGE (ruled 2026-08-31, after the Qodo review of PR #298 caught
+ * the first version applying it to both). This helper REPLACES the upper bound rather than
+ * extending it, which is right for a preset — whose `to` is always business-today + 1, so the
+ * substitute is always strictly later — and WRONG for a custom range, where the user named an end
+ * date. Measured on the shipped code before the fix:
+ *
+ *   custom 2020-01-01..2020-01-02  windowDays=2   → to became 2026-09-15: a **2,449-day** span,
+ *                                                   sailing past the 366-day cap that had already
+ *                                                   been checked against windowDays=2
+ *   custom 2027-01-01..2027-06-30  windowDays=181 → to became 2026-09-15, i.e. BEFORE `from`:
+ *                                                   an empty result, silently
+ *
+ * The semantics that replace it: for an explicit range the toggle is a **no-op**, because the range
+ * already answers the question. An end date in the future already includes scheduled payments; an
+ * end date in the past contains none to include. Only a trailing preset needs the override, because
+ * a preset is exactly the case where the user did NOT name an end date.
+ *
+ * The checkbox stays visible and enabled while a custom range is active — inert, not hidden. That
+ * is the standing ruling ("do not hide or disable the toggle when it has no effect —
+ * state-dependent controls are worse than an inert one"), and it fits this case at least as well as
+ * the BXR-tab case it was ruled for: there the toggle is inert because of the DATA and the user
+ * cannot tell why, here it is inert because of a control they just set and can clear.
+ */
+function applyScheduledBound(filter: CmdReportFilter, defaultTo: string, now: Date): string {
+  if (filter.includeScheduled !== true) return defaultTo;
+  return businessDayPlus(FUTURE_PAYMENT_HORIZON_DAYS + 1, now);
 }
 
 type PhiIndexTokens = { memberIdBidx?: string; memberIdPrefixBidx?: string; groupNumberBidx?: string };
@@ -1632,6 +1736,10 @@ export async function loadCmdReport(
     facility?: string[];
     from?: string;
     to?: string;
+    /** Declared EXPLICITLY, not left to arrive as an excess property. This object is the reader
+     *  allowlist; a value that reaches SQL without a line here is exactly how employer_name was
+     *  silently dropped for weeks (see CmdReportFilter's note). */
+    businessToday?: string;
     q?: string;
     searchColumns?: CmdExplorerSearchColumn[];
     cpt_code?: string;
@@ -1708,6 +1816,10 @@ export async function loadCmdReportGrouped(
     facility?: string[];
     from?: string;
     to?: string;
+    /** Declared EXPLICITLY, not left to arrive as an excess property. This object is the reader
+     *  allowlist; a value that reaches SQL without a line here is exactly how employer_name was
+     *  silently dropped for weeks (see CmdReportFilter's note). */
+    businessToday?: string;
     q?: string;
     searchColumns?: CmdExplorerSearchColumn[];
     cpt_code?: string;
@@ -1957,6 +2069,10 @@ export async function loadCmdSearchSummary(
     facility?: string[];
     from?: string;
     to?: string;
+    /** Declared EXPLICITLY, not left to arrive as an excess property. This object is the reader
+     *  allowlist; a value that reaches SQL without a line here is exactly how employer_name was
+     *  silently dropped for weeks (see CmdReportFilter's note). */
+    businessToday?: string;
     q?: string;
     searchColumns?: CmdExplorerSearchColumn[];
     cpt_code?: string;

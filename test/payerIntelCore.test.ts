@@ -192,6 +192,8 @@ function makeDeps(principal: () => ReturnType<typeof SEAT>, over?: Partial<Payer
           // are null rather than absent so a `!== null` guard cannot take the resolved branch.
           facility_resolved: null,
           facility_method: null,
+          // Payer Intel does not resolve a business day, so nothing is ever flagged scheduled here.
+          is_scheduled: false,
           charge_amount: GRID_CHARGE_STR,
           allowed_amount: '1041.00',
           insurance_payments: '900.00',

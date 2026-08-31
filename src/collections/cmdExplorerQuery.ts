@@ -168,6 +168,18 @@ export interface CmdExplorerFilter {
   employerMode?: 'all' | 'employer' | 'individual' | null;
   from?: string | null; // 'YYYY-MM-DD' inclusive (payment_received >= from)
   to?: string | null; // 'YYYY-MM-DD' exclusive (payment_received < to)
+  /**
+   * Business-today (ISO, America/Los_Angeles) as resolved server-side for THIS request — the anchor
+   * for the projected `is_scheduled` flag. Not a filter: it narrows nothing and appears in no WHERE
+   * clause.
+   *
+   * ⚠ IT LIVES ON THE FILTER ANYWAY, AND THAT IS THE POINT. This object is part of the
+   * unstable_cache key, so carrying the anchor here makes a cached page expire when the ops day
+   * rolls. Threading it as a separate argument would have left yesterday's badges cached against
+   * today's rows for up to the 900s TTL — a silent staleness bug in the one flag whose whole job is
+   * to not be silently wrong.
+   */
+  businessToday?: string | null;
   q?: string | null; // substring term (matched literally; LIKE metachars escaped)
   searchColumns?: CmdExplorerSearchColumn[]; // which NON-PHI columns `q` searches
   /**
@@ -300,6 +312,20 @@ export interface CmdExplorerCondOptions {
    * still unattributed. Off = plain `facility = any(...)` against the raw CMD cell.
    */
   resolveFacility?: boolean;
+  /**
+   * Assert a CLOSED window: both `from` and `to` must be present, and both are emitted
+   * unconditionally. Off = the historical behaviour, where each bound is emitted only if supplied.
+   *
+   * ⚠ THE COLLECTIONS PATH HAD NO UPPER BOUND AT ALL until 2026-08-30. `applyDateWindow`'s recency
+   * branch set only `from` and returned early, so every preset was `today-N .. ∞` — which silently
+   * included 106 future-dated charges (measured, all Indigo, all at business-today + 1) inside
+   * totals a reader takes as settled cash. This flag makes an open-ended Collections window a
+   * THROWN ERROR rather than a quietly-wrong result set.
+   *
+   * Opt-in for the same reason resolveFacility is: these conds are shared with Qualify and Payer
+   * Intel, which have their own window semantics. Flipping the default would change them silently.
+   */
+  requireWindow?: boolean;
 }
 
 export function cmdExplorerBaseConds(
@@ -512,8 +538,18 @@ export function cmdExplorerBaseConds(
         `where e.employer_name is null or e.employer_name = '')`,
     );
   }
-  if (filter.from) conds.push(`payment_received >= ${add(filter.from)}::date`);
-  if (filter.to) conds.push(`payment_received < ${add(filter.to)}::date`);
+  if (opts?.requireWindow === true) {
+    // Fail loud, not fail open. A missing bound here is a bug at the app boundary, and the failure
+    // mode without this check is invisible: a grid that quietly returns more rows than it should.
+    if (!filter.from || !filter.to) {
+      throw new Error('cmdExplorerBaseConds: requireWindow needs BOTH from and to; the Collections window must be closed');
+    }
+    conds.push(`payment_received >= ${add(filter.from)}::date`);
+    conds.push(`payment_received < ${add(filter.to)}::date`);
+  } else {
+    if (filter.from) conds.push(`payment_received >= ${add(filter.from)}::date`);
+    if (filter.to) conds.push(`payment_received < ${add(filter.to)}::date`);
+  }
   const term = typeof filter.q === 'string' ? filter.q.trim() : '';
   const cols = (filter.searchColumns ?? []).filter(
     (c): c is CmdExplorerSearchColumn => Object.prototype.hasOwnProperty.call(CMD_EXPLORER_SEARCH_COLUMNS, c),
@@ -1129,6 +1165,11 @@ export const CMD_EXPLORER_SELECT =
   // `undefined !== null` is true, so every `facility_resolved !== null` guard downstream would take
   // the resolved branch on a row that has no resolution. Null is the honest, safe value.
   'null::text as facility_resolved, null::text as facility_method, ' +
+  // Likewise false, not omitted: CmdExplorerRow declares is_scheduled REQUIRED, and an absent
+  // field arrives as `undefined` — which is truthy-adjacent in exactly the way that bites
+  // (`undefined !== null`). The cohort drilldown does not resolve a business day, so nothing
+  // here is scheduled; false is the honest value.
+  'false as is_scheduled, ' +
   `to_char(ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
   // Aliased `t` SO THE ORDER BY CAN TARGET THE RAW COLUMN: the two date columns are projected as
   // `to_char(<date>, 'YYYY-MM-DD') AS <date>` (output name == column name), and an UNQUALIFIED
@@ -1261,9 +1302,51 @@ export function buildCmdExplorerQuery(
   // primary text, raw reachable on hover) — this layer hands over both and decides nothing. Doing
   // the coalesce in SQL would destroy the raw value for every consumer of this row shape, including
   // the audited PHI reveal path and any future export.
+/**
+ * The `is_scheduled` projection — a future-dated payment, flagged per row.
+ *
+ * ⚠ COMPUTED SERVER-SIDE AND PROJECTED, NEVER DERIVED IN THE CLIENT (ruled 2026-08-30). The server
+ * already knows business-today at the moment it resolves the window; having the `'use client'` grid
+ * call businessDayIso() itself would reintroduce a timezone dependency there — the browser's zone
+ * is not the ops zone, and a Denver reader would flag a different set of rows than a Los Angeles
+ * one looking at the same page.
+ *
+ * ⚠ THIS REMOVES THE TIMEZONE DEPENDENCY. IT DOES **NOT** REMOVE STALENESS, and an earlier version
+ * of this docblock claimed it did — corrected 2026-08-31 after the Qodo review of PR #298 named the
+ * gap. `is_scheduled` is request-time data: a tab left open across midnight Pacific keeps rendering
+ * the boolean it was served, so a payment that has since settled still reads "scheduled" until some
+ * filter, sort, or navigation triggers a refetch. Deriving it client-side would NOT have fixed that
+ * either — React does not re-render on a clock tick — so this is a property of a flag-per-row
+ * design, not a cost of choosing the server.
+ *
+ * What the server placement DOES bound: `businessToday` is part of the unstable_cache key, so no
+ * NEW request is ever answered against a stale ops day. Only an idle open tab is exposed. Closing
+ * that needs a rollover-triggered refetch driven by a server-supplied absolute instant; it is
+ * tracked as a follow-up rather than smuggled into this change.
+ *
+ * ⚠ EMITTED IN THE **OUTER** QUERY, AGAINST THE ALREADY-PROJECTED TEXT DATE. This is the whole
+ * reason it costs nothing: `p.payment_received` / `g.payment_received` are already
+ * `to_char(...,'YYYY-MM-DD')` in the paged subquery, so the comparison happens on 50 materialized
+ * rows AFTER the LIMIT. Putting it inside `p`/`g` would add a column to a pre-LIMIT sort that
+ * already spills on the consolidated scope — measured, and the reason this shape was chosen.
+ *
+ * Text comparison is exact here: ISO-8601 is lexicographically ordered, the same property the
+ * outer ORDER BY already relies on for these two columns.
+ *
+ * NULL-safe via coalesce: payment_received is nullable, and `null > date` is NULL, not false. An
+ * undated charge is not "scheduled" — it is unplaceable, which is a different thing and is not this
+ * badge's job to say.
+ *
+ * `businessToday` absent => the literal `false`, so a caller that has not adopted the window
+ * control still type-checks and simply never flags a row.
+ */
+  const businessToday = filter.businessToday ?? undefined;
+  const scheduled = businessToday === undefined
+    ? 'false as is_scheduled'
+    : `coalesce(p.payment_received > ${add(businessToday)}, false) as is_scheduled`;
   const sql =
     `select p.*, e.employer_name, fr.facility_alias as facility_resolved, ` +
-    `fr.method as facility_method from (` +
+    `fr.method as facility_method, ${scheduled} from (` +
     `select t.id, to_char(t.charge_date, 'YYYY-MM-DD') as charge_date, ` +
     `to_char(t.payment_received, 'YYYY-MM-DD') as payment_received, t.cpt_code, t.revenue_code, ` +
     `t.facility, t.charge_amount, t.allowed_reliable as allowed_amount, t.insurance_payments, ` +
@@ -2006,6 +2089,8 @@ export interface CmdExplorerGroupRow {
   facility_resolved: string | null;
   /** The 0086 method behind facility_resolved. Null exactly when that is null. */
   facility_method: string | null;
+  /** See CmdExplorerRow.is_scheduled. A grouped row IS one payment date, so the flag is exact. */
+  is_scheduled: boolean;
 }
 
 export interface CmdExplorerGroupPage {
@@ -2073,6 +2158,10 @@ export function buildCmdExplorerGroupedQuery(
 
   const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
   const havingSql = having.length > 0 ? ` having ${having.join(' and ')}` : '';
+  const groupedToday = filter.businessToday ?? undefined;
+  const groupedScheduled = groupedToday === undefined
+    ? 'false as is_scheduled'
+    : `coalesce(g.payment_received > ${add(groupedToday)}, false) as is_scheduled`;
 
   // ⚠ THE OUTER PROJECTION IS SPELLED OUT, NOT `g.*`.
   //
@@ -2093,7 +2182,10 @@ export function buildCmdExplorerGroupedQuery(
     `g.cpt_code, g.cpt_mixed, g.revenue_code, g.revenue_mixed, g.facility, g.primary_payer, ` +
     `g.charge_amount, g.allowed_amount, g.insurance_payments, g.adjustments, ` +
     `g.patient_balance_due, g.pct_allowed, g.pct_paid, e.employer_name, ` +
-    `fr.facility_alias as facility_resolved, fr.method as facility_method from (` +
+    `fr.facility_alias as facility_resolved, fr.method as facility_method, ` +
+    // Same shape and same rationale as row mode — outer query, already-projected text date, after
+    // the LIMIT. See buildCmdExplorerQuery's is_scheduled docblock.
+    `${groupedScheduled} from (` +
     `select max(t.id) as id, ` +
     `to_char(min(t.charge_date), 'YYYY-MM-DD') as charge_date, ` +
     `to_char(max(t.charge_date), 'YYYY-MM-DD') as charge_date_end, ` +

@@ -416,6 +416,18 @@ export interface CmdExplorerRow {
    * than testing method strings at a call site.
    */
   facility_method: string | null;
+  /**
+   * TRUE when this charge's payment is dated AFTER business-today — money that has not settled yet.
+   *
+   * ⚠ RESOLVED SERVER-SIDE, at the same instant the window bounds were resolved. It is NOT derived
+   * in the client: that would put a timezone dependency in a 'use client' component and leave a
+   * staleness window across midnight Pacific. Rendered UNCONDITIONALLY, regardless of the
+   * "Include scheduled" toggle, so a future deposit can never sit silently inside a total a reader
+   * takes as settled cash.
+   *
+   * False for an undated charge (payment_received null) — unplaceable is not the same as scheduled.
+   */
+  is_scheduled: boolean;
 }
 
 /** Trim; empty string → null (so blanks render as an em dash, not ''). */

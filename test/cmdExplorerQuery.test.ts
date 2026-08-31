@@ -926,7 +926,7 @@ test('grid: employer comes from a LEFT JOIN on the base table, never from the ro
   const { sql, params } = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
   // the join is LEFT (an INNER would silently drop grid rows whose base row is missing)
   assert.match(sql, /left join collections\.cmd_explorer_rows e on e\.id = p\.id/);
-  assert.match(sql, /select p\.\*, e\.employer_name, fr\.facility_alias as facility_resolved, fr\.method as facility_method from \(/);
+  assert.match(sql, /select p\.\*, e\.employer_name, fr\.facility_alias as facility_resolved, fr\.method as facility_method, [^ ]+ as is_scheduled from \(/);
   // the rollup must NOT be asked for a column it does not have
   assert.doesNotMatch(sql, /t\.employer_name/, 'the rollup has no employer column and never will');
   assertAllBound(sql, params);
@@ -1304,7 +1304,12 @@ test('patient_members: an EMPTY list means "matched nobody" and must select NOTH
 test('patient_members absent emits no condition at all', () => {
   const q = buildCmdExplorerQuery(null, {}, CMD_EXPLORER_DEFAULT_SORT, 50, ENTITY);
   assert.doesNotMatch(q.sql, /unnest\(/);
-  assert.doesNotMatch(q.sql, /\bfalse\b/, 'no search is not the same as a search that found nobody');
+  // ⚠ SCOPED TO THE **WHERE**, not the whole statement. The projection legitimately carries
+  // `false as is_scheduled` when no business day is resolved (2026-08-30), and a whole-string
+  // match would read that as a match-nothing predicate. What must not appear is a `false` in the
+  // predicate — "no search" is not the same as "a search that found nobody".
+  const where447 = q.sql.slice(q.sql.indexOf(' where '), q.sql.indexOf(' order by '));
+  assert.doesNotMatch(where447, /\bfalse\b/, 'no search is not the same as a search that found nobody');
 });
 
 test('employer coverage returns TWO booleans — "any tenant" gates the filter, "every tenant" gates the label', () => {
@@ -1368,5 +1373,8 @@ test('row_ids: a MIXED list keeps the valid ids and still constrains', () => {
   );
   const bound = q.params.find((p) => Array.isArray(p) && (p as string[]).includes('12')) as string[];
   assert.deepEqual(bound, ['12', '34'], 'valid ids survive, the out-of-range one is dropped');
-  assert.doesNotMatch(q.sql, /\bfalse\b/, 'still a real id predicate, not match-nothing');
+  // Scoped to the WHERE: the projection carries `false as is_scheduled` with no business day
+  // resolved (2026-08-30), which is not a predicate and must not read as match-nothing.
+  const where = q.sql.slice(q.sql.indexOf(' where '), q.sql.indexOf(' order by '));
+  assert.doesNotMatch(where, /\bfalse\b/, 'still a real id predicate, not match-nothing');
 });
