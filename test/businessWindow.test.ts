@@ -19,6 +19,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   BUSINESS_TZ,
+  businessDayPlus,
   BUSINESS_YEAR_MAX,
   BUSINESS_YEAR_MIN,
   businessDayIso,
@@ -264,6 +265,162 @@ test('every returned bound is a plain ISO date string, never a timestamp', () =>
   }
   assert.match(businessDayIso(), /^\d{4}-\d{2}-\d{2}$/, 'the real clock still yields an ISO date');
   assert.equal(BUSINESS_TZ, 'America/Los_Angeles');
+});
+
+// ── CUSTOM RANGE (added 2026-08-30 for the Collections window control) ──────────────────────────
+test('custom: the INPUT `to` is INCLUSIVE, so the half-open upper bound is one day later', () => {
+  // The single most likely way to reintroduce an off-by-one. A picker that says "Jan 1 to Jan 31"
+  // means 31 days; emitting to='2026-01-31' would silently drop the 31st.
+  const b = businessWindowBounds({ kind: 'custom', from: '2026-01-01', to: '2026-01-31' });
+  assert.equal(b.from, '2026-01-01');
+  assert.equal(b.to, '2026-02-01', 'to_out = to_in + 1 day');
+  assert.equal(b.windowDays, 31, 'the user asked for 31 days and must get 31');
+});
+
+test('custom: a calendar month matches the month kind on BOUNDS — W6 folds losslessly', () => {
+  // THIS IS THE TEST THAT LICENSES RETIRING THE MONTH/YEAR PICKER. The Collections explorer filter
+  // carries only from/to and consumes no prior window, so bounds equality is the whole fold.
+  //
+  // ⚠ SCOPED TO from/to/windowDays ON PURPOSE — the prior window legitimately differs, and the very
+  // next test asserts that divergence POSITIVELY so this narrowing cannot read as an oversight.
+  for (const [year, month, last] of [
+    [2026, 1, 31], [2026, 2, 28], [2028, 2, 29], [2026, 4, 30], [2026, 12, 31],
+  ] as const) {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const custom = businessWindowBounds({
+      kind: 'custom',
+      from: `${year}-${pad(month)}-01`,
+      to: `${year}-${pad(month)}-${last}`,
+    });
+    const calendar = businessWindowBounds({ kind: 'month', year, month });
+    assert.deepEqual(
+      { from: custom.from, to: custom.to, windowDays: custom.windowDays },
+      { from: calendar.from, to: calendar.to, windowDays: calendar.windowDays },
+      `${year}-${pad(month)} must resolve to the same BOUNDS both ways`,
+    );
+  }
+});
+
+test('custom matches month on bounds, diverges on prior — by design', () => {
+  // ⚠ THE DIVERGENCE IS THE CONTRACT, NOT A GAP. Custom's prior is the ADJACENT EQUAL-LENGTH span
+  // (trailing-shaped); the month kind's prior is the PREVIOUS CALENDAR MONTH. They coincide only
+  // when adjacent months share a length — measured across 2026, 2 of 12 (January, August) agree and
+  // 10 diverge. The original ruling asserted full byte-identity using JANUARY as its example, which
+  // is exactly why the contradiction was invisible: December and January are both 31 days.
+  //
+  // Detecting a calendar-aligned range and switching prior semantics was REJECTED: a primitive
+  // whose prior SHAPE depends on whether the caller's dates happen to land on month boundaries is a
+  // trap for the W-C Qualify consumer, the only thing that reads priors. Feb 1-28 and Feb 1-27 must
+  // return same-shaped priors.
+  const custom = businessWindowBounds({ kind: 'custom', from: '2026-02-01', to: '2026-02-28' });
+  const calendar = businessWindowBounds({ kind: 'month', year: 2026, month: 2 });
+
+  // Half one: the bounds agree, exactly.
+  assert.equal(custom.from, calendar.from);
+  assert.equal(custom.to, calendar.to);
+  assert.equal(custom.windowDays, calendar.windowDays);
+  assert.equal(custom.from, '2026-02-01');
+  assert.equal(custom.to, '2026-03-01');
+  assert.equal(custom.windowDays, 28);
+
+  // Half two: the priors DIFFER, and both literals are pinned so neither side can drift silently.
+  assert.equal(calendar.priorFrom, '2026-01-01', 'month kind: the previous CALENDAR month');
+  assert.equal(custom.priorFrom, '2026-01-04', 'custom: 28 days back — equal-length, trailing-shaped');
+  assert.notEqual(custom.priorFrom, calendar.priorFrom, 'the divergence is intentional');
+  // priorTo is the one part of the prior contract they DO share.
+  assert.equal(custom.priorTo, custom.from);
+  assert.equal(calendar.priorTo, calendar.from);
+});
+
+test('custom: prior window is adjacent and equal-length, same contract as trailing', () => {
+  const b = businessWindowBounds({ kind: 'custom', from: '2026-03-10', to: '2026-03-19' });
+  assert.equal(b.windowDays, 10);
+  assert.equal(b.priorTo, b.from, 'priorTo === from');
+  assert.equal(b.priorFrom, '2026-02-28', '10 days back from 03-10');
+});
+
+test('custom: a range spanning a DST transition still reports its true day-count', () => {
+  // Calendar arithmetic in UTC after the civil dates are fixed — a 23- or 25-hour day changes nothing.
+  assert.equal(businessWindowBounds({ kind: 'custom', from: '2026-03-01', to: '2026-03-31' }).windowDays, 31);
+  assert.equal(businessWindowBounds({ kind: 'custom', from: '2026-11-01', to: '2026-11-30' }).windowDays, 30);
+});
+
+test('custom: a single day is a valid one-day window', () => {
+  const b = businessWindowBounds({ kind: 'custom', from: '2026-08-30', to: '2026-08-30' });
+  assert.equal(b.from, '2026-08-30');
+  assert.equal(b.to, '2026-08-31');
+  assert.equal(b.windowDays, 1);
+});
+
+test('custom: IMPOSSIBLE dates are refused, not silently rolled forward', () => {
+  // `new Date('2026-02-30')` does not throw — it rolls to March 2nd. A picker or a URL param can
+  // produce that, and accepting it would return bounds for a range nobody asked for.
+  assert.throws(() => businessWindowBounds({ kind: 'custom', from: '2026-02-30', to: '2026-03-05' }), /invalid custom range/);
+  assert.throws(() => businessWindowBounds({ kind: 'custom', from: '2026-04-31', to: '2026-05-05' }), /invalid custom range/);
+  assert.throws(() => businessWindowBounds({ kind: 'custom', from: '2026-01-01', to: '2026-13-01' }), /invalid custom range/);
+  assert.throws(() => businessWindowBounds({ kind: 'custom', from: '01-01-2026', to: '2026-01-31' }), /invalid custom range/);
+  assert.throws(() => businessWindowBounds({ kind: 'custom', from: '2026-1-1', to: '2026-01-31' }), /invalid custom range/);
+  // The year guard reaches custom ranges too.
+  assert.throws(() => businessWindowBounds({ kind: 'custom', from: '1950-01-01', to: '1950-12-31' }), /invalid custom range/);
+});
+
+test('custom: from AFTER to is refused with its own message, not silently swapped', () => {
+  assert.throws(
+    () => businessWindowBounds({ kind: 'custom', from: '2026-03-31', to: '2026-03-01' }),
+    /starts after it ends/,
+  );
+});
+
+test('custom: NO maximum span is enforced by the primitive — that is a product rule', () => {
+  // Collections caps custom ranges at 366 days, but that belongs at the app boundary. Another
+  // consumer may legitimately want two years, and the calendar has no opinion. Pinned so nobody
+  // "helpfully" moves the cap down here, where it would silently constrain every future consumer.
+  const twoYears = businessWindowBounds({ kind: 'custom', from: '2024-01-01', to: '2025-12-31' });
+  assert.equal(twoYears.windowDays, 731, '2024 is a leap year: 366 + 365');
+});
+
+// ── businessDayPlus — the scheduled-toggle primitive ────────────────────────────────────────────
+test('businessDayPlus: shifts the OPS day, not the UTC day', () => {
+  // 19:00 PDT on 08-30 — UTC is already 08-31. The whole point of the module.
+  const now = new Date('2026-08-31T02:00:00Z');
+  assert.equal(businessDayPlus(0, now), '2026-08-30', 'business-today, not the UTC date');
+  assert.equal(businessDayPlus(1, now), '2026-08-31');
+  assert.equal(businessDayPlus(15, now), '2026-09-14', 'the scheduled upper bound: horizon 14 + 1');
+  assert.equal(businessDayPlus(-1, now), '2026-08-29', 'negative shifts backward');
+});
+
+test('businessDayPlus: agrees with the trailing window\'s own upper bound at +1', () => {
+  // If these two ever disagree, the scheduled toggle would move the bound relative to a window
+  // computed a different way — exactly the drift this module exists to prevent.
+  const now = new Date('2026-08-30T19:00:00Z');
+  for (const days of [7, 30, 90]) {
+    assert.equal(businessDayPlus(1, now), businessWindowBounds({ kind: 'trailing', days }, now).to);
+  }
+});
+
+test('businessDayPlus: crosses DST and month/year boundaries correctly', () => {
+  assert.equal(businessDayPlus(1, new Date('2026-03-08T20:00:00Z')), '2026-03-09', 'spring-forward');
+  assert.equal(businessDayPlus(1, new Date('2026-11-01T20:00:00Z')), '2026-11-02', 'fall-back');
+  assert.equal(businessDayPlus(1, new Date('2026-12-31T20:00:00Z')), '2027-01-01', 'year roll');
+  assert.throws(() => businessDayPlus(1.5), /must be an integer/);
+});
+
+test('THE SCHEDULED-TOGGLE CONTRACT: overriding `to` must NOT change windowDays', () => {
+  // ⚠ THE REASON graceDays WAS REJECTED AS A WINDOW FIELD (ruled 2026-08-30). windowDays is the
+  // TRUE day-count of the resolved bounds, and Qualify feeds it to windowAgeMultiplier, which
+  // tiers at <=90 → <=180. A "90d + scheduled" window carrying grace would honestly report 104 and
+  // cut data confidence 0.9 → 0.75. So the toggle overrides the UPPER BOUND at the call site and
+  // leaves windowDays describing the window the user actually chose. This test is that contract.
+  const now = new Date('2026-08-30T19:00:00Z');
+  const bounds = businessWindowBounds({ kind: 'trailing', days: 90 }, now);
+  const scheduledTo = businessDayPlus(14 + 1, now); // FUTURE_PAYMENT_HORIZON_DAYS + 1
+
+  assert.notEqual(scheduledTo, bounds.to, 'the toggle must actually move the upper bound');
+  assert.equal(bounds.to, '2026-08-31');
+  assert.equal(scheduledTo, '2026-09-14');
+  // The window is unchanged. windowDays is 90, never 104.
+  assert.equal(bounds.windowDays, 90, 'windowDays describes the CHOSEN window, not the fetched span');
+  assert.notEqual(bounds.windowDays, 104, 'a grace-bearing windowDays would cross the <=90 tier edge');
 });
 
 // ── EQUIVALENCE WITH THE INCUMBENT ──────────────────────────────────────────────────────────────

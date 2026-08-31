@@ -91,7 +91,44 @@ export type BusinessWindow =
   | { kind: 'trailing'; days: number }
   /** `month` is 1-12, calendar convention — NOT the 0-11 JS Date convention. */
   | { kind: 'month'; year: number; month: number }
-  | { kind: 'year'; year: number };
+  | { kind: 'year'; year: number }
+  /**
+   * An arbitrary range the user picked.
+   *
+   * ⚠ THE INPUT IS TWO **INCLUSIVE** CALENDAR DATES — `to` is the last day the user wants to SEE.
+   * The OUTPUT stays half-open like every other kind, so `bounds.to === to + 1 day`. Getting this
+   * backwards is the single most likely way to reintroduce an off-by-one: a picker that says
+   * "Jan 1 to Jan 31" means 31 days, and a half-open bound of '2026-01-31' would silently drop the
+   * 31st. Both dates are ISO 'yyyy-mm-dd'.
+   *
+   * ── HOW THIS RELATES TO THE `month` KIND, AND WHERE IT DELIBERATELY DOES NOT ─────────────────
+   * A custom range spanning a whole calendar month returns `from`, `to` and `windowDays`
+   * BYTE-IDENTICAL to the equivalent `{ kind: 'month' }` window. That is what makes W6's fold
+   * lossless: retiring the Collections month/year picker costs the LABEL and nothing else.
+   *
+   * ⚠ THE PRIOR WINDOW IS DIFFERENT, BY DESIGN, AND IT IS NOT AN OVERSIGHT. Custom's prior is the
+   * ADJACENT EQUAL-LENGTH span (trailing-shaped); the `month` kind's prior is the PREVIOUS CALENDAR
+   * MONTH. Those coincide only when adjacent months happen to share a length — measured across
+   * 2026, they agree for exactly 2 of 12 months (January and August) and diverge for the other 10.
+   * February 2026 is the worked example: both give from 2026-02-01 / to 2026-03-01 / 28 days, but
+   * `priorFrom` is 2026-01-01 calendar vs 2026-01-04 custom.
+   *
+   * Detecting a calendar-aligned range and switching prior semantics was considered and REJECTED
+   * (2026-08-30): a primitive whose prior-window SHAPE depends on whether the caller's dates happen
+   * to land on month boundaries is a trap. Feb 1-28 and Feb 1-27 must return same-shaped priors.
+   *
+   * ── THE CONTRACT FOR CONSUMERS ───────────────────────────────────────────────────────────────
+   * The Collections explorer filter carries only `from`/`to` and consumes NO prior window, so the
+   * fold is lossless for that surface. Any consumer that DOES read priors — Qualify, W-C — must
+   * treat a custom range as TRAILING-shaped, not calendar-shaped. Stated here so it is a contract
+   * rather than something rediscovered later from a Δ that looks wrong.
+   *
+   * NO MAXIMUM SPAN IS ENFORCED HERE, deliberately. Collections caps custom ranges at 366 days,
+   * but that is a PRODUCT rule for one surface, not a property of the calendar — another consumer
+   * may legitimately want two years. The cap belongs at the app boundary; this primitive only
+   * refuses ranges it cannot represent correctly.
+   */
+  | { kind: 'custom'; from: string; to: string };
 
 export interface BusinessWindowBounds {
   /** Inclusive lower bound, ISO yyyy-mm-dd. */
@@ -180,6 +217,45 @@ const shiftDays = (base: Date, days: number): Date =>
 const daysBetween = (from: Date, to: Date): number => Math.round((to.getTime() - from.getTime()) / MS_PER_DAY);
 
 /**
+ * Strict ISO 'yyyy-mm-dd' → UTC midnight, or null if it is not a REAL date in the supported range.
+ *
+ * Strict on purpose: `new Date('2026-02-30')` does not throw, it rolls forward to March 2nd, and
+ * `Date.UTC(2026, 1, 30)` does the same. A picker or a URL param can produce that, and silently
+ * accepting it would return bounds for a range the user never asked for. The round-trip check
+ * (re-serialize and compare) is what catches the roll.
+ */
+function parseIsoDate(value: string): Date | null {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(5, 7));
+  const day = Number(value.slice(8, 10));
+  if (!isSupportedYear(year) || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const d = utcMidnight(year, month, day);
+  // Round-trip: rejects 2026-02-30, 2026-04-31, and every other rolled-forward impossibility.
+  return iso(d) === value ? d : null;
+}
+
+/**
+ * The ops calendar day `days` from now, as an ISO date — business-today shifted by whole days.
+ *
+ * ⚠ THIS EXISTS SO "INCLUDE SCHEDULED" DOES NOT BECOME A WINDOW KIND (ruled 2026-08-30). The
+ * obvious alternative — a `graceDays` field on BusinessWindow — was rejected because `windowDays`
+ * is defined as the TRUE day-count of the resolved bounds: a "90d + scheduled" window would then
+ * honestly report 104, and 104 crosses `windowAgeMultiplier`'s <=90 → <=180 edge, cutting data
+ * confidence 0.9 → 0.75 the moment Qualify adopts this primitive. The scheduled toggle is an
+ * UPPER-BOUND OVERRIDE, not a different window, so it overrides `bounds.to` at the call site and
+ * leaves `windowDays` describing the window the user actually chose.
+ *
+ * Negative `days` is allowed and shifts backward — no reason to forbid it, and a one-directional
+ * helper would invite a caller to write the subtraction themselves.
+ */
+export function businessDayPlus(days: number, now: Date = new Date()): string {
+  if (!Number.isInteger(days)) throw new Error(`businessDayPlus: days must be an integer, got ${days}`);
+  const anchor = new Date(`${businessDayIso(now)}T00:00:00Z`);
+  return iso(shiftDays(anchor, days));
+}
+
+/**
  * Resolve any BusinessWindow to half-open bounds [from, to), the adjacent prior window, and the
  * true day-count.
  *
@@ -227,6 +303,29 @@ export function businessWindowBounds(
       priorFrom: iso(priorFrom),
       priorTo: iso(from),
       windowDays: daysBetween(from, to),
+    };
+  }
+
+  if (window.kind === 'custom') {
+    const fromDate = parseIsoDate(window.from);
+    // `to` is INCLUSIVE on input — the last day the user wants to see — so the half-open upper
+    // bound is one day later. See the union's docblock for why this is stated so loudly.
+    const toInclusive = parseIsoDate(window.to);
+    if (fromDate === null || toInclusive === null) {
+      throw new Error(`businessWindowBounds: invalid custom range ${window.from}..${window.to}`);
+    }
+    if (fromDate.getTime() > toInclusive.getTime()) {
+      throw new Error(`businessWindowBounds: custom range starts after it ends (${window.from}..${window.to})`);
+    }
+    const to = shiftDays(toInclusive, 1);
+    const span = daysBetween(fromDate, to);
+    // Prior window: adjacent and equal-length, identical contract to trailing.
+    return {
+      from: iso(fromDate),
+      to: iso(to),
+      priorFrom: iso(shiftDays(fromDate, -span)),
+      priorTo: iso(fromDate),
+      windowDays: span,
     };
   }
 
