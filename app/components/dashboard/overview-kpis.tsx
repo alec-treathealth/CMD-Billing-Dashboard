@@ -33,6 +33,7 @@ import { CalendarClock, ChevronDown, Filter, Plus, Table2, X } from 'lucide-reac
 
 import { Skeleton } from '@/components/ui/skeleton';
 import { ControlSelect } from '@/components/data-grid';
+import { useDialog } from '../qualify/useDialog';
 import { money } from '@/lib/format';
 import {
   loadCollectionsDailyRange,
@@ -474,11 +475,26 @@ export function OverviewKpis({
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <PanelToggleButton open={facilitiesOpen} onToggle={() => setFacilitiesOpen((s) => !s)}>
+        {/* The two panels are MODAL dialogs (2026-08-31) — one open at a time, so opening
+            either closes the other. The Add reveal below stays inline (it is a create form
+            the modals' lists depend on, not a disclosure of the same rank). */}
+        <PanelToggleButton
+          open={facilitiesOpen}
+          onToggle={() => {
+            setFacilitiesOpen((s) => !s);
+            setEraOpen(false);
+          }}
+        >
           <Table2 className="h-4 w-4" aria-hidden />
           All Facilities Table
         </PanelToggleButton>
-        <PanelToggleButton open={eraOpen} onToggle={() => setEraOpen((s) => !s)}>
+        <PanelToggleButton
+          open={eraOpen}
+          onToggle={() => {
+            setEraOpen((s) => !s);
+            setFacilitiesOpen(false);
+          }}
+        >
           <CalendarClock className="h-4 w-4" aria-hidden />
           {futurePaymentsTitle(view)}
         </PanelToggleButton>
@@ -890,6 +906,9 @@ function EraUpcomingPanel({
    * of "a write has somewhere to land" instead of two that can drift.
    */
   const canEdit = hasEditRole && facilityOptions.length > 0;
+  // Modal a11y (2026-08-31) — same contract as AllFacilitiesTable's dialogRef: keyed off `open`,
+  // the component stays MOUNTED while closed (see the render-guard note below).
+  const dialogRef = useDialog<HTMLDivElement>(onClose, { active: open });
   const [status, setStatus] = useState<'idle' | 'loading' | 'error' | 'ready'>('idle');
   const [data, setData] = useState<EraUpcomingSummary | null>(null);
   const [overrides, setOverrides] = useState<UpcomingOverrideSummary | null>(null);
@@ -990,9 +1009,24 @@ function EraUpcomingPanel({
 
   if (!open) return null;
   return (
-    <div className="ths-card ths-elev-sm">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <h3 className="ths-card-title">{futurePaymentsTitle(view)}</h3>
+    // MODAL (2026-08-31): overlay click and Escape both close; focus behavior via dialogRef.
+    <div
+      className="fixed inset-0 z-50 overflow-y-auto bg-ink900/50 p-4 sm:p-8"
+      onClick={onClose}
+      role="presentation"
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={futurePaymentsTitle(view)}
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+        className="mx-auto w-full max-w-5xl outline-none"
+      >
+        <div className="ths-card ths-elev-sm">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h3 className="ths-card-title">{futurePaymentsTitle(view)}</h3>
         <button
           type="button"
           onClick={onClose}
@@ -1054,6 +1088,8 @@ function EraUpcomingPanel({
       ) : (
         <div className="ths-card-meta py-6 text-center">Loading…</div>
       )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1068,6 +1104,9 @@ interface FacilityTableRow {
   checks: number;
   eft: number;
   gross: number;
+  /** Year-to-date gross, joined from the already-loaded KPI rows (no fetch); null when the
+   *  facility has no KPI row this year (e.g. a past-month-only facility). */
+  ytd: number | null;
 }
 
 /** A facility's per-month checks/eft/gross totals (the shape both sources reduce to). */
@@ -1113,6 +1152,10 @@ function AllFacilitiesTable({
   view: DashboardView;
 }) {
   const [setting, setSetting] = useState<FacilitySetting>('ALL');
+  // Modal a11y (2026-08-31): focus moves in on open, Tab is trapped, Escape closes, focus
+  // returns to the toggle on close. Keyed off `open` — this component stays MOUNTED while
+  // closed (the `if (!open) return null` below is a render guard), the useDialog contract.
+  const dialogRef = useDialog<HTMLDivElement>(onClose, { active: open });
   // The book filter only exists on Consolidated. Deriving the effective value (rather than
   // resetting state on view change) means switching away and back can never leave the table
   // silently narrowed by a control that isn't rendered.
@@ -1201,6 +1244,12 @@ function AllFacilitiesTable({
           gross: f.mtd_gross,
         }))
       : (pastRows ?? []);
+    // YTD gross rides on the already-loaded KPI rows for every month view — a client-side join
+    // on the KPI reader's own (entity, code) grain, no fetch. Null when a facility summed from a
+    // past month has no KPI row this year (it then renders '—', never 0).
+    const ytdByKey = new Map(
+      kpis.by_facility.map((f) => [`${f.business_entity_id}:${f.facility_code ?? '__unassigned__'}`, f.ytd_gross]),
+    );
     return source
       .map((f) => {
         const dim = f.facility_code ? dimByCode.get(f.facility_code) : undefined;
@@ -1214,6 +1263,7 @@ function AllFacilitiesTable({
           checks: f.checks,
           eft: f.eft,
           gross: f.gross,
+          ytd: ytdByKey.get(`${f.business_entity_id}:${f.facility_code ?? '__unassigned__'}`) ?? null,
         };
       })
       // A 'BOTH' facility (serves inpatient AND outpatient) is a member of both filters.
@@ -1247,8 +1297,9 @@ function AllFacilitiesTable({
           checks: acc.checks + r.checks,
           eft: acc.eft + r.eft,
           gross: acc.gross + r.gross,
+          ytd: acc.ytd + (r.ytd ?? 0),
         }),
-        { checks: 0, eft: 0, gross: 0 },
+        { checks: 0, eft: 0, gross: 0, ytd: 0 },
       ),
     [rows],
   );
@@ -1287,8 +1338,24 @@ function AllFacilitiesTable({
 
   if (!open) return null;
   return (
-    <div className="ths-card ths-elev-sm">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+    // MODAL (2026-08-31): overlay click and Escape both close; focus behavior via dialogRef
+    // above. stopPropagation keeps in-dialog clicks from reaching the overlay's onClose.
+    <div
+      className="fixed inset-0 z-50 overflow-y-auto bg-ink900/50 p-4 sm:p-8"
+      onClick={onClose}
+      role="presentation"
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="All facilities table"
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+        className="mx-auto w-full max-w-5xl outline-none"
+      >
+        <div className="ths-card ths-elev-sm">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <h3 className="ths-card-title">
           {/* The heading names the active book so a narrowed table is never mistaken for the
               whole consolidated roster. */}
@@ -1398,6 +1465,7 @@ function AllFacilitiesTable({
                 <th className="num">Checks</th>
                 <th className="num">EFT</th>
                 <th className="num">Gross</th>
+                <th className="num">YTD {currentYear ?? ''} gross</th>
               </tr>
             </thead>
             <tbody>
@@ -1411,6 +1479,7 @@ function AllFacilitiesTable({
                   <td className="num">{money(r.checks)}</td>
                   <td className="num">{money(r.eft)}</td>
                   <td className="num">{money(r.gross)}</td>
+                  <td className="num">{r.ytd != null ? money(r.ytd) : '—'}</td>
                 </tr>
               ))}
               <tr className="ths-table-total">
@@ -1420,6 +1489,7 @@ function AllFacilitiesTable({
                 <td className="num">{money(totals.checks)}</td>
                 <td className="num">{money(totals.eft)}</td>
                 <td className="num">{money(totals.gross)}</td>
+                <td className="num">{money(totals.ytd)}</td>
               </tr>
             </tbody>
           </table>
@@ -1449,6 +1519,8 @@ function AllFacilitiesTable({
           )}
         </div>
       )}
+        </div>
+      </div>
     </div>
   );
 }

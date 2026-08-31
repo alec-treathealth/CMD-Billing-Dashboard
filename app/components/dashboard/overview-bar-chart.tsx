@@ -209,6 +209,8 @@ function mtdGrossRows(data: CollectionsKpis): FacilityGrossRow[] {
       eft: r.mtd_eft,
       // Collections-only; mergeExpectedIntoFacilityRows adds the forecast series.
       expected: 0,
+      // Already on the KPI row — tooltip context only (see FacilityGrossRow.ytd). No fetch.
+      ytd: r.ytd_gross,
     }))
     .sort((a, b) => b.gross - a.gross);
 }
@@ -256,6 +258,13 @@ function FacilityGrossTooltip({
           <>
             <dt>Expected</dt>
             <dd>{money(r.expected)}</dd>
+          </>
+        )}
+        {/* Context row, never a segment: present only on KPI-reshaped (current-month) rows. */}
+        {r.ytd != null && (
+          <>
+            <dt>YTD gross</dt>
+            <dd>{money(r.ytd)}</dd>
           </>
         )}
       </dl>
@@ -445,15 +454,35 @@ function FacilityYtdTooltip({
  * Deliberately NOT clickable: the drill-down panel shows one MONTH's daily rows, so a
  * click here would open a month panel from a year-to-date bar. One chart, one claim.
  */
+/** Rows shown before the reader opts into the full roster (density pass, 2026-08-31). */
+const YTD_TOP_N = 12;
+
 function FacilityYtdBars({ rows, year }: { rows: FacilityYtdRow[]; year: number }) {
-  // 22px per row keeps 30 facilities legible without a scroll; the floor stops a
+  // DENSITY (2026-08-31): default to the top-N ranking with an explicit expand, instead of a
+  // ~29-row full-height chart that dominated the page. Top-N-with-expand was chosen over
+  // shrinking the row height (22px/row is already the legibility floor the comment below
+  // defends) or horizontal compaction (which reintroduces the rotated-label problem this chart
+  // exists to avoid). The chart is not the sole carrier: the All Facilities table carries YTD
+  // per facility for every facility, accessibly.
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll ? rows : rows.slice(0, YTD_TOP_N);
+  const hiddenCount = rows.length - visible.length;
+  // 22px per row keeps the bars legible without a scroll; the floor stops a
   // one-facility filter from rendering a single absurdly fat bar.
-  const height = Math.max(140, rows.length * 22 + 32);
+  const height = Math.max(140, visible.length * 22 + 32);
   return (
     <>
-      <div role="img" aria-label={`Year-to-date ${year} gross collections by facility`} style={{ width: '100%', height }}>
+      <div
+        role="img"
+        aria-label={
+          showAll || hiddenCount === 0
+            ? `Year-to-date ${year} gross collections by facility`
+            : `Year-to-date ${year} gross collections — top ${visible.length} facilities of ${rows.length}`
+        }
+        style={{ width: '100%', height }}
+      >
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 64, bottom: 4, left: 8 }} barCategoryGap="22%">
+          <BarChart data={visible} layout="vertical" margin={{ top: 4, right: 64, bottom: 4, left: 8 }} barCategoryGap="22%">
             <CartesianGrid horizontal={false} stroke={CHART.grid} />
             <XAxis type="number" tickFormatter={moneyAxis} tick={{ fontSize: 11, fill: CHART.axis }} stroke={CHART.grid} />
             <YAxis
@@ -473,6 +502,16 @@ function FacilityYtdBars({ rows, year }: { rows: FacilityYtdRow[]; year: number 
 
       <div className="ths-card-meta flex flex-wrap items-center gap-4">
         <LegendDot color={CHART.ytd} label={`YTD ${year} gross`} />
+        {rows.length > YTD_TOP_N && (
+          <button
+            type="button"
+            onClick={() => setShowAll((s) => !s)}
+            aria-expanded={showAll}
+            className="ths-btn ths-btn-ghost ths-btn-sm"
+          >
+            {showAll ? `Show top ${YTD_TOP_N}` : `Show all ${rows.length} (${hiddenCount} more)`}
+          </button>
+        )}
         <span className="ml-auto">Bar length = year-to-date gross.</span>
       </div>
     </>

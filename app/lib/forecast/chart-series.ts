@@ -44,6 +44,13 @@ export interface FacilityGrossRow {
    * segment, in its own colour, with its own legend entry and tooltip row.
    */
   expected: number;
+  /**
+   * Year-to-date gross for the facility — tooltip context only, never a bar segment (mixing the
+   * two time bases in one stack is exactly what the old three-series chart got wrong). Present
+   * only when the rows were reshaped from the KPI aggregate (mtdGrossRows), which already carries
+   * it; a past month's rows omit it rather than pairing an as-of-today YTD with an old month.
+   */
+  ytd?: number | null;
 }
 
 /**
