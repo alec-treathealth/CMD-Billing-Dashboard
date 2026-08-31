@@ -1290,7 +1290,8 @@ function AllFacilitiesTable({
       .sort((a, b) => b.gross - a.gross);
   }, [isCurrent, kpis, pastRows, dimByCode, setting, effectiveBook]);
 
-  const totals = useMemo(
+  const ytdComplete = rows.every((r) => r.ytd != null);
+    const totals = useMemo(
     () =>
       rows.reduce(
         (acc, r) => ({
@@ -1489,7 +1490,7 @@ function AllFacilitiesTable({
                 <td className="num">{money(totals.checks)}</td>
                 <td className="num">{money(totals.eft)}</td>
                 <td className="num">{money(totals.gross)}</td>
-                <td className="num">{money(totals.ytd)}</td>
+                <td className="num">{ytdComplete ? money(totals.ytd) : '—'}</td>
               </tr>
             </tbody>
           </table>
