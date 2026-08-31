@@ -140,3 +140,45 @@ function actionsExplorerFn(name: string): string {
   }
   assert.fail(`unbalanced braces reading ${name}`);
 }
+
+// ── #304: THE ROLLOVER RELOAD IS SERVER-DRIVEN AND EDGE-TRIGGERED ─────────────────────────────
+// The behavioural half needs a fake clock plus visibility events; the PURE half (the instant
+// itself) is covered hermetically in test/businessWindow.test.ts. What is pinned here is the
+// CONTRACT the client must not quietly break, at the source level like the rest of this file.
+test('#304: the client never derives the ops day — it compares two integers', () => {
+  // ⚠ ASSERT THE IMPORT, NOT THE WORD — and not the call either. This effect's own docblock says
+  // "NO businessDayIso() HERE" while explaining why, so BOTH a bare-identifier regex and a
+  // `businessDayIso\(` regex match the prose and fail on a correct tree. (Third time this file has
+  // taught the lesson; the "All months" assertion above carries the same scar.) You cannot call
+  // what you do not import, and `timeZone:` catches a hand-rolled Intl formatter.
+  const imports = explorerSrc.slice(0, explorerSrc.indexOf('export function'));
+  assert.doesNotMatch(imports, /businessDayIso|businessWindowBounds|BUSINESS_TZ/, 'no ops-calendar import');
+  assert.doesNotMatch(explorerSrc, /timeZone:/, 'no hand-rolled Intl zone formatting in the client');
+  assert.match(actionsSrc, /nextBusinessDayStart/, 'the server computes the instant');
+  assert.match(
+    actionsSrc,
+    /nextRolloverAt: nextBusinessDayStart\(\)/,
+    'and returns it on the RESULT envelope',
+  );
+});
+
+test('#304: the instant rides the result, NOT the filter — it must not become a cache key', () => {
+  // CmdReportFilter is an unstable_cache key. An absolute instant in it would mint a new entry
+  // every single request and destroy the 15-minute cache.
+  const filterType = actionsSrc.slice(
+    actionsSrc.indexOf('export interface CmdReportFilter'),
+    actionsSrc.indexOf('export interface CmdReportFilter') + 2500,
+  );
+  assert.doesNotMatch(filterType, /nextRolloverAt/, 'the rollover instant must never enter the filter');
+});
+
+test('#304: three wake sources, ONE guard — a reload, not a poll', () => {
+  for (const src of ['visibilitychange', "window.addEventListener('focus'", 'setTimeout']) {
+    assert.ok(explorerSrc.includes(src), `${src} must be a wake source (a throttled timer alone misses)`);
+  }
+  // Every source funnels through the same comparison, and the ref is consumed so two events
+  // firing together reload once.
+  assert.match(explorerSrc, /Date\.now\(\) < at\) return;/, 'the guard is an absolute comparison');
+  assert.match(explorerSrc, /rolloverRef\.current = 0;/, 'the instant is CONSUMED, making it idempotent');
+  assert.doesNotMatch(explorerSrc, /setInterval/, 'never a poll');
+});

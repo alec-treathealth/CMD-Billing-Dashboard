@@ -273,6 +273,60 @@ export function businessDayPlus(days: number, now: Date = new Date()): string {
 }
 
 /**
+ * The UTC instant (epoch ms) at which the BUSINESS day next rolls over — i.e. the next
+ * `America/Los_Angeles` midnight strictly after `now`.
+ *
+ * ⚠ AN ABSOLUTE INSTANT, DELIBERATELY, NOT A DURATION AND NOT A DATE STRING (#304). A duration goes
+ * stale the moment it is serialized; a date string would force the CLIENT to know what timezone the
+ * ops calendar uses, which is the exact dependency `is_scheduled` is projected server-side to
+ * avoid. An epoch-ms integer needs no interpretation: the client compares it to `Date.now()`.
+ *
+ * DST-CORRECT BY CONSTRUCTION, because the offset is read AT THE TARGET INSTANT rather than assumed.
+ * A fixed -8h would be wrong for eight months of the year, and a fixed -7h wrong for the other four.
+ * The second lookup handles the case where adding the first offset crosses a transition — read the
+ * offset at the guess, apply it, then re-read at the result and correct if the zone changed under
+ * us. Spring-forward days are 23h long and fall-back days 25h; both come out right.
+ */
+export function nextBusinessDayStart(now: Date = new Date()): number {
+  return businessDayStart(businessDayPlus(1, now));
+}
+
+/** Epoch ms of 00:00 in BUSINESS_TZ on the given civil date. See nextBusinessDayStart. */
+function businessDayStart(isoDate: string): number {
+  const guess = Date.parse(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(guess)) throw new Error(`businessDayStart: unparseable date ${isoDate}`);
+  const first = guess - tzOffsetMs(guess);
+  const second = guess - tzOffsetMs(first);
+  return second;
+}
+
+/**
+ * How far BUSINESS_TZ is from UTC at a given instant, in ms (negative for the Americas).
+ * Derived by formatting the instant AS the zone's wall clock and re-reading those fields as if they
+ * were UTC — the difference IS the offset. No offset table, no hardcoded hours.
+ */
+function tzOffsetMs(instantMs: number): number {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: BUSINESS_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(instantMs));
+  const n = (t: string): number => {
+    const found = parts.find((p) => p.type === t);
+    if (found === undefined) throw new Error(`tzOffsetMs: Intl returned no ${t} part`);
+    return Number(found.value);
+  };
+  // hour can come back as 24 for midnight in some ICU versions; Date.UTC normalizes it.
+  const asUtc = Date.UTC(n('year'), n('month') - 1, n('day'), n('hour'), n('minute'), n('second'));
+  return asUtc - instantMs;
+}
+
+/**
  * Resolve any BusinessWindow to half-open bounds [from, to), the adjacent prior window, and the
  * true day-count.
  *
