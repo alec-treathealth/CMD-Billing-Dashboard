@@ -498,3 +498,36 @@ test('EQUIVALENCE: identical bounds to qualifyWindowBounds across the shared inp
   // would be worse than no equivalence test.
   assert.equal(compared, 140, 'the comparison must actually have run over the whole grid');
 });
+
+// ── businessDayPlus RANGE-CHECKS ITS RESULT, NOT JUST ITS INPUT ────────────────────────────────
+// Added 2026-08-31 (Qodo review of PR #298). Integer-ness alone was the original defect in this
+// module (`year: 50` → '1950-01-01'); it is the same defect one level down here. A large-but-valid
+// integer shifts past year 9999, toISOString() switches to extended years, and the .slice(0, 10)
+// truncates '+010000-01-01T…' to '+010000-01' — malformed, returned from a function typed as ISO.
+test('businessDayPlus: a shift past the supported year range THROWS rather than truncating', () => {
+  const now = new Date('2026-08-31T18:00:00Z');
+  assert.throws(
+    () => businessDayPlus(3_000_000, now),
+    /outside the supported 2000-2100 range/,
+    'year 10000+ must fail loud, not return a truncated extended-year string',
+  );
+  assert.throws(
+    () => businessDayPlus(-3_000_000, now),
+    /outside the supported 2000-2100 range/,
+    'negative shifts are allowed but still bounded',
+  );
+  // A shift so large the Date itself is unrepresentable: getUTCFullYear() is NaN, and the same
+  // guard catches it — both failure modes exit through one door.
+  assert.throws(() => businessDayPlus(Number.MAX_SAFE_INTEGER, now), /outside the supported/);
+});
+
+test('businessDayPlus: the range guard does NOT disturb any real caller', () => {
+  const now = new Date('2026-08-31T18:00:00Z');
+  // The only production call: FUTURE_PAYMENT_HORIZON_DAYS + 1 = 15.
+  assert.equal(businessDayPlus(15, now), '2026-09-15');
+  assert.equal(businessDayPlus(1, now), '2026-09-01');
+  assert.equal(businessDayPlus(0, now), '2026-08-31');
+  assert.equal(businessDayPlus(-1, now), '2026-08-30');
+  // The boundaries themselves remain reachable.
+  assert.match(businessDayPlus(20_000, now), /^2081-/, 'well inside 2100 still works');
+});

@@ -1307,9 +1307,22 @@ export function buildCmdExplorerQuery(
  *
  * ⚠ COMPUTED SERVER-SIDE AND PROJECTED, NEVER DERIVED IN THE CLIENT (ruled 2026-08-30). The server
  * already knows business-today at the moment it resolves the window; having the `'use client'` grid
- * call businessDayIso() itself would reintroduce a timezone dependency there AND leave a staleness
- * window — a tab open across midnight Pacific would keep rendering yesterday's answer. Projecting
- * the flag eliminates that rather than bounding it.
+ * call businessDayIso() itself would reintroduce a timezone dependency there — the browser's zone
+ * is not the ops zone, and a Denver reader would flag a different set of rows than a Los Angeles
+ * one looking at the same page.
+ *
+ * ⚠ THIS REMOVES THE TIMEZONE DEPENDENCY. IT DOES **NOT** REMOVE STALENESS, and an earlier version
+ * of this docblock claimed it did — corrected 2026-08-31 after the Qodo review of PR #298 named the
+ * gap. `is_scheduled` is request-time data: a tab left open across midnight Pacific keeps rendering
+ * the boolean it was served, so a payment that has since settled still reads "scheduled" until some
+ * filter, sort, or navigation triggers a refetch. Deriving it client-side would NOT have fixed that
+ * either — React does not re-render on a clock tick — so this is a property of a flag-per-row
+ * design, not a cost of choosing the server.
+ *
+ * What the server placement DOES bound: `businessToday` is part of the unstable_cache key, so no
+ * NEW request is ever answered against a stale ops day. Only an idle open tab is exposed. Closing
+ * that needs a rollover-triggered refetch driven by a server-supplied absolute instant; it is
+ * tracked as a follow-up rather than smuggled into this change.
  *
  * ⚠ EMITTED IN THE **OUTER** QUERY, AGAINST THE ALREADY-PROJECTED TEXT DATE. This is the whole
  * reason it costs nothing: `p.payment_received` / `g.payment_received` are already

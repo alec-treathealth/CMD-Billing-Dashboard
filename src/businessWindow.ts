@@ -252,7 +252,24 @@ function parseIsoDate(value: string): Date | null {
 export function businessDayPlus(days: number, now: Date = new Date()): string {
   if (!Number.isInteger(days)) throw new Error(`businessDayPlus: days must be an integer, got ${days}`);
   const anchor = new Date(`${businessDayIso(now)}T00:00:00Z`);
-  return iso(shiftDays(anchor, days));
+  const shifted = shiftDays(anchor, days);
+  // ⚠ THE RESULT IS RANGE-CHECKED, NOT JUST THE INPUT (added 2026-08-31, Qodo review of PR #298).
+  // Integer-ness alone was the ORIGINAL defect in this module and it is the same defect here one
+  // level down: a large-but-valid integer shifts past year 9999, `toISOString()` switches to
+  // extended years, and `iso`'s `.slice(0, 10)` truncates `+010000-01-01T…` to `'+010000-01'` — a
+  // malformed date returned from a function whose declared type says ISO yyyy-mm-dd. A shift large
+  // enough to leave `Date`'s representable range gives an Invalid Date instead, whose
+  // getUTCFullYear() is NaN; isSupportedYear rejects that too, so both failure modes throw here
+  // rather than escaping as plausible-looking garbage. Checking the OUTPUT is what makes this
+  // sufficient — there is no input bound that is both correct and independent of the anchor.
+  const year = shifted.getUTCFullYear();
+  if (!isSupportedYear(year)) {
+    throw new Error(
+      `businessDayPlus: ${days} days from ${businessDayIso(now)} lands in year ${year}, ` +
+        `outside the supported ${BUSINESS_YEAR_MIN}-${BUSINESS_YEAR_MAX} range`,
+    );
+  }
+  return iso(shifted);
 }
 
 /**

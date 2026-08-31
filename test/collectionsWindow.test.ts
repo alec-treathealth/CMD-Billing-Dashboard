@@ -172,3 +172,43 @@ test('custom range: from > to and impossible dates are refused by the primitive'
   assert.throws(() => businessWindowBounds({ kind: 'custom', from: '2026-03-31', to: '2026-03-01' }, NOW), /starts after it ends/);
   assert.throws(() => businessWindowBounds({ kind: 'custom', from: '2026-02-30', to: '2026-03-05' }, NOW), /invalid custom range/);
 });
+
+// ── THE SCHEDULED OVERRIDE MUST NOT TOUCH A CUSTOM RANGE ───────────────────────────────────────
+// These two tests pin the NUMBERS behind the 2026-08-31 fix (Qodo review of PR #298), so a future
+// refactor that re-applies applyScheduledBound to the custom branch fails with the reason attached
+// rather than with a vague bounds mismatch. Both were reproduced against the shipped code.
+test('custom + scheduled override would BYPASS the 366-day cap the branch just enforced', () => {
+  const b = businessWindowBounds({ kind: 'custom', from: '2020-01-01', to: '2020-01-02' }, NOW);
+  assert.equal(b.windowDays, 2, 'the cap is checked against windowDays, which is 2 — it passes');
+
+  // What the override WOULD have substituted for `to`, had the custom branch called it.
+  const override = businessDayPlus(FUTURE_PAYMENT_HORIZON_DAYS + 1, NOW);
+  const effective = daysApart(b.from, override);
+  assert.ok(
+    effective > 366,
+    `substituting the override yields a ${effective}-day span, past the 366-day cap — this is the defect`,
+  );
+  // And the shipped contract: the bounds are exactly what was asked for.
+  assert.equal(b.to, '2020-01-03', 'inclusive end date + 1, untouched by any override');
+});
+
+test('custom + scheduled override would INVERT a future-dated range into an empty result', () => {
+  const b = businessWindowBounds({ kind: 'custom', from: '2027-01-01', to: '2027-06-30' }, NOW);
+  const override = businessDayPlus(FUTURE_PAYMENT_HORIZON_DAYS + 1, NOW);
+  assert.ok(
+    override < b.from,
+    `the override (${override}) lands BEFORE the range start (${b.from}) — to < from returns nothing, silently`,
+  );
+  assert.equal(b.to, '2027-07-01', 'the resolved upper bound is the one the user asked for');
+});
+
+test('the override is only ever an EXTENSION for a trailing preset — never a narrowing', () => {
+  // Why the same helper is correct for presets: their `to` is always business-today + 1, so the
+  // substitute is always strictly later. This is the property the custom branch does not have.
+  const override = businessDayPlus(FUTURE_PAYMENT_HORIZON_DAYS + 1, NOW);
+  for (const days of [7, 14, 30, 90, 180, 365]) {
+    const b = businessWindowBounds({ kind: 'trailing', days }, NOW);
+    assert.equal(b.to, businessDayPlus(1, NOW), `${days}d upper bound is business-today + 1`);
+    assert.ok(override > b.to, `${days}d: the override must EXTEND, not replace with something earlier`);
+  }
+});

@@ -73,3 +73,51 @@ test('there is no longer an unbounded window to fall back to', () => {
   // and calls buildCmdExplorerQuery with its own filter. See the PR body.
   assert.match(querySrc, /requireWindow/, 'the closed-window guard exists');
 });
+
+// ── THE SCHEDULED OVERRIDE IS PRESETS-ONLY ─────────────────────────────────────────────────────
+// Fixed 2026-08-31 (Qodo review of PR #298). applyScheduledBound REPLACES the upper bound. That is
+// correct for a trailing preset, whose `to` is always business-today + 1 so the substitute is
+// always strictly later; it is wrong for a custom range, where the user named an end date. The
+// shipped-then-fixed behaviour, measured: custom 2020-01-01..2020-01-02 (windowDays=2, cap already
+// passed) became a 2,449-day span, and a future range 2027-01-01..2027-06-30 got an upper bound
+// BEFORE its lower bound — an empty grid, silently. See test/collectionsWindow.test.ts for the
+// arithmetic pinned as numbers.
+//
+// applyDateWindow cannot be imported: actions.ts is 'use server', where a non-async export breaks
+// EVERY Server Action on the page. So the guard is at the source level, like the rest of this file.
+test('the scheduled override is applied to the PRESET branch only, never to a custom range', () => {
+  assert.equal(
+    (actionsSrc.match(/applyScheduledBound\(filter,/g) ?? []).length,
+    1,
+    'exactly ONE call site — a second one means the custom branch took the override back',
+  );
+  assert.match(
+    actionsSrc,
+    /readerFilter\.to = bounds\.to;/,
+    'the custom branch must assign the resolved upper bound verbatim',
+  );
+});
+
+test('choosing a preset clears the custom-range DRAFTS, not just the applied values', () => {
+  // Clearing only customFrom/customTo left the popover primed with the superseded range, so
+  // re-opening Custom and pressing Apply resurrected it over the preset just chosen. Both exits
+  // from a custom range must leave identical state.
+  const selectRecency = actionsExplorerFn('selectRecency');
+  for (const setter of ['setCustomFrom', 'setCustomTo', 'setDraftFrom', 'setDraftTo']) {
+    assert.match(selectRecency, new RegExp(`${setter}\\(''\\)`), `selectRecency must call ${setter}('')`);
+  }
+});
+
+/** Slice one `function name(...) { ... }` body out of the explorer source, brace-balanced. */
+function actionsExplorerFn(name: string): string {
+  const start = explorerSrc.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `${name} must exist in cmd-explorer.tsx`);
+  let depth = 0;
+  let i = explorerSrc.indexOf('{', start);
+  const open = i;
+  for (; i < explorerSrc.length; i++) {
+    if (explorerSrc[i] === '{') depth++;
+    else if (explorerSrc[i] === '}' && --depth === 0) return explorerSrc.slice(open, i + 1);
+  }
+  assert.fail(`unbalanced braces reading ${name}`);
+}

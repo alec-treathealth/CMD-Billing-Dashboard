@@ -1596,7 +1596,11 @@ function applyDateWindow(
     // representable at all. Reject, do not clamp.
     if (bounds.windowDays > CMD_CUSTOM_MAX_DAYS) return false;
     readerFilter.from = bounds.from;
-    readerFilter.to = applyScheduledBound(filter, bounds.to, now);
+    // ⚠ NO applyScheduledBound HERE, DELIBERATELY — see that helper's docblock. An explicit range
+    // already answers the scheduled question in both directions, and overriding `to` would both
+    // bypass the cap just checked above and silently empty a future-dated range. The bounds the
+    // user asked for are the bounds they get.
+    readerFilter.to = bounds.to;
     readerFilter.businessToday = businessToday;
     return true;
   }
@@ -1612,7 +1616,7 @@ function applyDateWindow(
 }
 
 /**
- * The "Include scheduled" upper-bound OVERRIDE.
+ * The "Include scheduled" upper-bound OVERRIDE — **TRAILING PRESETS ONLY**.
  *
  * ⚠ AN OVERRIDE, NOT A WIDER WINDOW, and the distinction is load-bearing. It was tempting to model
  * this as grace days on the window itself; that was rejected (2026-08-30) because
@@ -1623,6 +1627,29 @@ function applyDateWindow(
  *
  * The bound is business-today + FUTURE_PAYMENT_HORIZON_DAYS + 1 — the +1 because the window is
  * half-open and the horizon is the last day ingest will accept, which must be INCLUDED.
+ *
+ * ⚠ IT DOES NOT APPLY TO A CUSTOM RANGE (ruled 2026-08-31, after the Qodo review of PR #298 caught
+ * the first version applying it to both). This helper REPLACES the upper bound rather than
+ * extending it, which is right for a preset — whose `to` is always business-today + 1, so the
+ * substitute is always strictly later — and WRONG for a custom range, where the user named an end
+ * date. Measured on the shipped code before the fix:
+ *
+ *   custom 2020-01-01..2020-01-02  windowDays=2   → to became 2026-09-15: a **2,449-day** span,
+ *                                                   sailing past the 366-day cap that had already
+ *                                                   been checked against windowDays=2
+ *   custom 2027-01-01..2027-06-30  windowDays=181 → to became 2026-09-15, i.e. BEFORE `from`:
+ *                                                   an empty result, silently
+ *
+ * The semantics that replace it: for an explicit range the toggle is a **no-op**, because the range
+ * already answers the question. An end date in the future already includes scheduled payments; an
+ * end date in the past contains none to include. Only a trailing preset needs the override, because
+ * a preset is exactly the case where the user did NOT name an end date.
+ *
+ * The checkbox stays visible and enabled while a custom range is active — inert, not hidden. That
+ * is the standing ruling ("do not hide or disable the toggle when it has no effect —
+ * state-dependent controls are worse than an inert one"), and it fits this case at least as well as
+ * the BXR-tab case it was ruled for: there the toggle is inert because of the DATA and the user
+ * cannot tell why, here it is inert because of a control they just set and can clear.
  */
 function applyScheduledBound(filter: CmdReportFilter, defaultTo: string, now: Date): string {
   if (filter.includeScheduled !== true) return defaultTo;

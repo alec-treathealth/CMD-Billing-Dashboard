@@ -524,12 +524,18 @@ export function CmdCollectionsExplorer({
   // combo drill from the summary combo table — facility/payer summary clicks add tags instead of
   // setting a single refinement (see applyRefinement).
   const [refinement, setRefinement] = useState<Refinement | null>(null);
-  // Recency quick-filter: a rolling window of 7/14/30/90 days, or 0 = off (all months). DEFAULT 90 —
-  // the default nav carries a payment_received window so the summary aggregates hit the
-  // (business_entity_id, payment_received) index path instead of an all-time seq scan of the whole
-  // charge-rollup slice (measured: all-time Consolidated summary ~148–220ms/panel warm → ~80ms
-  // worst-case with a 90d window). Re-clicking the active chip (or picking a Month/Year) still
-  // returns to all-time. Mutually exclusive with Month/Year.
+  // Trailing-window preset, in days: one of WINDOW_PRESETS (7/14/30/90/180/365), or 0 meaning "a
+  // CUSTOM RANGE is active instead" — the two are mutually exclusive and customActive is the other
+  // half of that pair. DEFAULT 90: the default nav carries a payment_received window so the summary
+  // aggregates hit the (business_entity_id, payment_received) index path instead of a seq scan of
+  // the whole charge-rollup slice (measured: unbounded Consolidated summary ~148–220ms/panel warm →
+  // ~80ms worst-case with a 90d window).
+  //
+  // ⚠ 0 NO LONGER MEANS "ALL MONTHS", AND RE-CLICKING THE ACTIVE CHIP NO LONGER TOGGLES TO IT.
+  // This comment said both until 2026-08-31 and had been false since the window control landed —
+  // there is no unbounded state any more (ruled), and the Month/Year picker it also named was
+  // folded into the custom range in the same change. Kept as a correction rather than a silent
+  // rewrite because the repo's standing rule is that a stale comment is a defect, not a cosmetic.
   const [recencyDays, setRecencyDays] = useState(90);
   /** Custom range, INCLUSIVE dates as picked. Empty strings = no custom range active. */
   const [customFrom, setCustomFrom] = useState('');
@@ -1564,6 +1570,13 @@ export function CmdCollectionsExplorer({
     // months" state — there is no such state any more (ruled: no unbounded window).
     setCustomFrom('');
     setCustomTo('');
+    // ⚠ THE DRAFTS GO TOO, exactly as clearCustomRange does it (fixed 2026-08-31, Qodo review of
+    // PR #298). Clearing only the APPLIED values left the popover's drafts loaded with the range
+    // that was just superseded, so re-opening Custom and pressing Apply resurrected it. The two
+    // exits from a custom range must leave identical state; the asymmetry was an oversight, not a
+    // design.
+    setDraftFrom('');
+    setDraftTo('');
     setCustomError('');
     setRecencyDays(days);
   }
