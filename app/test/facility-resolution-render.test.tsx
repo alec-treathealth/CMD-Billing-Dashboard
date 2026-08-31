@@ -20,6 +20,7 @@ import {
   formatUsd,
 } from '../components/collections/facility-resolution-leaves';
 import type {
+  ResolutionMethod,
   ResolutionOverviewRow,
   ResolutionRow,
 } from '../../src/collections/facilityResolutionQuery';
@@ -154,6 +155,43 @@ test('a resolved row shows its facility and method; an unresolved row shows its 
     <QueueTable rows={[row()]} sort={{ column: 'charge_date', direction: 'desc' }} />,
   );
   assert.ok(unresolved.includes('unresolved · no evidence'));
+});
+
+// ── #294: THE STATUS CELL SPLITS EXACT FROM INFERRED ──────────────────────────────────────────
+// ⚠ THE TEST ABOVE USES A `vob` FIXTURE — an INFERRED method — and asserts only the alias and the
+// label. It passed identically before and after the split, proving none of it. That is why this
+// block exists rather than an extra assertion up there: a fixture that cannot fail is not coverage.
+const queue = (method: ResolutionMethod, alias: string): string =>
+  renderToStaticMarkup(
+    <QueueTable
+      rows={[row({ method, facility_alias: alias, unresolved_reason: null })]}
+      sort={{ column: 'charge_date', direction: 'desc' }}
+    />,
+  );
+
+test('#294: an EXACT method renders the solid teal pill and never says "inferred"', () => {
+  for (const method of ['manual', 'named'] as const) {
+    const html = queue(method, 'TREAT_WA');
+    assert.match(html, /data-resolution="exact"/, `${method} is exact evidence`);
+    assert.match(html, /bg-teal50/, `${method} keeps the solid teal pill`);
+    assert.doesNotMatch(html, /inferred/, `${method} must never be labelled inferred`);
+  }
+});
+
+test('#294: an INFERRED method is distinguished on all THREE channels, not colour alone', () => {
+  // WCAG 1.4.1 — the split must survive greyscale and forced-colours, so assert each channel.
+  for (const method of ['member_inference', 'vob', 'tie_break'] as const) {
+    const html = queue(method, 'CAMH');
+    assert.match(html, /data-resolution="inferred"/, `${method} is a derived conclusion`);
+    assert.match(html, /border-dashed/, `${method}: border STYLE channel`);
+    assert.match(html, /text-ink600/, `${method}: COLOUR channel`);
+    assert.match(html, /inferred/, `${method}: the literal WORD channel`);
+    assert.doesNotMatch(html, /bg-teal50/, `${method} must not borrow the exact-evidence pill`);
+  }
+});
+
+test('#294: exact and inferred markup actually DIFFER — the whole point of the port', () => {
+  assert.notEqual(queue('manual', 'TREAT_WA'), queue('member_inference', 'TREAT_WA'));
 });
 
 test('unmatched chips render inert: no Remove button, and flagged for screen readers', () => {

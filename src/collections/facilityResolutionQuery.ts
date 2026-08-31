@@ -67,11 +67,15 @@ export type ResolutionMethod = (typeof RESOLUTION_METHODS)[number];
  *                   than a fact CMD or an operator gave us.
  *   (neither)       'unresolved' — facility_alias is NULL iff this; the raw CMD value stands.
  *
- * ⚠ AN INFERRED FACILITY MUST NEVER RENDER IDENTICALLY TO ONE CMD NAMED (ruling 2026-08-30). The
- * shipped workbench STATUS cell (facility-resolution-leaves.tsx) does exactly that — every resolved
- * method gets the same teal pill — and is DELIBERATELY LEFT ALONE by that ruling; the two surfaces
- * disagree visually on purpose today. Porting this class to the workbench is a named follow-up, not
- * a drive-by: it is that page's whole visual language.
+ * ⚠ AN INFERRED FACILITY MUST NEVER RENDER IDENTICALLY TO ONE CMD NAMED (ruling 2026-08-30).
+ *
+ * BOTH SURFACES NOW HONOUR THAT, as of #294 (2026-08-31). The Collections grid honoured it first
+ * (app/components/dashboard/facility-cell.tsx); the workbench STATUS cell
+ * (facility-resolution-leaves.tsx) gave EVERY resolved method the same teal pill and was
+ * deliberately left alone by the original ruling, which named porting the split as a follow-up
+ * rather than a drive-by because it is that page's whole visual language. #294 is that follow-up,
+ * and the treatment was ported VERBATIM — same three channels, same classes — so the two surfaces
+ * now agree by construction rather than by two people remembering the same intent.
  */
 export const EXACT_EVIDENCE_METHODS = ['manual', 'named'] as const;
 export const INFERRED_METHODS = ['member_inference', 'vob', 'tie_break'] as const;

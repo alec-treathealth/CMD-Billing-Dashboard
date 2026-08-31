@@ -13,6 +13,7 @@
 import type { ReactNode } from 'react';
 import {
   memberDisplayToken,
+  resolutionClassOf,
   RESOLUTION_METHODS,
   type ResolutionChip,
   type ResolutionMethod,
@@ -21,6 +22,50 @@ import {
   type ResolutionSort,
   type ResolutionSortColumn,
 } from '../../../src/collections/facilityResolutionQuery.js';
+
+/**
+ * The STATUS pill for a RESOLVED row — split by evidence class, ported from the Collections grid's
+ * FacilityCell by #294 (2026-08-31).
+ *
+ * ⚠ THE SPLIT IS THE POINT. Until #294 every resolved method rendered in the same teal pill here,
+ * so `member_inference` — a facility we DERIVED from the patient's other charges — looked exactly
+ * like `manual`, which a human worked by hand. An attributed facility rendered without its evidence
+ * class is a conclusion presented as a fact.
+ *
+ * THREE CHANNELS, deliberately, because colour alone fails WCAG 1.4.1 in greyscale and in
+ * forced-colours mode: border STYLE (solid vs dashed), COLOUR, and the WORD "inferred". Any one of
+ * them surviving is enough to tell the two apart.
+ *
+ * ⚠ `border-dashed` is ALSO used on this page for the unmatched search chip, where it means "not
+ * applied". That collision was reviewed and ACCEPTED (ruled 2026-08-31): the border colours differ
+ * (border-line there, border-ink400 here), the contexts differ (a search chip vs a status pill),
+ * and the word "inferred" carries the meaning regardless. Disambiguating the idiom would be a
+ * design-system decision, and that ruling is open — do not invent a third treatment here.
+ *
+ * The class comes from resolutionClassOf(), the single source of truth, NOT from testing method
+ * strings — RESOLUTION_CLASS_BY_METHOD is typed over the full method union, so a seventh method
+ * that nobody classified is a typecheck failure rather than a silent "unresolved".
+ */
+function StatusPill({ method, alias }: { method: ResolutionMethod; alias: string | null }): ReactNode {
+  const exact = resolutionClassOf(method) === 'exact';
+  const label = METHOD_LABELS[method];
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span
+        data-resolution={exact ? 'exact' : 'inferred'}
+        className={
+          'rounded-full px-2 py-0.5 text-xs font-medium ' +
+          (exact
+            ? 'border border-teal700/40 bg-teal50 text-teal900'
+            : 'border border-dashed border-ink400 bg-surface text-ink600')
+        }
+      >
+        {alias ?? '—'}
+      </span>
+      <span className="text-xs text-ink400">{exact ? label : `${label} · inferred`}</span>
+    </span>
+  );
+}
 
 export const METHOD_LABELS: Record<ResolutionMethod, string> = {
   manual: 'Manual',
@@ -294,12 +339,7 @@ export function QueueTable({
                       unresolved · {REASON_LABELS[r.unresolved_reason ?? ''] ?? r.unresolved_reason ?? '—'}
                     </span>
                   ) : (
-                    <span className="inline-flex items-center gap-1">
-                      <span className="rounded-full border border-teal700/40 bg-teal50 px-2 py-0.5 text-xs font-medium text-teal900">
-                        {r.facility_alias ?? '—'}
-                      </span>
-                      <span className="text-xs text-ink400">{METHOD_LABELS[r.method]}</span>
-                    </span>
+                    <StatusPill method={r.method} alias={r.facility_alias} />
                   )}
                 </td>
               </tr>

@@ -25,9 +25,12 @@
  * survives greyscale, a colour-blind reader and forced-colours mode. WCAG 1.4.1: never encode
  * meaning in colour alone.
  *
- * The shipped workbench STATUS cell gives EVERY resolved method the same teal pill and is
- * deliberately left alone by that ruling; the two surfaces disagree visually on purpose today, and
- * porting this split back there is a named follow-up.
+ * The workbench STATUS cell (app/components/collections/facility-resolution-leaves.tsx) used to
+ * give EVERY resolved method the same teal pill, and was deliberately left alone by that ruling as
+ * a named follow-up. #294 (2026-08-31) ported this treatment there VERBATIM — same three channels,
+ * same classes, same data-resolution hook — so the two surfaces no longer disagree. Change one and
+ * you must change the other; they are parity by copy, not by a shared component, because the leaves
+ * file forbids the imports this one uses.
  *
  * ── PHI ────────────────────────────────────────────────────────────────────────────────────────
  * Nothing here is PHI. A facility name/code and a method name are non-PHI dimensions; no member
