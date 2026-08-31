@@ -846,9 +846,12 @@ These are wrong in the code today. Fix opportunistically; never copy them.
   Overview does not" until 2026-08-31, which was true of one of them and false of
   the other, and the false half was the one a reader would act on:
   - **The daily/deposit path** — `collections.daily_collections_resolved`, read by
-    `src/collections/daily.ts`. Bounds at `<= today`; Overview opts out by passing
-    `include_future_payments: true`. Both surfaces still read ONE row set, which
-    is why the split has to live at read time and cannot live in the ingest.
+    `src/collections/daily.ts`. Bounds at `<= business-today`; Overview opts out by
+    passing `include_future_payments: true`, which returns an **absent** bound, not
+    a differently-computed one — **Overview has no upper bound at all**, so nothing
+    about how this bound is computed can move an Overview figure. Both surfaces
+    still read ONE row set, which is why the split has to live at read time and
+    cannot live in the ingest.
   - **The explorer grid** — `collections.cmd_explorer_charge_rollup`, read by
     `buildCmdExplorerQuery` / `buildCmdExplorerGroupedQuery`. It had **NO upper
     bound at all** until PR #298 (2026-08-30): the recency branch set only `from`
@@ -860,13 +863,28 @@ These are wrong in the code today. Fix opportunistically; never copy them.
     + 1 **for trailing presets only** — never for a custom range, where the end
     date the user picked stands unmodified.
 
-  ⚠ **AND THE TWO DO NOT USE THE SAME CALENDAR.** The daily bound is
-  `ctx.now().toISOString().slice(0, 10)` — a **UTC** civil date
-  (`src/collections/daily.ts:70`). The explorer grid anchors on
-  **America/Los_Angeles** via `businessDayIso`. They therefore disagree about what
-  "today" is from ~17:00 Pacific until midnight. Nobody has ruled on aligning
-  them; it is recorded here as an OBSERVED divergence, not as a design. Do not
-  assume it is deliberate, and do not "fix" it as a drive-by.
+  ✔ **THE TWO NOW SHARE ONE CALENDAR — RULED AND FIXED 2026-08-31 (#306).** Both
+  resolve "today" through `businessDayIso` (**America/Los_Angeles**). This block
+  said the opposite for one day: the daily bound was
+  `ctx.now().toISOString().slice(0, 10)`, a **UTC** civil date, recorded here as an
+  OBSERVED divergence with "nobody has ruled on aligning them." Ruled now, and the
+  ruling went the way the measurement pointed — the daily bound was the **later**
+  of the two, so the surface whose entire purpose is to EXCLUDE forward-dated money
+  was the one including it, for ~7 hours every evening.
+
+  Measured live inside the band at **2026-08-30 23:47 Pacific**: **10 Indigo
+  facility-days / $86,211.60** dated 08-31 sitting on the Collections tab, and that
+  tab's KPI anchor reading **08-31 instead of 08-28**. The cap feeds the anchor CTE
+  on the Collections-tab reader, so the "as of" moves with it — correctly: the tab
+  should anchor on the latest **settled** deposit. On Overview the cap is `null`, so
+  it never enters that CTE and **W7's max(payment_date) anchoring is untouched.**
+
+  Two things worth keeping from the wrong version. `toISOString()` is UTC
+  **regardless of process `TZ`**, so this was never a Vercel-only artifact — it
+  reproduced on a Pacific laptop, and #306's own "Vercel runs TZ=UTC" reasoning was
+  beside the point. And the skew was **one-directional**: Pacific is UTC−7/−8, so
+  the UTC civil date is never behind the business one and this change could only
+  ever tighten the bound, never loosen it.
 
   Ingest keeps near-future rows deliberately. Setting the constant back to `0`
   remains the correct kill switch if forward-dated deposits turn out to be

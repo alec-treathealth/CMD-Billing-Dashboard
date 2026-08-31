@@ -14,6 +14,7 @@
  * Identifiers are FIXED literals; only date/facility VALUES are $n parameters.
  * Each call emits one lightweight, non-PHI audit line (no claims.query_log).
  */
+import { businessDayIso } from '../businessWindow.js';
 import type { QueryExecutor } from '../queries/types.js';
 import { assertEntityScope } from './entityScope.js';
 import { validateDateBound } from './summary.js';
@@ -54,20 +55,36 @@ export interface CollectionsQueryContext {
  * the SAME rows through `collections.daily_collections_resolved`, so the distinction cannot live in
  * the ingest — it has to be made at read time, here.
  *
- * DEFAULT IS EXCLUDE (bound at today). Every existing caller — the Collections tab, the Bearer
- * /api routes, anything that simply omits the flag — keeps today's behaviour with no change.
- * Only the Overview readers opt in by passing `include_future_payments: true`.
+ * DEFAULT IS EXCLUDE (bound at business-today). Every existing caller — the Collections tab, the
+ * Bearer /api routes, anything that simply omits the flag — gets the bound; only the Overview
+ * readers opt out by passing `include_future_payments: true`, which returns null BEFORE any date
+ * is derived. So Overview has no upper bound at all rather than a differently-computed one, and no
+ * change to this function can move an Overview figure.
  *
- * Returns an ISO 'YYYY-MM-DD' bound, or null for "no bound" (include everything). The date is
- * resolved from `ctx.now` rather than SQL `current_date` so the boundary is deterministic in
- * tests and cannot drift with the database session's TimeZone.
+ * Returns an ISO 'YYYY-MM-DD' bound, or null for "no bound" (include everything).
+ *
+ * THE BOUND IS THE BUSINESS DAY (America/Los_Angeles), via businessDayIso — RULED 2026-08-31,
+ * issue #306. It was `ctx.now().toISOString().slice(0, 10)`, a UTC civil date, so from ~17:00
+ * Pacific until midnight this bound sat one day LATER than the explorer grid's, which moved onto
+ * the same primitive in PR #298. Measured inside that band at 2026-08-30 23:47 Pacific: 10 Indigo
+ * facility-days / $86,211.60 of 08-31 deposits were on the Collections tab, whose entire purpose
+ * is to exclude forward-dated money, and the tab's KPI anchor read 08-31 instead of 08-28. Both
+ * halves of Collections now share one definition of "today". The reverse skew cannot happen —
+ * Pacific is UTC-7/-8, so the UTC civil date is never behind the business one and this change can
+ * only ever tighten the bound.
+ *
+ * The INSTANT still comes from `ctx.now`, never SQL `current_date`, so the boundary stays
+ * deterministic in tests and cannot drift with the database session's TimeZone. Only the CALENDAR
+ * the instant is read in changed. ⚠ And note this was never a Vercel-only artifact the way #306
+ * implied: `toISOString()` is UTC regardless of process `TZ`, so the old bound reproduced
+ * identically on a Pacific-timezone laptop.
  */
 function futurePaymentBound(
   includeFuture: boolean | undefined,
   ctx: CollectionsQueryContext,
 ): string | null {
   if (includeFuture === true) return null;
-  return (ctx.now ?? (() => new Date()))().toISOString().slice(0, 10);
+  return businessDayIso((ctx.now ?? (() => new Date()))());
 }
 
 // --- collectionsDaily -------------------------------------------------------

@@ -635,17 +635,24 @@ export function aggregateDailyDeposits(rows: CmdReportRow[], facilityCode: strin
  * including these very rows in totals a reader takes as settled cash. CLAUDE.md points here and
  * says to trust this note over itself, so the imprecision propagated rather than staying local.
  *
- *   - DAILY path (collections.daily_collections_resolved, daily.ts): bounds at `<= today`;
- *     Overview opts out with include_future_payments: true. The bound is a UTC civil date.
+ *   - DAILY path (collections.daily_collections_resolved, daily.ts): bounds at
+ *     `<= business-today`; Overview opts out with include_future_payments: true, which returns an
+ *     ABSENT bound rather than a differently-computed one — Overview has no upper bound at all.
  *   - EXPLORER GRID (collections.cmd_explorer_charge_rollup): half-open [from, to) with
  *     `to` = business-today + 1, resolved by applyDateWindow -> businessWindowBounds. The
  *     "Include scheduled" toggle extends that bound to business-today + this constant + 1, for
  *     TRAILING PRESETS ONLY — never for a custom range, where the user's own end date stands.
  *     That is the one place this constant reaches a read path rather than the ingest.
  *
- * ⚠ The two use DIFFERENT CALENDARS — the daily bound is UTC, the grid anchors on
- * America/Los_Angeles (businessDayIso) — so they disagree about "today" from ~17:00 Pacific until
- * midnight. OBSERVED, not ruled. Do not assume it is deliberate.
+ * ✔ THE TWO NOW SHARE ONE CALENDAR — RULED AND FIXED 2026-08-31 (issue #306). Both resolve
+ * "today" through businessDayIso (America/Los_Angeles). Until then the daily bound was a UTC civil
+ * date and the grid was Pacific, so they disagreed from ~17:00 Pacific until midnight and the
+ * daily path's bound was the LATER of the two — the surface meant to EXCLUDE forward-dated money
+ * was the one including it. Measured live inside that band at 2026-08-30 23:47 Pacific: 10 Indigo
+ * facility-days / $86,211.60 dated 08-31 on the Collections tab, and its KPI anchor reading 08-31
+ * instead of 08-28. Overview was never affected — its opt-out returns before any date is derived.
+ * The agreement is asserted hourly across four days (two of them DST transitions) in
+ * test/collections.daily.test.ts; do not reintroduce a second definition of the ops day.
  *
  * Setting this back to 0 is the correct kill switch if forward-dated deposits ever turn out to be
  * unreliable; nothing else needs reverting.
