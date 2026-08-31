@@ -50,9 +50,12 @@
  * lands. There is nothing to preserve — the row on screen is the old week's.
  *
  * ── SCOPE KEYS ARE NOT THIS MODULE'S JOB ───────────────────────────────────────────────────
- * Override keys carry their week (see `overrides.ts`); this reducer stores whatever key it is
- * handed. It deliberately does NOT clear overrides on a week change — week-keyed entries are
- * scoped by construction, so a biller's edits survive navigating away and back.
+ * Override keys carry their (entity, week) scope (see `overrides.ts`); this reducer stores
+ * whatever key it is handed. It deliberately does NOT clear overrides on a week change — nor on
+ * an ENTITY change, which became reachable when the tenant control landed on this route
+ * (2026-08-31) — because scope-keyed entries are isolated by construction. A biller's edits
+ * therefore survive navigating away and back on BOTH axes, instead of being discarded by a round
+ * trip that changed nothing.
  *
  * Pure and synchronous: no React, no I/O, no `Date.now()`. That is what makes the interleaving
  * in `billableDaysImportState.test.tsx` expressible as four ordinary calls.
@@ -139,7 +142,7 @@ export function importReducer(s: ImportState, a: ImportAction): ImportState {
         data: a.payload,
         files: a.files,
         // The drawer is closed by EVERY applied response — its row belongs to the payload being
-        // replaced. Overrides are week-keyed, so only a fresh import invalidates them.
+        // replaced. Overrides are (entity, week)-keyed, so only a fresh import invalidates them.
         target: null,
         ...(a.fresh ? { cellOv: NO_CELLS, statusOv: NO_STATUSES } : null),
       };

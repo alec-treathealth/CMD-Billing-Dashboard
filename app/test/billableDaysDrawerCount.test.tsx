@@ -26,7 +26,7 @@ import {
   isApproximate,
   type CellOverrides,
 } from '../components/billing-audit/billable-days/overrides';
-import { WEEK_A, makeRow } from './helpers/billableDays';
+import { SCOPE_BXR_A, VIEW_BXR, WEEK_A, makeRow } from './helpers/billableDays';
 
 const TUESDAY = 1;
 
@@ -35,8 +35,8 @@ function drawerHtml(row: ReturnType<typeof makeRow>, ov: CellOverrides): string 
   return renderToStaticMarkup(
     <BillableDaysDrawer
       target={{ row, dayIndex: 0 }}
-      billableDays={adjustedBillableDays(row, ov, WEEK_A)}
-      approximate={isApproximate(row, ov, WEEK_A)}
+      billableDays={adjustedBillableDays(row, ov, SCOPE_BXR_A)}
+      approximate={isApproximate(row, ov, SCOPE_BXR_A)}
       phiIncluded={false}
       revealed={false}
       onClose={() => {}}
@@ -48,6 +48,7 @@ function gridHtml(row: ReturnType<typeof makeRow>, ov: CellOverrides): string {
   return renderToStaticMarkup(
     <BillableDaysGrid
       rows={[row]}
+      view={VIEW_BXR}
       weekStart={WEEK_A}
       phiIncluded={false}
       revealed={false}
@@ -62,8 +63,8 @@ function gridHtml(row: ReturnType<typeof makeRow>, ov: CellOverrides): string {
 
 test('an EDITED row shows the adjusted count in the drawer, and never the pre-edit one', () => {
   const row = makeRow();
-  const ov: CellOverrides = new Map([[cellKey(WEEK_A, row.id, TUESDAY), ['G'] as readonly string[]]]);
-  const adjusted = adjustedBillableDays(row, ov, WEEK_A);
+  const ov: CellOverrides = new Map([[cellKey(SCOPE_BXR_A, row.id, TUESDAY), ['G'] as readonly string[]]]);
+  const adjusted = adjustedBillableDays(row, ov, SCOPE_BXR_A);
   // The fixture exists to make these differ; if they ever stop differing the test proves nothing.
   assert.notEqual(adjusted, row.billableDays, 'fixture no longer produces a changed count');
 
@@ -81,8 +82,8 @@ test('an EDITED row shows the adjusted count in the drawer, and never the pre-ed
 
 test('the grid row shows that SAME number — the two surfaces cannot disagree', () => {
   const row = makeRow();
-  const ov: CellOverrides = new Map([[cellKey(WEEK_A, row.id, TUESDAY), ['G'] as readonly string[]]]);
-  const adjusted = adjustedBillableDays(row, ov, WEEK_A);
+  const ov: CellOverrides = new Map([[cellKey(SCOPE_BXR_A, row.id, TUESDAY), ['G'] as readonly string[]]]);
+  const adjusted = adjustedBillableDays(row, ov, SCOPE_BXR_A);
 
   const grid = gridHtml(row, ov);
   // The grid's Days cell renders `<adjusted> / <cap>` across two spans, with the pre-edit number
@@ -109,8 +110,8 @@ test('an UN-edited row is unchanged in both surfaces — the fix must not move a
 
 test('the approximate marker carries into the drawer, with the same glyph the grid uses', () => {
   const row = makeRow({ multiLoc: true });
-  const ov: CellOverrides = new Map([[cellKey(WEEK_A, row.id, TUESDAY), ['G'] as readonly string[]]]);
-  assert.equal(isApproximate(row, ov, WEEK_A), true, 'fixture is no longer multi-LOC');
+  const ov: CellOverrides = new Map([[cellKey(SCOPE_BXR_A, row.id, TUESDAY), ['G'] as readonly string[]]]);
+  assert.equal(isApproximate(row, ov, SCOPE_BXR_A), true, 'fixture is no longer multi-LOC');
 
   const html = drawerHtml(row, ov);
   assert.ok(html.includes('≈'), 'the drawer dropped the approximate marker the grid shows');

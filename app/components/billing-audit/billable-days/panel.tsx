@@ -45,7 +45,7 @@ import { BillableDaysGrid } from './grid';
 import { BillableDaysDrawer } from './drawer';
 import { ImportSummary } from './import-summary';
 import { CODE_LEGEND, codeOrReason } from './legend';
-import { adjustedBillableDays, countOverrides, isApproximate } from './overrides';
+import { adjustedBillableDays, countOverrides, isApproximate, overrideScope } from './overrides';
 import { importReducer, initialImportState, type ImportFailure } from './import-state';
 
 /** Generic, enumerated. The server never sends file content or an identifier back. */
@@ -338,6 +338,7 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
 
           <BillableDaysGrid
             rows={rows}
+            view={view}
             weekStart={data.selectedWeek}
             phiIncluded={data.phiIncluded}
             revealed={revealed}
@@ -392,10 +393,15 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
         // The count comes from the SAME function the grid row uses, so the two cannot disagree
         // (Qodo 8). `data` is required rather than optional: a drawer outliving its payload
         // would have no week to scope the overrides by, and nothing valid to show.
+        //
+        // The scope is (view, selectedWeek) — the SAME pair the grid derives, so the drawer's
+        // recount reads the identical keys the grid wrote. `view` is safe to use here despite the
+        // non-BXR early return above: that return is unreachable from this line, so this render
+        // only ever happens with the tenant the export was imported under.
         <BillableDaysDrawer
           target={target}
-          billableDays={adjustedBillableDays(target.row, cellOv, data.selectedWeek)}
-          approximate={isApproximate(target.row, cellOv, data.selectedWeek)}
+          billableDays={adjustedBillableDays(target.row, cellOv, overrideScope(view, data.selectedWeek))}
+          approximate={isApproximate(target.row, cellOv, overrideScope(view, data.selectedWeek))}
           phiIncluded={data.phiIncluded}
           revealed={revealed}
           onClose={() => dispatch({ type: 'close-drawer' })}

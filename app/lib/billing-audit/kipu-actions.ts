@@ -111,9 +111,19 @@ export async function importKipuReport(formData: FormData): Promise<KipuImportRe
   const access = await dashboardAccess();
   if (!access.ok || access.access.allowedViews.length === 0) return { ok: false, error: 'unauthorized' };
 
-  // Scope: clamp the requested view exactly as the page does, then require BXR. Treat's
+  // Scope: clamp the requested view against this caller's ENTITLEMENT, then require BXR. Treat's
   // locations are BXR facilities; any other view is an explicit unavailable state, never a
   // silently empty grid. Clamping first means a hand-edited ?view= cannot widen anything.
+  //
+  // ⚠ THIS IS NOT THE SAME CLAMP THE PAGE RUNS, AND IT MUST NOT BE "RESTORED" TO MATCH IT.
+  // This comment said "exactly as the page does" until 2026-08-31, when the page moved to the
+  // route-scoped `resolveClaimsDeskView` (BXR default, `consolidated` → bxr). The two now
+  // diverge deliberately: for a super_admin a forged `view=consolidated` stays `consolidated`
+  // here and is REJECTED below, while the page would map it to bxr; an absent value clamps to
+  // allowedViews[0] here versus bxr on the page. Every divergence resolves DENY on this side,
+  // which is the correct direction for a write path — importing the page's consolidated→bxr
+  // mapping to regain "parity" would silently convert those denials into accepts.
+  // The page's clamp decides what to RENDER; this one decides what to ACCEPT.
   const requested = String(formData.get('view') ?? '') as DashboardView;
   const view = clampView(requested, access.access.allowedViews);
   if (view !== 'bxr') return { ok: false, error: 'wrong-view' };

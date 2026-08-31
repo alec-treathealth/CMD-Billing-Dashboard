@@ -1,131 +1,183 @@
 /**
- * THE ENTITY AXIS — why `?view=` is NOT in the Billable Days override keys, held as a tripwire
- * rather than as a paragraph.
+ * THE ENTITY AXIS — now IN the Billable Days override keys, and pinned as behaviour.
  *
- * ── THE FINDING ────────────────────────────────────────────────────────────────────────────
- * Override keys carry the week (Qodo 2) but not the entity. Row ids are per-import ORDINALS,
- * so an override that outlived an entity switch would not merely apply to the wrong week — it
- * would re-point at whoever occupies that ordinal under the other tenant, i.e. a different
- * person's billable days. That is strictly worse than the week case.
+ * ── WHAT THIS FILE USED TO SAY, AND WHY IT CHANGED ─────────────────────────────────────────
+ * Until 2026-08-31 this file asserted the OPPOSITE: that the entity was deliberately absent
+ * from the override keys, held safe by a ROUTING premise — the Claims Desk carried no in-place
+ * tenant control, so `?view=` could only change via a route navigation to /dashboard*, which
+ * unmounted the panel and took its state with it. Its own header said it "fails the day a
+ * tenant control lands on this route."
  *
- * ── WHY NO KEY CHANGE SHIPPED ──────────────────────────────────────────────────────────────
- * It cannot happen today, because the panel never survives an entity switch to see one. The
- * Claims Desk has NO in-place tenant control:
- *   · `?view=` is only ever rewritten by `TenantTabs` (`router.push(`${pathname}?…`)`), and
- *     `TenantTabs` is rendered by /dashboard and /dashboard/collections ONLY;
- *   · the root layout deliberately carries no switcher (removed 2026-08-18, "No dropdowns") —
- *     `SwitcherTenantLogo` is a read-only indicator with no router at all;
- *   · `NavLinks` forwards the CURRENT view onto other routes; it never changes it;
- *   · there is no `app/billing-audit/layout.tsx`, so nothing else wraps this route.
- * Changing entity therefore means navigating to /dashboard*, switching there, and coming back —
- * a route change, which unmounts the workbench and every piece of panel state with it.
+ * That day is today. `TenantTabs` now renders on /billing-audit, and the premise is gone —
+ * `router.push('?view=…')` on the SAME pathname is a soft navigation, so the page re-renders
+ * with a new `view` prop and React keeps the panel MOUNTED, both override maps included.
  *
- * ── WHY THIS IS A TEST AND NOT A COMMENT ───────────────────────────────────────────────────
- * That is a ROUTING fact, not a guarantee the component makes about itself. `panel.tsx`'s
- * non-BXR branch is an early RETURN that leaves all state intact, so the day a tenant control
- * lands on this route the defect activates silently, with no type error and no failing
- * assertion anywhere. This file is the assertion. If it fails, the premise is gone: add the
- * entity to `cellKey`/`statusKey` in `overrides.ts` (and to the panel's `open-drawer` scope)
- * rather than deleting the test.
+ * ⚠ THE PREMISE WAS DISPROVED BY MEASUREMENT, NOT BY ARGUMENT, and the evidence is in this
+ * repo rather than in framework documentation:
+ *   · `cmd-explorer.tsx` (on /dashboard/collections, which has had the control all along) holds
+ *     `const [prevView, setPrevView] = useState(view); if (view !== prevView) { …reset… }` and
+ *     resets its refinement + facility/payer selections there. That is a SHIPPED fix for this
+ *     exact class of defect, and it would be unreachable dead code if a view change remounted.
+ *   · the same file puts `view` into an explicit `key=` on its AI panel to FORCE a remount —
+ *     redundant if a view change already produced one.
+ *   · `workbench.tsx` renders `<BillableDaysPanel view={view} …/>` with no `key`, so React
+ *     reconciles it in place.
  *
- * SOURCE-LEVEL by necessity — the claim is about which components exist on a route, which no
- * amount of rendering can observe. `tenant-tabs.test.tsx` uses the same style for the same reason.
+ * ── WHY THE KEYS AND NOT A STATE RESET ─────────────────────────────────────────────────────
+ * Resetting the import on an entity change (cmd-explorer's answer) would also close the hole,
+ * and it was rejected: a biller who imports under BXR, glances at Indigo and comes back would
+ * lose every unsaved override to a round trip that changed nothing. Scope-keyed entries survive
+ * that trip AND stay isolated, which is strictly better. See `overrides.ts`.
+ *
+ * ── WHY THIS IS BEHAVIOUR NOW, WHERE IT USED TO BE SOURCE-LEVEL ────────────────────────────
+ * The old claim was about which components exist on a route, which no amount of rendering can
+ * observe — hence a source scan. The new claim is about what a key does, which is ordinary
+ * executable behaviour. The two source-level pins that remain are the ones still genuinely
+ * unobservable: that the control IS on the route, and that the grid derives its scope from
+ * `view` rather than from the week alone.
  *
  * ⚠️ Must be .tsx — app/package.json collects `test/*.test.tsx` only; a .ts file here would
  * "pass" by never running.
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import {
+  adjustedBillableDays,
+  cellKey,
+  effectiveCodes,
+  rowHasOverride,
+  statusKey,
+  type CellOverrides,
+  type StatusOverrides,
+} from '../components/billing-audit/billable-days/overrides';
+import {
+  SCOPE_BXR_A,
+  SCOPE_BXR_B,
+  SCOPE_INDIGO_A,
+  SCOPE_INDIGO_B,
+  makeRow,
+} from './helpers/billableDays';
 
 const APP = path.resolve(import.meta.dirname, '..');
 const read = (rel: string): string => readFileSync(path.join(APP, rel), 'utf8');
 
-/** Every source file that renders as part of the /billing-audit route, plus the root layout. */
-function routeFiles(): string[] {
-  const dirs = ['app/billing-audit', 'components/billing-audit', 'components/billing-audit/billable-days'];
-  const out = ['app/layout.tsx'];
-  for (const d of dirs) {
-    const abs = path.join(APP, d);
-    if (!existsSync(abs)) continue;
-    for (const e of readdirSync(abs, { withFileTypes: true })) {
-      if (e.isFile() && /\.tsx?$/.test(e.name)) out.push(path.join(d, e.name));
-    }
-  }
-  return out;
-}
+/** Tuesday (index 1) is empty in the fixture, so setting it to `G` moves a count 1 → 2. */
+const TUESDAY = 1;
 
-const FIX = 'If a tenant control now lives on this route, put the entity in cellKey/statusKey (overrides.ts).';
+/**
+ * THE CATASTROPHIC CASE, made concrete. Row ids are per-import ORDINALS (`row-0`), so the same
+ * id denotes a DIFFERENT PERSON under a different tenant's import. `bxrClient` and `indigoClient`
+ * share the ordinal and nothing else — different LOC, different engine count — which is exactly
+ * the collision the entity half of the key exists to prevent.
+ */
+const bxrClient = makeRow({ id: 'row-0', loc: 'SYNTHETIC BXR IOP', billableDays: 1 });
 
-test('the Claims Desk route imports no TenantTabs — the only in-place ?view= control', () => {
-  // Matched on the MODULE PATH, not the identifier: `app/layout.tsx` names `<TenantTabs>` in a
-  // comment explaining where the switcher went, and a comment is not a render. A component can
-  // only render it by importing it, so the import is the honest signal.
-  for (const rel of routeFiles()) {
-    assert.equal(
-      /from\s+['"][^'"]*tenant-tabs['"]/.test(read(rel)),
-      false,
-      `${rel} imports TenantTabs. ${FIX}`,
-    );
-  }
+/**
+ * ⚠ INDIGO'S FIXTURE MUST BE INTERNALLY COHERENT OR THE LEAK ASSERTION GOES VACUOUS.
+ * `adjustedBillableDays` RECOMPUTES from the days array when an override is present, so
+ * `billableDays` has to equal the number of billable codes actually in `days` — otherwise the
+ * "leaked" value named below is a number the function cannot return, and `notEqual` passes no
+ * matter what. First draft set `billableDays: 3` on makeRow's default days (which carry exactly
+ * ONE billable code), so the leak recomputed to 2 while the test asserted `!== 4`: inert.
+ * Days 0/2/4 billable = 3, Tuesday deliberately EMPTY, capDays 5 for headroom so the recompute
+ * is not capped before it reaches 4.
+ */
+const indigoBase = makeRow({ id: 'row-0', loc: 'SYNTHETIC INDIGO PHP', capDays: 5 });
+const indigoClient = {
+  ...indigoBase,
+  billableDays: 3,
+  days: indigoBase.days.map((d) => (d.i === 2 || d.i === 4 ? { ...d, codes: ['I'], hrs: 3 } : d)),
+};
+
+/** An edit a biller made while the BXR tab was active, on week A. */
+const editedOnBxrA: CellOverrides = new Map([
+  [cellKey(SCOPE_BXR_A, bxrClient.id, TUESDAY), ['G'] as readonly string[]],
+]);
+const statusOnBxrA: StatusOverrides = new Map([
+  [statusKey(SCOPE_BXR_A, bxrClient.id), 'NEEDS BILLED' as const],
+]);
+
+test('an override made under BXR does not reach the SAME ORDINAL under Indigo', () => {
+  // `leaked` is the value the REAL regression produces: drop the entity from the scope and the
+  // BXR-written key collides with this lookup, so the recompute adds a phantom Tuesday to
+  // Indigo's three engine days → 4. Verified reachable (capDays is 5, so nothing caps it first)
+  // — that is what keeps this assertion live rather than vacuous. Asserted first, then the
+  // untouched engine count, because each catches a different failure: a leak, and a drift.
+  const leaked = indigoClient.billableDays + 1;
+  const got = adjustedBillableDays(indigoClient, editedOnBxrA, SCOPE_INDIGO_A);
+  assert.notEqual(got, leaked, "BXR's edit raised a different person's billable days under Indigo");
+  assert.equal(got, indigoClient.billableDays, 'Indigo count drifted from the engine without an edit');
 });
 
-test('nothing on the route links to /billing-audit with a DIFFERENT ?view=', () => {
-  // A <Link> to the same pathname with another view would be a soft navigation: the page
-  // re-renders with a new `view` prop and React keeps the panel MOUNTED, state and all. The one
-  // ?view=-bearing href on this route points at /billing-audit/facility-resolution — a different
-  // route — and forwards the CURRENT view rather than choosing one.
-  //
-  // The RBAC clamp redirect (`redirect(`/billing-audit?view=${view}`)`) is exempt and lines
-  // carrying it are skipped: it runs on the SERVER before this page renders, and it fires only
-  // to narrow an unentitled view back to an entitled one — it can never widen or switch entity.
-  for (const rel of routeFiles()) {
-    const offending = read(rel)
-      .split('\n')
-      .filter((line) => /['"`]\/billing-audit\?view=/.test(line) && !line.includes('redirect('));
-    assert.deepEqual(offending, [], `${rel} links to this route with an explicit view. ${FIX}`);
-  }
+test("the leaked cell's CODES do not surface under Indigo either", () => {
+  // adjustedBillableDays could be right while the grid still rendered the wrong codes in the
+  // cell — the count and the cell read the map separately, so both need pinning.
+  const codes = effectiveCodes(indigoClient, TUESDAY, editedOnBxrA, SCOPE_INDIGO_A);
+  assert.equal(codes.includes('G'), false, "BXR's 'G' is rendered in Indigo's Tuesday cell");
+  assert.deepEqual(codes, indigoClient.days[TUESDAY]!.codes, "Indigo's cell is not the engine's");
 });
 
-test('no file on the Claims Desk route navigates the router at all', () => {
-  // A same-pathname `router.push('?view=…')` would change the entity WITHOUT unmounting, which
-  // is the precise condition the key omission depends on not happening. Nothing on this route
-  // uses the router today, so the flat ban is both true and the cheapest thing to keep true.
-  for (const rel of routeFiles()) {
-    const src = read(rel);
-    assert.equal(/router\.(push|replace)\s*\(/.test(src), false, `${rel} navigates. ${FIX}`);
-    assert.equal(/useRouter\s*\(/.test(src), false, `${rel} takes a router. ${FIX}`);
-  }
-});
-
-test('the route has no layout of its own that could introduce one', () => {
+test('Indigo does not claim an edit it never had', () => {
   assert.equal(
-    existsSync(path.join(APP, 'app/billing-audit/layout.tsx')),
+    rowHasOverride(indigoClient, editedOnBxrA, SCOPE_INDIGO_A),
     false,
-    `a /billing-audit layout now exists and may render a tenant control. ${FIX}`,
+    'the "adjusted" badge would light on an untouched Indigo row',
   );
 });
 
-test('TenantTabs still lives only on the two /dashboard routes — the premise, stated positively', () => {
-  // A negative-only proof would also pass if TenantTabs had been deleted or renamed, at which
-  // point the reasoning above is stale for a different reason. Pin where it actually is.
-  assert.ok(read('app/dashboard/page.tsx').includes('TenantTabs'));
-  assert.ok(read('app/dashboard/collections/page.tsx').includes('TenantTabs'));
-  assert.ok(
-    read('components/dashboard/tenant-tabs.tsx').includes('router.push('),
-    'TenantTabs no longer navigates — re-derive how ?view= changes before trusting this file',
+test("a week STATUS set under BXR does not apply to Indigo's same ordinal", () => {
+  assert.equal(
+    statusOnBxrA.get(statusKey(SCOPE_INDIGO_A, indigoClient.id)),
+    undefined,
+    "BXR's NEEDS BILLED is set on a different person under Indigo",
+  );
+  // And the entry it WAS set on is still there — a key change that isolated by losing the
+  // override entirely would pass every assertion above.
+  assert.equal(statusOnBxrA.get(statusKey(SCOPE_BXR_A, bxrClient.id)), 'NEEDS BILLED');
+});
+
+test('all four (entity, week) scopes are mutually distinct for one row and day', () => {
+  // BOTH halves of the scope are load-bearing, so the honest claim is over the cross product,
+  // not over either axis alone. Four scopes → four distinct keys, or some pair collides.
+  const scopes = [SCOPE_BXR_A, SCOPE_BXR_B, SCOPE_INDIGO_A, SCOPE_INDIGO_B];
+  const cells = scopes.map((s) => cellKey(s, 'row-0', TUESDAY));
+  const statuses = scopes.map((s) => statusKey(s, 'row-0'));
+  assert.equal(new Set(cells).size, 4, `cell keys collide across scopes: ${cells.join(' , ')}`);
+  assert.equal(new Set(statuses).size, 4, `status keys collide across scopes: ${statuses.join(' , ')}`);
+});
+
+test('the BXR edit still works on its own scope — isolation is not achieved by dropping it', () => {
+  assert.deepEqual(effectiveCodes(bxrClient, TUESDAY, editedOnBxrA, SCOPE_BXR_A), ['G']);
+  assert.equal(rowHasOverride(bxrClient, editedOnBxrA, SCOPE_BXR_A), true);
+  assert.equal(adjustedBillableDays(bxrClient, editedOnBxrA, SCOPE_BXR_A), bxrClient.billableDays + 1);
+});
+
+/* ---------------------------------------------------------------------------
+ * The two source-level pins that remain — claims rendering cannot observe.
+ * ------------------------------------------------------------------------- */
+
+test('the tenant control IS on the Claims Desk route — the premise, stated positively', () => {
+  // The inverse of what this file asserted before 2026-08-31. Pinned positively so a reader who
+  // finds the header confusing can confirm which way round it is today, and so silently removing
+  // the control (which would make the entity keys harmless but the header wrong) is visible.
+  assert.match(
+    read('app/billing-audit/page.tsx'),
+    /from\s+['"][^'"]*tenant-tabs['"]/,
+    'the Claims Desk no longer renders TenantTabs — re-read this file’s header before trusting it',
   );
 });
 
-test('the panel still guards non-BXR by RETURNING, which is why the premise is load-bearing', () => {
-  // The guard does not clear state; it renders instead of it. Recorded here so a reader of this
-  // file can see why "the panel handles it" is not an answer.
-  const src = read('components/billing-audit/billable-days/panel.tsx');
-  assert.ok(src.includes("if (view !== 'bxr')"), 'the entity guard moved — re-derive this file');
-  assert.equal(
-    /view !== 'bxr'[\s\S]{0,400}dispatch\(/.test(src),
-    false,
-    'the guard now dispatches; if it clears state, this whole file can be simplified',
+test('the grid derives its override scope from `view`, not from the week alone', () => {
+  // The wiring is what makes every behavioural test above reach production. A refactor that
+  // dropped the `view` prop would leave these tests green (they call the functions directly)
+  // while the grid silently wrote week-only keys again.
+  const src = read('components/billing-audit/billable-days/grid.tsx');
+  assert.match(src, /overrideScope\(view, weekStart\)/, 'the grid no longer scopes keys by entity');
+  assert.match(
+    read('components/billing-audit/billable-days/panel.tsx'),
+    /view=\{view\}/,
+    'the panel no longer passes `view` to the grid, so the grid cannot scope by entity',
   );
 });

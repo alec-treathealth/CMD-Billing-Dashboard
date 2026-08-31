@@ -22,6 +22,7 @@ import {
   adjustedBillableDays,
   cellKey,
   isApproximate,
+  overrideScope,
   rowHasOverride,
 } from '../components/billing-audit/billable-days/overrides';
 
@@ -251,17 +252,19 @@ test('segmentOf puts every row in All, and adds review/past only when earned', (
 
 test('an un-edited row keeps the engine count exactly — overrides cannot cause drift', () => {
   const p = payload(true);
+  // Treat locations are BXR facilities, so the import scope is always ('bxr', the parsed week).
+  const scope = overrideScope('bxr', p.selectedWeek);
   const none = new Map<string, readonly string[]>();
   for (const r of p.rows) {
-    assert.equal(adjustedBillableDays(r, none, p.selectedWeek), r.billableDays);
-    assert.equal(rowHasOverride(r, none, p.selectedWeek), false);
-    assert.equal(isApproximate(r, none, p.selectedWeek), false);
+    assert.equal(adjustedBillableDays(r, none, scope), r.billableDays);
+    assert.equal(rowHasOverride(r, none, scope), false);
+    assert.equal(isApproximate(r, none, scope), false);
   }
 });
 
 test('overriding a cell to a billable code raises the count; N/B lowers it', () => {
   const p = payload(true);
-  const w = p.selectedWeek;
+  const w = overrideScope('bxr', p.selectedWeek);
   const row = p.rows.find((r) => r.days.some((d) => d.codes.length === 0) && r.billableDays < r.capDays);
   assert.ok(row, 'no row with a spare day and headroom under the cap');
   const emptyDay = row.days.find((d) => d.codes.length === 0)!;
@@ -277,7 +280,7 @@ test('overriding a cell to a billable code raises the count; N/B lowers it', () 
 
 test('the adjusted count can never exceed the cap, however many cells are overridden', () => {
   const p = payload(true);
-  const w = p.selectedWeek;
+  const w = overrideScope('bxr', p.selectedWeek);
   const row = p.rows[0]!;
   const all = new Map(row.days.map((d) => [cellKey(w, row.id, d.i), ['I'] as readonly string[]]));
   assert.equal(adjustedBillableDays(row, all, w), Math.min(7, row.capDays));
@@ -285,7 +288,7 @@ test('the adjusted count can never exceed the cap, however many cells are overri
 
 test('a multi-LOC row is flagged approximate once edited — the browser cannot reproduce A13', () => {
   const p = payload(true);
-  const w = p.selectedWeek;
+  const w = overrideScope('bxr', p.selectedWeek);
   const multi = p.rows.find((r) => r.multiLoc);
   if (!multi) return; // fixture may not contain one; the guard is still asserted below
   const ov = new Map([[cellKey(w, multi.id, 0), ['I'] as readonly string[]]]);

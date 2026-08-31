@@ -80,10 +80,29 @@ default.
 
 ## RBAC
 
-Gated and view-clamped exactly like Collections — not like the old
-deploy-protection-only `/claims` page. This plane is PHI: a plain `user` never
-gets the reveal control, entity scope comes from the `?view=` switcher, and reads
-are tenant-scoped server-side.
+Gated like Collections — not like the old deploy-protection-only `/claims` page.
+This plane is PHI: a plain `user` never gets the reveal control, entity scope
+comes from the `?view=` switcher, and reads are tenant-scoped server-side.
+
+⚠ **THE CLAMP IS ROUTE-SCOPED, WHICH IS NOT "exactly like Collections" — this
+line said it was until 2026-08-31.** `/billing-audit` offers **BXR + Indigo
+only** and defaults to **BXR**, via `app/lib/billing-audit/views.ts`; Collections
+clamps against the raw RBAC entitlement and defaults to `consolidated`. The desk
+has no cross-tenant plane, so a Consolidated tab would promise a screen nobody
+has specified, and `?view=consolidated` **clamps** to BXR rather than throwing.
+
+The offered set is the RBAC entitlement **∩** this screen's planes, so it can only
+ever NARROW what `allowedViewsFor` granted — an Indigo-scoped admin hand-editing
+`?view=bxr` still lands on `indigo`. That intersection is a **surface
+capability**, deliberately NOT an entitlement decision: `app/lib/rbac.ts` remains
+the only place the view→entitlement question is answered.
+
+The switcher itself is `TenantTabs` — the same component both /dashboard routes
+use, given a narrowed option set, never a fork. It landed on this route
+2026-08-31; **before that the route had no in-place tenant control at all, and
+that absence was load-bearing** for the Billable Days override keys, which is why
+those keys now carry the entity (`billable-days/overrides.ts`,
+`app/test/billableDaysEntityScope.test.tsx`).
 
 Audit data is **BXR-only** today. A non-BXR view resolves to an empty,
 fail-closed workbench until that tenant's plane lands — never a cross-tenant
