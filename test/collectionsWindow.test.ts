@@ -20,7 +20,9 @@ import {
 import {
   buildCmdExplorerQuery,
   buildCmdExplorerGroupedQuery,
+  buildCmdSearchSummaryQueries,
   cmdExplorerBaseConds,
+  type CmdExplorerFilter,
   type ParamAdder,
 } from '../src/collections/cmdExplorerQuery.js';
 import { FUTURE_PAYMENT_HORIZON_DAYS } from '../src/collections/cmdExplorer.js';
@@ -211,4 +213,51 @@ test('the override is only ever an EXTENSION for a trailing preset — never a n
     assert.equal(b.to, businessDayPlus(1, NOW), `${days}d upper bound is business-today + 1`);
     assert.ok(override > b.to, `${days}d: the override must EXTEND, not replace with something earlier`);
   }
+});
+
+// ── #299: THE GUARD IS THREADED FROM THE CALLER, NOT DEFAULTED IN THE BUILDER ──────────────────
+// Two of the three Collections builders are shared. Defaulting requireWindow on inside them would
+// break QUALIFY, which passes deliberately windowless filters (app/lib/qualify/core.ts's
+// `{ primary_payers: [p] }` — "a zero count means 'never billed, ever'"). Payer Intel is NOT the
+// hazard: it sets both bounds unconditionally (app/lib/payer-intel/core.ts:432-454).
+test('#299: the Collections builders REFUSE an open-ended window when opted in', () => {
+  const open = { from: '2026-06-01' } as const; // no `to`
+  for (const build of [
+    () => buildCmdExplorerQuery(null, open, SORT, 50, ENTITY, { requireWindow: true }),
+    () => buildCmdExplorerGroupedQuery(null, open, 'desc', 50, ENTITY, { requireWindow: true }),
+    () => buildCmdSearchSummaryQueries(open, ENTITY, undefined, { requireWindow: true }),
+  ]) {
+    assert.throws(build, /requireWindow needs BOTH from and to/);
+  }
+});
+
+test('#299: the SAME builders stay permissive when the option is omitted — Payer Intel and Qualify', () => {
+  // Qualify's real filter shape: windowless ON PURPOSE. It must keep building.
+  const qualify: CmdExplorerFilter = { primary_payers: ['AETNA'] };
+  assert.doesNotThrow(() => buildCmdSearchSummaryQueries(qualify, ENTITY));
+  assert.doesNotThrow(() => buildCmdExplorerQuery(null, qualify, SORT, 50, ENTITY));
+  assert.doesNotThrow(() => buildCmdExplorerGroupedQuery(null, qualify, 'desc', 50, ENTITY));
+});
+
+test('#299: PAYER INTEL SQL IS BYTE-IDENTICAL — the opt-in changes no bytes when both bounds exist', () => {
+  // Payer Intel's filter shape (app/lib/payer-intel/core.ts:432-454): both bounds, always.
+  const payerIntel = { from: '2026-06-01', to: '2026-08-31' } as const;
+
+  // Left: exactly what Payer Intel calls today — no opts argument at all.
+  // Right: the same call WITH the guard on. Identical bytes proves two things at once: the opt-in
+  // is behaviour-preserving, and Payer Intel could not have been broken by it either way.
+  const before = buildCmdExplorerQuery(null, payerIntel, SORT, 51, ENTITY);
+  const after = buildCmdExplorerQuery(null, payerIntel, SORT, 51, ENTITY, { requireWindow: true });
+  assert.equal(after.sql, before.sql, 'grid SQL must not shift by one byte');
+  assert.deepEqual(after.params, before.params, 'and neither may the bound params');
+
+  const sBefore = buildCmdSearchSummaryQueries(payerIntel, ENTITY);
+  const sAfter = buildCmdSearchSummaryQueries(payerIntel, ENTITY, undefined, { requireWindow: true });
+  assert.equal(sAfter.totals.sql, sBefore.totals.sql, 'summary totals SQL must not shift');
+  assert.deepEqual(sAfter.totals.params, sBefore.totals.params);
+  assert.equal(
+    sAfter.groups.primary_payer.sql,
+    sBefore.groups.primary_payer.sql,
+    'the payer-group query Payer Intel reads at loaders.ts:331 must not shift',
+  );
 });

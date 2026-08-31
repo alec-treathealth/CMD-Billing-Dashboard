@@ -328,6 +328,35 @@ export interface CmdExplorerCondOptions {
   requireWindow?: boolean;
 }
 
+/**
+ * What a CALLER of the three Collections builders may ask for.
+ *
+ * ⚠ DELIBERATELY THREADED FROM THE CALL SITE, NOT DEFAULTED INSIDE THE BUILDER (2026-08-31, #299).
+ * Two of the three builders are shared, and defaulting `requireWindow` on inside them breaks a
+ * consumer that is out of scope:
+ *
+ *   - `buildCmdExplorerQuery`        — also Payer Intel (app/lib/payer-intel/loaders.ts:369)
+ *   - `buildCmdSearchSummaryQueries` — also Payer Intel (loaders.ts:296, :331) AND the retired-
+ *     but-still-routable Qualify surface (app/lib/server.ts loadQualifyMatchSummary /
+ *     loadQualifyPatientCohort)
+ *   - `buildCmdExplorerGroupedQuery` — Collections only
+ *
+ * Qualify is the one that would actually THROW: app/lib/qualify/core.ts passes a windowless
+ * `{ primary_payers: [p] }` whose own docblock says the windowlessness IS the semantic ("a zero
+ * count means 'never billed, ever'"). The Qualify TAB was taken down 2026-08-17 and folded into
+ * Payer Intel, but taken down is not deleted — /qualify still renders by direct URL and that loader
+ * is still wired — so the hazard is live, not historical.
+ *
+ * ⚠ An earlier note in this repo blamed PAYER INTEL for this and was WRONG: Payer Intel sets BOTH
+ * bounds unconditionally (app/lib/payer-intel/core.ts:432-454), so it would not have thrown. The
+ * ~80 failing call sites that produced that diagnosis were TESTS passing windowless filters. Right
+ * symptom, wrong cause — corrected here so the next reader does not inherit it.
+ */
+export interface CmdExplorerBuilderOptions {
+  /** Assert a CLOSED window — see CmdExplorerCondOptions.requireWindow. Off unless asked. */
+  requireWindow?: boolean;
+}
+
 export function cmdExplorerBaseConds(
   filter: CmdExplorerFilter,
   entityIds: string[],
@@ -1216,6 +1245,7 @@ export function buildCmdExplorerQuery(
   sort: CmdExplorerSort,
   limit: number,
   entityIds: string[],
+  opts?: CmdExplorerBuilderOptions,
 ): { sql: string; params: unknown[] } {
   const params: unknown[] = [];
   const add: ParamAdder = (v) => {
@@ -1224,7 +1254,10 @@ export function buildCmdExplorerQuery(
   };
   // Tenant scope + the exact/window/substring filters (shared with the search summary). Every column
   // referenced here exists on the rollup, so the same conds apply unchanged.
-  const conds = cmdExplorerBaseConds(filter, entityIds, add, { resolveFacility: true });
+  const conds = cmdExplorerBaseConds(filter, entityIds, add, {
+    resolveFacility: true,
+    requireWindow: opts?.requireWindow === true,
+  });
 
   // Physical sort column (fixed literal from the map — allowed_amount → allowed_reliable).
   const col = CMD_EXPLORER_SORT_SQL[sort.column];
@@ -1491,6 +1524,7 @@ export function buildCmdSearchSummaryQueries(
   filter: CmdExplorerFilter,
   entityIds: string[],
   topN: number = CMD_SEARCH_TOP_N,
+  opts?: CmdExplorerBuilderOptions,
 ): {
   totals: { sql: string; params: unknown[] };
   groups: Record<CmdSearchGroupColumn, { sql: string; params: unknown[] }>;
@@ -1505,7 +1539,10 @@ export function buildCmdSearchSummaryQueries(
     // Opted in ALONGSIDE the grid and the grouped view (see CmdExplorerCondOptions): the summary
     // counts the rows the grid shows, so if one resolves a facility selection and the other does
     // not, the tile says one number and the table lists another.
-    const conds = cmdExplorerBaseConds(filter, entityIds, add, { resolveFacility: true });
+    const conds = cmdExplorerBaseConds(filter, entityIds, add, {
+      resolveFacility: true,
+      requireWindow: opts?.requireWindow === true,
+    });
     const where = ` where ${conds.join(' and ')}`;
     // CHARGE grain (0050 rollup), so counts are logical charges and sums are netted — the grid
     // below the summary still pages snapshot ROWS, which is why its copy says "posting rows".
@@ -2126,13 +2163,17 @@ export function buildCmdExplorerGroupedQuery(
   direction: 'asc' | 'desc',
   limit: number,
   entityIds: string[],
+  opts?: CmdExplorerBuilderOptions,
 ): { sql: string; params: unknown[] } {
   const params: unknown[] = [];
   const add: ParamAdder = (v) => {
     params.push(v);
     return `$${params.length}`;
   };
-  const conds = cmdExplorerBaseConds(filter, entityIds, add, { resolveFacility: true });
+  const conds = cmdExplorerBaseConds(filter, entityIds, add, {
+    resolveFacility: true,
+    requireWindow: opts?.requireWindow === true,
+  });
   const dir = direction === 'asc' ? 'asc' : 'desc';
   const cmp = direction === 'asc' ? '>' : '<';
 

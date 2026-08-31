@@ -68,10 +68,29 @@ test('there is no longer an unbounded window to fall back to', () => {
   // The boundary always assigns BOTH bounds — `to` via applyScheduledBound, which returns the
   // window's own upper bound unless the scheduled override is on.
   assert.match(actionsSrc, /applyScheduledBound/, 'the boundary must always assign an upper bound');
-  // The closed-window guard exists and is exercised; see test/collectionsWindow.test.ts. It is
-  // NOT switched on inside the shared builders — that reached Payer Intel, which is out of scope
-  // and calls buildCmdExplorerQuery with its own filter. See the PR body.
+  // The closed-window guard exists and is exercised; see test/collectionsWindow.test.ts.
+  //
+  // ⚠ THIS COMMENT BLAMED PAYER INTEL AND WAS WRONG (corrected 2026-08-31, #299). It said the
+  // guard could not be switched on inside the shared builders because that "reached Payer Intel,
+  // which is out of scope and calls buildCmdExplorerQuery with its own filter". Payer Intel sets
+  // BOTH bounds unconditionally (app/lib/payer-intel/core.ts:432-454), so it would never have
+  // thrown. The ~80 failing call sites that produced that diagnosis were TESTS passing windowless
+  // filters — right symptom, wrong cause, asserted with more confidence than the check supported.
+  //
+  // The REAL reason the default stays off: QUALIFY passes deliberately windowless filters —
+  // app/lib/qualify/core.ts's `{ primary_payers: [p] }`, whose own docblock says the
+  // windowlessness IS the semantic ("a zero count means 'never billed, ever'"), and the
+  // memberIdPrefixBidx cohort filter. The Qualify TAB was taken down 2026-08-17, but taken down is
+  // not deleted: /qualify still renders by URL and those loaders are still wired.
+  //
+  // Since #299 the guard IS on for Collections — threaded from the three Collections-only
+  // boundaries in app/lib/server.ts via CmdExplorerBuilderOptions, never defaulted in the builder.
   assert.match(querySrc, /requireWindow/, 'the closed-window guard exists');
+  assert.match(
+    querySrc,
+    /export interface CmdExplorerBuilderOptions/,
+    'the caller-threaded opts type must exist — defaulting requireWindow in the builder breaks Qualify',
+  );
 });
 
 // ── THE SCHEDULED OVERRIDE IS PRESETS-ONLY ─────────────────────────────────────────────────────

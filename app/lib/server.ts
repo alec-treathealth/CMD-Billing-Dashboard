@@ -2775,7 +2775,13 @@ async function loadCmdExplorerPage(
   // Payment Received DESC (most-recent payments first). The cursor continues strictly after the
   // previous page's last row; over-fetch one row to detect a next page without a count(*).
   const limit = CMD_EXPLORER_PAGE_SIZE + 1;
-  const { sql, params } = buildCmdExplorerQuery(cursor, filter, sort, limit, entityIds);
+  // ⚠ requireWindow: the Collections window must be CLOSED at both ends. Opted in HERE, at the
+  // Collections boundary, rather than defaulted inside the shared builder — see
+  // CmdExplorerBuilderOptions. Payer Intel and the retired-but-routable Qualify loaders call the
+  // same builders and omit this, keeping their own window semantics.
+  const { sql, params } = buildCmdExplorerQuery(cursor, filter, sort, limit, entityIds, {
+    requireWindow: true,
+  });
   const { rows } = await readerExecutor().query<CmdExplorerDbRecord>(sql, params);
   const hasMore = rows.length > CMD_EXPLORER_PAGE_SIZE;
   const page = (hasMore ? rows.slice(0, CMD_EXPLORER_PAGE_SIZE) : rows).map(toExplorerRow);
@@ -2802,7 +2808,13 @@ async function loadCmdExplorerGroupedPage(
   entityIds: string[],
 ): Promise<CmdExplorerGroupPage> {
   const limit = CMD_EXPLORER_PAGE_SIZE + 1;
-  const { sql, params } = buildCmdExplorerGroupedQuery(cursor, filter, direction, limit, entityIds);
+  // ⚠ requireWindow: the Collections window must be CLOSED at both ends. Opted in HERE, at the
+  // Collections boundary, rather than defaulted inside the shared builder — see
+  // CmdExplorerBuilderOptions. Payer Intel and the retired-but-routable Qualify loaders call the
+  // same builders and omit this, keeping their own window semantics.
+  const { sql, params } = buildCmdExplorerGroupedQuery(cursor, filter, direction, limit, entityIds, {
+    requireWindow: true,
+  });
   const { rows } = await readerExecutor().query<CmdExplorerGroupRow & { id: string }>(sql, params);
   const hasMore = rows.length > CMD_EXPLORER_PAGE_SIZE;
   const page = (hasMore ? rows.slice(0, CMD_EXPLORER_PAGE_SIZE) : rows).map((r) => ({
@@ -3053,7 +3065,13 @@ async function loadCmdSearchSummaryData(
   filter: CmdExplorerFilter,
   entityIds: string[],
 ): Promise<CmdSearchSummary> {
-  const { totals, groups, combo } = buildCmdSearchSummaryQueries(filter, entityIds);
+  // ⚠ requireWindow: the Collections window must be CLOSED at both ends. Opted in HERE, at the
+  // Collections boundary, rather than defaulted inside the shared builder — see
+  // CmdExplorerBuilderOptions. Payer Intel and the retired-but-routable Qualify loaders call the
+  // same builders and omit this, keeping their own window semantics.
+  const { totals, groups, combo } = buildCmdSearchSummaryQueries(filter, entityIds, undefined, {
+    requireWindow: true,
+  });
   const exec = readerExecutor();
   // All five aggregates fan out CONCURRENTLY over the same tenant-scoped WHERE — the (CPT, Rev)
   // combo query joins the existing Promise.all, so wall-clock stays ~one scan (they run in
