@@ -625,11 +625,30 @@ export function aggregateDailyDeposits(rows: CmdReportRow[], facilityCode: strin
  * instead of into next year.
  *
  * ACTIVE AT 14 since 2026-08-03. It shipped at 0 (inert) one commit earlier, because Overview and
- * Collections read the SAME rows through collections.daily_collections_resolved and a horizon
- * alone would have put near-future money on the Collections tab. The read-time split now exists
- * — see futurePaymentBound in daily.ts — so Collections bounds at today while Overview does not,
- * and ingesting these rows is safe. Setting this back to 0 is the correct kill switch if
- * forward-dated deposits ever turn out to be unreliable; nothing else needs reverting.
+ * the Collections DAILY path read the SAME rows through collections.daily_collections_resolved and
+ * a horizon alone would have put near-future money on the Collections tab. The read-time split now
+ * exists — see futurePaymentBound in daily.ts — and ingesting these rows is safe.
+ *
+ * ⚠ "COLLECTIONS" IS TWO SURFACES AND THIS DOCBLOCK USED TO CONFLATE THEM. It said "Collections
+ * bounds at today while Overview does not" until 2026-08-31 — true of the DAILY path, false of the
+ * EXPLORER GRID, which had no upper bound whatsoever until PR #298 (2026-08-30) and was quietly
+ * including these very rows in totals a reader takes as settled cash. CLAUDE.md points here and
+ * says to trust this note over itself, so the imprecision propagated rather than staying local.
+ *
+ *   - DAILY path (collections.daily_collections_resolved, daily.ts): bounds at `<= today`;
+ *     Overview opts out with include_future_payments: true. The bound is a UTC civil date.
+ *   - EXPLORER GRID (collections.cmd_explorer_charge_rollup): half-open [from, to) with
+ *     `to` = business-today + 1, resolved by applyDateWindow -> businessWindowBounds. The
+ *     "Include scheduled" toggle extends that bound to business-today + this constant + 1, for
+ *     TRAILING PRESETS ONLY — never for a custom range, where the user's own end date stands.
+ *     That is the one place this constant reaches a read path rather than the ingest.
+ *
+ * ⚠ The two use DIFFERENT CALENDARS — the daily bound is UTC, the grid anchors on
+ * America/Los_Angeles (businessDayIso) — so they disagree about "today" from ~17:00 Pacific until
+ * midnight. OBSERVED, not ruled. Do not assume it is deliberate.
+ *
+ * Setting this back to 0 is the correct kill switch if forward-dated deposits ever turn out to be
+ * unreliable; nothing else needs reverting.
  */
 export const FUTURE_PAYMENT_HORIZON_DAYS = 14;
 

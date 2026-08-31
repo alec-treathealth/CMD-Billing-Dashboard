@@ -83,9 +83,10 @@ export default async function FacilityResolutionPage({
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Facility Resolution</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Every &lsquo;No Facility&rsquo; charge, attributed by exact-evidence methods or worked
-          by hand. Manual assignments are append-only and fully audited; nothing here rewrites
-          ingest data.
+          Every &lsquo;No Facility&rsquo; charge, attributed by exact evidence &mdash; named in the
+          pull, or worked by hand &mdash; or inferred from the patient&rsquo;s other charges.
+          Inferred rows are marked as such. Manual assignments are append-only and fully audited;
+          nothing here rewrites ingest data.
         </p>
       </header>
       <FacilityResolutionView view={view} initialOverview={overview} initialQueue={queue} />

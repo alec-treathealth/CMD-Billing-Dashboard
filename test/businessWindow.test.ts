@@ -20,6 +20,7 @@ import { test } from 'node:test';
 import {
   BUSINESS_TZ,
   businessDayPlus,
+  nextBusinessDayStart,
   BUSINESS_YEAR_MAX,
   BUSINESS_YEAR_MIN,
   businessDayIso,
@@ -530,4 +531,58 @@ test('businessDayPlus: the range guard does NOT disturb any real caller', () => 
   assert.equal(businessDayPlus(-1, now), '2026-08-30');
   // The boundaries themselves remain reachable.
   assert.match(businessDayPlus(20_000, now), /^2081-/, 'well inside 2100 still works');
+});
+
+
+// ── #304: THE NEXT-ROLLOVER INSTANT ────────────────────────────────────────────────────────────
+// An ABSOLUTE epoch-ms instant, so the client never interprets a timezone. Every assertion below
+// checks the LOCAL wall clock of the returned instant, because "midnight in Los Angeles" is the
+// contract — a UTC hour would be a different claim and would silently pass under a fixed offset.
+const laWall = (ms: number): string =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).format(new Date(ms));
+
+test('#304: the rollover is always local MIDNIGHT, in both DST regimes', () => {
+  for (const iso of [
+    '2026-08-31T18:00:00Z', // PDT
+    '2026-01-15T18:00:00Z', // PST
+    '2026-03-07T20:00:00Z', // day before spring-forward
+    '2026-03-08T20:00:00Z', // the 23-hour day itself
+    '2026-10-31T20:00:00Z', // day before fall-back
+    '2026-11-01T20:00:00Z', // the 25-hour day itself
+  ]) {
+    const wall = laWall(nextBusinessDayStart(new Date(iso)));
+    assert.match(wall, /00:00:00$/, `${iso} must roll to local midnight, got ${wall}`);
+  }
+});
+
+test('#304: a fixed UTC offset would be WRONG — the two regimes differ by an hour', () => {
+  // The positive form of the DST assertion: if this ever collapses to one value, someone has
+  // hardcoded an offset and the flag will be an hour early or late for eight months of the year.
+  const pdt = new Date(nextBusinessDayStart(new Date('2026-08-31T18:00:00Z'))).getUTCHours();
+  const pst = new Date(nextBusinessDayStart(new Date('2026-01-15T18:00:00Z'))).getUTCHours();
+  assert.equal(pdt, 7, 'PDT midnight is 07:00Z');
+  assert.equal(pst, 8, 'PST midnight is 08:00Z');
+  assert.notEqual(pdt, pst, 'a fixed offset would make these equal');
+});
+
+test('#304: it keys off the BUSINESS day, not the UTC day', () => {
+  // 06:59Z on 08-31 is 23:59 PDT on 08-30 — the ops day has NOT rolled, so the next rollover is
+  // one minute away, not 24 hours. Anchoring on the UTC date would return the wrong day entirely.
+  const now = new Date('2026-08-31T06:59:00Z');
+  const at = nextBusinessDayStart(now);
+  assert.equal(businessDayIso(now), '2026-08-30', 'precondition: still the previous ops day');
+  assert.equal(at - now.getTime(), 60_000, 'exactly one minute to the boundary');
+});
+
+test('#304: the instant is always STRICTLY in the future — never a reload loop', () => {
+  // The client reloads when Date.now() >= this value. An instant at-or-before `now` would fire
+  // immediately, re-arm from the same load, and spin.
+  for (const iso of ['2026-08-31T07:00:00.000Z', '2026-08-31T06:59:59.999Z', '2026-03-08T09:00:00Z']) {
+    const now = new Date(iso);
+    assert.ok(nextBusinessDayStart(now) > now.getTime(), `${iso} must yield a future instant`);
+  }
 });

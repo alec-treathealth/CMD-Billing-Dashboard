@@ -722,6 +722,12 @@ export function CmdCollectionsExplorer({
 
   // Guards against out-of-order page responses (fast Prev/Next clicks).
   const reqRef = useRef(0);
+  /**
+   * The server's ABSOLUTE next-business-day-rollover instant (epoch ms), re-armed on every load.
+   * 0 until the first load lands — the server-seeded first page does not carry one, and 0 simply
+   * means "nothing to compare against yet", never "reload now".
+   */
+  const rolloverRef = useRef(0);
   const gridRef = useRef<HTMLDivElement>(null);
 
   // A "search" is now any active guided selection: facility tags, payer tags, or a PHI lookup.
@@ -1279,6 +1285,9 @@ export function CmdCollectionsExplorer({
           return;
         }
         setRows(isGrouped ? (res.rows as CmdExplorerGroupRow[]).map(toGridRow) : (res.rows as CmdExplorerRow[]));
+        // The server's absolute next-rollover instant. Re-armed on every load, so a reload driven by
+        // the rollover itself picks up the FOLLOWING boundary without any client-side date maths.
+        rolloverRef.current = res.nextRolloverAt;
         setHasNext(res.nextCursor !== null);
         setCursors((prev) => {
           const next = [...prev];
@@ -1294,6 +1303,59 @@ export function CmdCollectionsExplorer({
     },
     [view],
   );
+
+  /**
+   * RELOAD ONCE WHEN THE BUSINESS DAY ROLLS OVER (#304).
+   *
+   * `is_scheduled` and the default window's upper bound are both REQUEST-TIME data. A tab left open
+   * across midnight Pacific keeps rendering the booleans it was served, so a payment that has since
+   * settled still reads "scheduled" and newly-current payments never appear.
+   *
+   * ⚠ THE TIMER IS A HINT, NOT THE TRIGGER, and that is the whole design. Browsers throttle timers
+   * in background tabs, and a laptop asleep for nine hours fires one hours late — a bare setTimeout
+   * would either miss the boundary or fire at a 00:00 the user never saw. So three things can wake
+   * this (the timer, the tab becoming visible, the window regaining focus) and ALL THREE funnel
+   * through the same guard: reload only if `Date.now()` has actually passed the server's instant.
+   * That makes it idempotent — still ONE reload per crossing, never a poll.
+   *
+   * ⚠ NO businessDayIso() HERE, AND NO DATE PARSING AT ALL. The client compares two integers. The
+   * ops timezone stays server-side, which is the same reason is_scheduled is projected rather than
+   * derived (see cmdExplorerQuery.ts) — a Denver reader and a Los Angeles reader must flag the same
+   * rows.
+   *
+   * Reloads the FIRST page, deliberately, even if the user has paged deep: a keyset cursor is
+   * anchored to a row set the old window defined, and silently re-seating it across a day boundary
+   * would change which rows it means. loadPage's own reqRef guard makes a rollover reload lose to
+   * any newer user-initiated navigation, so this can never land stale over a fresh filter.
+   */
+  useEffect(() => {
+    const maybeReload = (): void => {
+      const at = rolloverRef.current;
+      if (at === 0 || Date.now() < at) return;
+      // Consume it, so two events firing together (timer + visibilitychange) reload once.
+      rolloverRef.current = 0;
+      setCursors([null]);
+      startTransition(() => {
+        void loadPage(0, null, filterArg, sort, grouped);
+      });
+    };
+
+    // setTimeout clamps to ~24.8 days; every rollover is far inside that, but a 0 ref means
+    // "unknown" and must not schedule anything.
+    const at = rolloverRef.current;
+    const timer =
+      at === 0 ? undefined : setTimeout(maybeReload, Math.max(0, at - Date.now()) + 1_000);
+    const onVisible = (): void => {
+      if (document.visibilityState === 'visible') maybeReload();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', maybeReload);
+    return () => {
+      if (timer !== undefined) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', maybeReload);
+    };
+  }, [loadPage, filterArg, sort, grouped, rows]);
 
   // (Re)load the first page whenever the filter OR sort changes (resets keyset pagination). The
   // fetch call is UNCHANGED — wrapping it in a transition just marks the refetch non-urgent so the

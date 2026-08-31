@@ -115,6 +115,7 @@ import {
   businessDayIso,
   businessDayPlus,
   businessWindowBounds,
+  nextBusinessDayStart,
   type BusinessWindow,
 } from '../../src/businessWindow.js';
 import { FUTURE_PAYMENT_HORIZON_DAYS } from '../../src/collections/cmdExplorer.js';
@@ -1244,16 +1245,20 @@ export async function loadClaimFacets(): Promise<ClaimFacetsResult> {
 export type { CmdExplorerSort, CmdExplorerCursor };
 
 export type CmdReportResult =
-  | { ok: true; rows: CmdExplorerRow[]; nextCursor: CmdExplorerCursor | null }
+  | { ok: true; rows: CmdExplorerRow[]; nextCursor: CmdExplorerCursor | null; nextRolloverAt: number }
   | { ok: false; error: string };
 
 /**
  * Filters for the "All Collections" grid (non-PHI). `facility` is a SET of facilities from the
  * explorer's own facility vocabulary (see loadCmdExplorerFacilities) — the multi-select dropdown
  * and a single-facility drill-down chip both feed it; an empty/absent array means "all facilities".
- * `year`/`month` window payment_received to that calendar month; `recencyDays` (7/14/30/90) is a
- * mutually-exclusive rolling window ending today, computed from the SERVER clock. All values are
- * re-validated here and bound as parameters in the reader.
+ *
+ * The WINDOW is either `windowDays` (a trailing preset, one of CMD_WINDOW_PRESETS) or an explicit
+ * `customFrom`/`customTo` pair — mutually exclusive, both resolved against the ops calendar by
+ * applyDateWindow. `includeScheduled` extends the upper bound for PRESETS ONLY. ⚠ This docblock
+ * described `year`/`month` and `recencyDays` (7/14/30/90) until 2026-08-31; PR #298 deleted both
+ * and this text was left behind — the window is never unbounded and there is no month picker.
+ * All values are re-validated here and bound as parameters in the reader.
  */
 export interface CmdReportFilter {
   facility?: string[];
@@ -1771,14 +1776,24 @@ export async function loadCmdReport(
   if (phi.phiIndex) readerFilter.phiIndex = phi.phiIndex;
   try {
     const page = await loadCmdExplorerNonPhi(safeCursor, readerFilter, safeSort, entityIds);
-    return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
+    // ⚠ THE ROLLOVER INSTANT IS COMPUTED OUTSIDE THE CACHED READ, ON PURPOSE (#304). It rides the
+    // RESULT envelope, never the filter: the filter is an unstable_cache key, so putting an
+    // absolute instant in it would mint a new cache entry on every request. It is also derived from
+    // a fresh clock read rather than the one applyDateWindow used — those differ by microseconds,
+    // and only the BOUNDS have to be coherent with businessToday, not this.
+    return { ok: true, rows: page.rows, nextCursor: page.nextCursor, nextRolloverAt: nextBusinessDayStart() };
   } catch {
     return { ok: false, error: 'The collections report could not be loaded right now.' };
   }
 }
 
 export type CmdGroupedResult =
-  | { ok: true; rows: CmdExplorerGroupRow[]; nextCursor: CmdExplorerCursor | null }
+  | {
+      ok: true;
+      rows: CmdExplorerGroupRow[];
+      nextCursor: CmdExplorerCursor | null;
+      nextRolloverAt: number;
+    }
   | { ok: false; error: string };
 
 /**
@@ -1845,7 +1860,12 @@ export async function loadCmdReportGrouped(
   if (phi.phiIndex) readerFilter.phiIndex = phi.phiIndex;
   try {
     const page = await loadCmdExplorerGroupedNonPhi(safeCursor, readerFilter, safeDirection, entityIds);
-    return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
+    // ⚠ THE ROLLOVER INSTANT IS COMPUTED OUTSIDE THE CACHED READ, ON PURPOSE (#304). It rides the
+    // RESULT envelope, never the filter: the filter is an unstable_cache key, so putting an
+    // absolute instant in it would mint a new cache entry on every request. It is also derived from
+    // a fresh clock read rather than the one applyDateWindow used — those differ by microseconds,
+    // and only the BOUNDS have to be coherent with businessToday, not this.
+    return { ok: true, rows: page.rows, nextCursor: page.nextCursor, nextRolloverAt: nextBusinessDayStart() };
   } catch {
     return { ok: false, error: 'The collections report could not be loaded right now.' };
   }
