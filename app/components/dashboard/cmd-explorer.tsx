@@ -122,6 +122,9 @@ import {
   type GridViewRow,
 } from '@/lib/actions';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../../src/collections/cmdExplorer';
+// The Facility cell lives in its own PURE module so the hermetic render suite can assert it
+// directly — this file is a hooks-and-effects client island that renderToStaticMarkup cannot run.
+import { FacilityCell } from './facility-cell';
 import { deriveGridLayout, isAutoGridView } from '../../../src/collections/gridViewLayout';
 import { facilityCodesForEntity } from '../../../src/collections/cmdCustomers';
 import { INDIGO_ENTITY_ID } from '../../../src/tenants';
@@ -280,6 +283,12 @@ function toGridRow(g: CmdExplorerGroupRow): GridRow {
     pct_allowed: g.pct_allowed,
     pct_paid: g.pct_paid,
     employer_name: g.employer_name,
+    // 0086 attribution rides through unchanged — the grouped query resolves it on the group's
+    // REPRESENTATIVE row, which is exact because facility_alias is functionally dependent on the
+    // group key (measured; see the join comment in buildCmdExplorerGroupedQuery). So a group renders
+    // the same Facility cell its lines would.
+    facility_resolved: g.facility_resolved,
+    facility_method: g.facility_method,
     ingested_at: '',
     __lines: g.line_count,
     __chargeDateEnd: g.charge_date_end,
@@ -2107,7 +2116,11 @@ export function CmdCollectionsExplorer({
                                 : undefined
                           }
                         >
-                          {cellText(c, row)}
+                          {c === 'facility' ? (
+                            <FacilityCell row={row} fallback={cellText(c, row)} />
+                          ) : (
+                            cellText(c, row)
+                          )}
                         </TableCell>
                       ))}
                     </TableRow>

@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import {
   likeContains,
   buildCmdExplorerQuery,
+  buildCmdExplorerGroupedQuery,
+  cmdExplorerBaseConds,
   buildCmdSearchSummaryQueries,
   buildCmdFacilityOptionsQuery,
   buildQualifyFacilityOptionsQuery,
@@ -187,12 +189,18 @@ test('facility multi-select + exact cpt/payer refinements are each bound', () =>
     primary_payer: 'Aetna',
   };
   const { sql, params } = buildCmdExplorerQuery(null, filter, SORT, 51, ENTITY);
-  // facility is now set-membership (multi-select), bound as ONE array param
+  // facility is set-membership (multi-select), bound as ONE array param and REFERENCED THREE TIMES
+  // by the resolution-aware predicate (2026-08-30) — the raw-cell branch, the label→code translation
+  // and the still-unresolved branch all read the same $n. Asserting the BINDINGS rather than fixed
+  // param numbers: $3/$4 moved when the resolution branches added their own binds, and pinning
+  // positions here would make every future predicate change look like a regression.
   assert.match(sql, /facility = any\(\$2::text\[\]\)/);
-  assert.match(sql, /cpt_code = \$3/);
-  assert.match(sql, /primary_payer = \$4/);
   assert.deepEqual(params[1], ['DALLAS MENTAL HEALTH LLC']);
-  assert.deepEqual(params.slice(2, 4), ['90837', 'Aetna']);
+  const cptParam = sql.match(/cpt_code = \$(\d+)/)?.[1];
+  const payerParam = sql.match(/primary_payer = \$(\d+)/)?.[1];
+  assert.ok(cptParam !== undefined && payerParam !== undefined, 'both exact refinements are emitted');
+  assert.equal(params[Number(cptParam) - 1], '90837');
+  assert.equal(params[Number(payerParam) - 1], 'Aetna');
   assertAllBound(sql, params);
 });
 
@@ -918,7 +926,7 @@ test('grid: employer comes from a LEFT JOIN on the base table, never from the ro
   const { sql, params } = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
   // the join is LEFT (an INNER would silently drop grid rows whose base row is missing)
   assert.match(sql, /left join collections\.cmd_explorer_rows e on e\.id = p\.id/);
-  assert.match(sql, /select p\.\*, e\.employer_name from \(/);
+  assert.match(sql, /select p\.\*, e\.employer_name, fr\.facility_alias as facility_resolved, fr\.method as facility_method from \(/);
   // the rollup must NOT be asked for a column it does not have
   assert.doesNotMatch(sql, /t\.employer_name/, 'the rollup has no employer column and never will');
   assertAllBound(sql, params);
@@ -1027,11 +1035,137 @@ test('a text sort still keysets: the cursor compares the same column it orders b
   // Text columns page by string comparison. If the boundary compared a different column than the
   // ORDER BY, paging would skip or repeat rows silently — no error, just missing charge lines.
   const { sql, params } = buildCmdExplorerQuery(
-    { id: 42, value: 'LONESTAR MENTAL HEALTH' }, {}, { column: 'facility', direction: 'desc' }, 50, ENTITY,
+    { id: 42, value: 'AETNA' }, {}, { column: 'primary_payer', direction: 'desc' }, 50, ENTITY,
   );
-  assert.match(sql, /facility < \$\d+ or \(facility = \$\d+ and id < \$\d+\) or facility is null/);
-  assert.ok(params.includes('LONESTAR MENTAL HEALTH'), 'cursor value is BOUND, never interpolated');
+  assert.match(sql, /primary_payer < \$\d+ or \(primary_payer = \$\d+ and id < \$\d+\) or primary_payer is null/);
+  assert.ok(params.includes('AETNA'), 'cursor value is BOUND, never interpolated');
   assert.ok(params.includes(42));
+});
+
+// ── FACILITY RESOLUTION FALLBACK (migration 0086, 2026-08-30) ────────────────────────────────────
+//    The grid's Facility cell displays coalesce(facility_alias, facility). RULING 4: "the facility
+//    filter must resolve on the same value the grid displays — selecting a facility and reading its
+//    rows must agree." These tests pin that agreement at the SQL level, in both directions.
+
+test('resolution: the grid PROJECTS the 0086 attribution, joined after the LIMIT', () => {
+  const { sql } = buildCmdExplorerQuery(null, {}, SORT, 50, ENTITY);
+  assert.match(sql, /fr\.facility_alias as facility_resolved/);
+  assert.match(sql, /fr\.method as facility_method/);
+  // AFTER the paged subquery, alongside the employer join — 50 unique-index lookups, not a hash
+  // join over the tenant slice, and NOT inside the sort input.
+  assert.match(sql, /\) p left join collections\.cmd_explorer_rows e on e\.id = p\.id left join collections\.cmd_facility_resolution fr on fr\.id = p\.id/);
+  // LEFT, never INNER: 0086 covers the placeholder population only, so an inner join would delete
+  // the entire book except those 11,446 charges.
+  assert.doesNotMatch(sql, /inner join collections\.cmd_facility_resolution/);
+  // And the RAW value is still projected — resolution never overwrites it.
+  assert.match(sql, /t\.facility,/);
+});
+
+test('resolution: the projection join is OUTSIDE the paged subquery, so the sort never widens', () => {
+  // This is the performance contract, not a style point. The pre-LIMIT sort already spills on the
+  // consolidated scope (external merge, Disk 4,544/4,528 kB, 46,636 buffers @ 90d). If the
+  // resolution join ever migrates inside `p`, that sort gains two text columns and the spill grows.
+  const { sql } = buildCmdExplorerQuery(null, {}, SORT, 50, ENTITY);
+  const inner = sql.slice(sql.indexOf('from (') , sql.indexOf(') p left join'));
+  assert.doesNotMatch(inner, /cmd_facility_resolution/, 'no resolution join inside the paged subquery');
+  assert.doesNotMatch(inner, /facility_alias/, 'and the sort input carries no resolved column');
+});
+
+test('ruling 4: selecting a facility returns the charges 0086 ATTRIBUTED to it, not just CMD-named ones', () => {
+  const { sql, params } = buildCmdExplorerQuery(
+    null, { facility: ['TREAT MENTAL HEALTH WASHINGTON LLC'] }, SORT, 50, ENTITY,
+  );
+  // Branch 2: the selected LABEL is translated to a facility CODE and matched against the 0086
+  // alias. The two sides speak different namespaces — the dropdown emits CMD display text, the
+  // matview stores codes — so a plain equality here would silently match nothing.
+  assert.match(sql, /id in \(select fr\.id from collections\.cmd_facility_resolution fr/);
+  assert.match(sql, /upper\(fe\.facility_name\) = upper\(s\.label\)/);
+  assert.match(sql, /upper\(a\.facility_text\) = upper\(s\.label\)/);
+  // Set-valued in BOTH directions on purpose: one code can carry several CMD spellings (LSMH is
+  // live proof — 'LONESTAR MENTAL HEALTH' and 'LONESTAR MENTAL HEALTH LLC' both map to it), so
+  // selecting either spelling must reach the same resolved rows. unnest() over the whole array.
+  assert.match(sql, /from unnest\(\$\d+::text\[\]\) as s\(label\)/);
+  assert.deepEqual(params[1], ['TREAT MENTAL HEALTH WASHINGTON LLC']);
+  assertAllBound(sql, params);
+});
+
+test('ruling 4, the other direction: selecting “No Facility” returns only the STILL-unresolved rows', () => {
+  // The half that is easy to forget. Without branch 3, a charge the grid shows as 'TREAT_WA · Manual'
+  // would still be returned by a 'No Facility' selection — the grid and its filter disagreeing in
+  // the opposite direction. Measured 2026-08-30: 6,064 of 11,446 placeholder charges are unresolved.
+  const { sql, params } = buildCmdExplorerQuery(null, { facility: ['No Facility'] }, SORT, 50, ENTITY);
+  assert.match(sql, /id not in \(select fr2\.id from collections\.cmd_facility_resolution fr2/);
+  assert.match(sql, /fr2\.facility_alias is not null/);
+  // ⚠ UNCORRELATED anti-set, NOT `not exists (… where fr2.id = id)`. These conds emit UNQUALIFIED
+  // column names, so inside a subquery a bare `id` binds to the INNER relation — the correlation
+  // would degrade to `fr2.id = fr2.id`, always true, and the branch would match nothing.
+  assert.doesNotMatch(sql, /where fr2\.id = id/);
+  assert.ok(params.includes('No Facility'), 'the placeholder is BOUND, never interpolated');
+  assertAllBound(sql, params);
+});
+
+test('resolution: the raw-cell branch excludes the placeholder so the three branches partition cleanly', () => {
+  const { sql } = buildCmdExplorerQuery(null, { facility: ['NASHVILLE MENTAL HEALTH LLC'] }, SORT, 50, ENTITY);
+  // Branch 1 must not fire on a placeholder row, or it would short-circuit branches 2 and 3 and
+  // re-admit every resolved charge to a 'No Facility' selection.
+  assert.match(sql, /\(facility <> \$\d+ and facility = any\(\$\d+::text\[\]\)\)/);
+});
+
+test('resolution: an EMPTY facility array is still no restriction at all', () => {
+  // The empty-array discipline the rest of this builder relies on. `= any(ARRAY[]::text[])` matches
+  // NOTHING, so an empty selection must omit the condition entirely rather than emit a resolved one.
+  const { sql } = buildCmdExplorerQuery(null, { facility: [] }, SORT, 50, ENTITY);
+  // Scoped to the paged subquery: the PROJECTION join always appears in the outer query, so a
+  // whole-string match would be asserting the wrong thing. It is the PREDICATE that must be absent.
+  const inner = sql.slice(sql.indexOf('from ('), sql.indexOf(') p left join'));
+  assert.doesNotMatch(inner, /facility = any/);
+  assert.doesNotMatch(inner, /cmd_facility_resolution/);
+});
+
+test('resolution: Qualify and Payer Intel do NOT opt in — the default predicate is unchanged', () => {
+  // The fork guard, from this side. cmdExplorerBaseConds is shared with two surfaces that have
+  // their own ruled treatment of the placeholder (qualifyFacilityPlaceholder.ts). Default opts must
+  // reproduce the pre-2026-08-30 SQL exactly.
+  const params: unknown[] = [];
+  const add = (v: unknown) => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+  const conds = cmdExplorerBaseConds({ facility: ['NASHVILLE MENTAL HEALTH LLC'] }, ENTITY, add).join(' and ');
+  assert.match(conds, /facility = any\(\$2::text\[\]\)/);
+  assert.doesNotMatch(conds, /cmd_facility_resolution/);
+});
+
+test('grouped mode: the attribution rides on the representative row, NEVER in the group key', () => {
+  const { sql } = buildCmdExplorerGroupedQuery(null, {}, 'desc', 50, ENTITY);
+  assert.match(sql, /left join collections\.cmd_facility_resolution fr on fr\.id = g\.id/);
+  assert.match(sql, /fr\.facility_alias as facility_resolved/);
+  // ⚠ THE GROUP KEY IS UNTOUCHED, and that is a ruling, not an implementation detail: `t.facility`
+  // sits in a pre-LIMIT sort that already spills, and widening it trades a measured regression for
+  // a cosmetic gain. This is sound only because facility_alias is functionally dependent on the
+  // group key — MEASURED 2026-08-30 across all 3,023 placeholder groups: 0 with >1 distinct alias,
+  // 0 with >1 distinct method, 0 mixing resolved and unresolved lines.
+  const groupBy = sql.slice(sql.indexOf('group by'), sql.indexOf('order by t.payment_received'));
+  assert.doesNotMatch(groupBy, /facility_alias|facility_resolved|fr\./);
+  assert.match(groupBy, /t\.facility/, 'still groups on the RAW value');
+});
+
+test('facility sorts on the RAW CMD column, never on the 0086-resolved display value', () => {
+  // PINS AN ACCEPTED DIVERGENCE (ruled 2026-08-30), so that "fixing" it is a deliberate act rather
+  // than a drive-by. The cell displays coalesce(<facility_alias>, facility); the ORDER BY binds the
+  // raw column. Raw == displayed for every charge CMD named, and differs only inside the
+  // 'No Facility' bucket — where every such row is rendered with a resolution pill, so the reader
+  // can see which rows are the exception.
+  //
+  // The reason it is not the displayed value is PERFORMANCE, not preference: that would put a
+  // joined text column into a pre-LIMIT sort which already spills on the consolidated scope
+  // (external merge, Disk 4,544/4,528 kB, 46,636 buffers @ 90d). Gated on the per-entity UNION ALL
+  // rewrite named in cmdExplorerBaseConds.
+  const { sql } = buildCmdExplorerQuery(null, {}, { column: 'facility', direction: 'asc' }, 50, ENTITY);
+  assert.match(sql, /order by t\.facility asc nulls last, t\.id asc/, 'binds the raw rollup column');
+  // And it must NOT have quietly started ordering by the resolved alias.
+  assert.doesNotMatch(sql, /order by t\.facility_alias/);
+  assert.doesNotMatch(sql, /order by (?:coalesce|fr\.)/);
 });
 
 test('the three PHI columns are NOT sortable — the rollup has only blind indexes for them', () => {

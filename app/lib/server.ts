@@ -4213,5 +4213,23 @@ export async function saveFacilityAssignmentsAndRefresh(input: {
   const written = Number(res.rows[0]?.save_facility_assignments ?? 0);
   await exec.query('select collections.refresh_facility_resolution()', []);
   revalidateTag(FACILITY_RESOLUTION_TAG);
+  // ⚠ AND THE COLLECTIONS GRID — a SECOND tag, because they are genuinely different caches and
+  // busting one does not touch the other.
+  //
+  // This is the originally reported symptom, in one line. Since 2026-08-30 the Collections
+  // Facility cell falls back to this matview's attribution, so an assignment saved here CHANGES
+  // WHAT THAT GRID RENDERS. But the grid's entries are `unstable_cache(..., { revalidate: 900,
+  // tags: ['cmd-explorer'] })` (loadCmdExplorerNonPhi / loadCmdExplorerGroupedNonPhi), and
+  // FACILITY_RESOLUTION_TAG is 'facility-resolution' — a different string. Without this call the
+  // operator assigns a facility, the workbench updates immediately, and the grid keeps showing
+  // 'No Facility' for up to FIFTEEN MINUTES with no way to force it. That reads as "the assignment
+  // didn't work", which is exactly the failure this whole change set out to fix.
+  //
+  // One literal covers both grid modes: the row and grouped caches share the 'cmd-explorer' tag.
+  //
+  // SCOPED TO THE WRITE PATH ONLY, deliberately. The hourly :45 cron ALSO refreshes this matview
+  // and busts NEITHER tag — that gap is real but it is the freshness-watermark follow-up, not this
+  // line. Here we know a human just changed attribution and is waiting to see it.
+  revalidateTag('cmd-explorer');
   return written;
 }
