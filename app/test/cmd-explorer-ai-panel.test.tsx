@@ -1,5 +1,5 @@
 /**
- * Source-level guards for the Collections dual-mode green cards + streaming AI analysis panel.
+ * Source-level guards for the Collections consolidated header cards + streaming AI analysis panel.
  *
  * A true render/import test of cmd-explorer.tsx isn't possible under node:test — its import graph
  * pulls @/lib/actions → @/lib/access, which calls the RSC `cache()` and crashes the runtime (see
@@ -27,10 +27,20 @@ test('the two recharts line charts are gone (curves deleted from the UI)', () =>
   assert.match(explorerSrc, /CohortDrilldownPanel/, 'click-to-drilldown stays');
 });
 
-test('green cards render beneath the money tiles, dual-mode', () => {
-  // Money tiles → then the dual-mode YieldCardsPanel, inside SearchSummaryPanel's body.
-  assert.match(explorerSrc, /StatTile label="Patient Balance"[\s\S]{0,400}<YieldCardsPanel/, 'cards render below the tiles');
-  assert.match(explorerSrc, /mode: 'cohort'[\s\S]{0,200}mode: 'selection'/, 'YieldCardsPanel is dual-mode');
+test('consolidated header cards: dollars folded into the % cards, cohort card mode retired', () => {
+  // The separate CHARGED / INSURANCE PAID / PATIENT BALANCE tile row is gone — each dollar total
+  // now rides inside its percentage card (2026-08-31 consolidation), from the SAME tile aggregate.
+  assert.doesNotMatch(explorerSrc, /StatTile label="Patient Balance"/, 'tile row folded into the cards');
+  assert.match(
+    explorerSrc,
+    /<YieldCardsPanel[\s\S]{0,300}money=\{\{ charged: s\.total_charge, allowed: s\.total_allowed, paid: s\.total_paid, balance: s\.total_balance \}\}/,
+    'cards carry the tile-aggregate dollars — no new query',
+  );
+  // The header cards no longer switch to cohort mode (the prop and its plumbing are deleted)…
+  assert.doesNotMatch(explorerSrc, /cohortYield/, 'cohort card mode retired');
+  // …but the AI read still analyzes the COHORT yield when a prefix cohort resolves — the AI
+  // payload is deliberately untouched by the card consolidation (WP2 constraint, 2026-08-31).
+  assert.match(explorerSrc, /mode: 'cohort',[\s\S]{0,60}yield_pct: c\.totals!/, 'AI payload cohort mode intact');
 });
 
 test('AI panel is server-action-only, streamed, and invalidated on filter/search change', () => {
