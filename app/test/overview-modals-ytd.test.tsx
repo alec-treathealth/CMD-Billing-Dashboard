@@ -45,6 +45,10 @@ test('YTD gross joined into the All Facilities table from the KPI rows — no fe
   assert.match(kpisSrc, /const ytdByKey = new Map\(\s*\n?\s*kpis\.by_facility\.map/, 'client-side join on the loaded KPI rows');
   assert.match(kpisSrc, /<th className="num">YTD \{currentYear \?\? ''\} gross<\/th>/, 'YTD column present');
   assert.match(kpisSrc, /\{r\.ytd != null \? money\(r\.ytd\) : '—'\}/, 'missing YTD renders as —, never 0');
+  // The TOTALS cell must go '—' the moment ANY visible row lacks YTD — a coerced partial sum
+  // formatted as money is the silently-wrong-number class (review finding, PR #311).
+  assert.match(kpisSrc, /acc\.ytd === null \|\| r\.ytd === null \? null : acc\.ytd \+ r\.ytd/, 'null poisons the YTD total');
+  assert.match(kpisSrc, /\{totals\.ytd != null \? money\(totals\.ytd\) : '—'\}/, 'a partial YTD total renders —');
   // No new loader call was added to this file by the YTD work (the loaders it had are unchanged).
   assert.doesNotMatch(kpisSrc, /loadCollectionsYtd|loadYtd/, 'no new fetch for YTD');
 });
@@ -55,9 +59,12 @@ test('month-chart tooltip carries YTD as context only — never a bar segment', 
   assert.doesNotMatch(chartSrc, /dataKey="ytd"[^_]/, 'ytd is never charted as a series on the month chart');
 });
 
-test('YTD chart defaults to top-N with an accessible expand', () => {
+test('YTD chart defaults to top-N with an expand control — STRUCTURAL wiring only', () => {
   assert.match(chartSrc, /const YTD_TOP_N = 12;/);
   assert.match(chartSrc, /rows\.slice\(0, YTD_TOP_N\)/, 'default view is the top-N ranking');
-  assert.match(chartSrc, /aria-expanded=\{showAll\}/, 'expand state is announced');
-  assert.match(chartSrc, /top \$\{visible\.length\} facilities of \$\{rows\.length\}/, 'img label names the truncation');
+  // Structural assertions only: these prove the attributes are WIRED, deliberately not that
+  // anything is ANNOUNCED — what a screen reader announces is browser-verified per the repo's
+  // jsdom boundary (CLAUDE.md) and compliance rule 2726594, never claimed from source regexes.
+  assert.match(chartSrc, /aria-expanded=\{showAll\}/, 'aria-expanded attribute is wired to the toggle state');
+  assert.match(chartSrc, /top \$\{visible\.length\} facilities of \$\{rows\.length\}/, 'the role=img aria-label string includes the truncation');
 });

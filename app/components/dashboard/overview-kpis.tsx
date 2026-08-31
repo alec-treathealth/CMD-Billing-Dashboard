@@ -1297,9 +1297,12 @@ function AllFacilitiesTable({
           checks: acc.checks + r.checks,
           eft: acc.eft + r.eft,
           gross: acc.gross + r.gross,
-          ytd: acc.ytd + (r.ytd ?? 0),
+          // Null YTD means "no KPI row for this facility", not zero — coercing it would render a
+          // PARTIAL sum as complete money (review finding, PR #311; same missing≠zero rule as
+          // #246). Any null row nulls the total, and the cell then shows '—' like the rows do.
+          ytd: acc.ytd === null || r.ytd === null ? null : acc.ytd + r.ytd,
         }),
-        { checks: 0, eft: 0, gross: 0, ytd: 0 },
+        { checks: 0, eft: 0, gross: 0, ytd: 0 as number | null },
       ),
     [rows],
   );
@@ -1489,7 +1492,7 @@ function AllFacilitiesTable({
                 <td className="num">{money(totals.checks)}</td>
                 <td className="num">{money(totals.eft)}</td>
                 <td className="num">{money(totals.gross)}</td>
-                <td className="num">{money(totals.ytd)}</td>
+                <td className="num">{totals.ytd != null ? money(totals.ytd) : '—'}</td>
               </tr>
             </tbody>
           </table>

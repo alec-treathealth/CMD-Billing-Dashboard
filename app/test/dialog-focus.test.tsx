@@ -155,6 +155,39 @@ test('Tab CYCLES inside the modal instead of escaping to the page behind it (SC 
   outside.remove();
 });
 
+test('Shift+Tab from the JUST-OPENED dialog stays inside — the container-focus path (PR #311)', async (t) => {
+  // The hook focuses the tabIndex={-1} CONTAINER on open, and that container is excluded from the
+  // FOCUSABLE list — so before this fix the boundary checks never matched it and the very first
+  // Shift+Tab walked out of the modal into the page behind it. The prior test above starts by
+  // manually focusing `first`, which is exactly why it could not catch this.
+  makeOpener(t);
+  await mount(t, <VobModal open query="AETNA" onClose={() => {}} />);
+  const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+  assert.equal(document.activeElement, dialog, 'precondition: the container itself holds focus on open');
+
+  const focusable = Array.from(
+    dialog.querySelectorAll<HTMLElement>(
+      'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])',
+    ),
+  );
+  assert.ok(focusable.length >= 2, 'this dialog has controls for the routing to be observable');
+
+  pressKey('Tab', { shiftKey: true });
+  assert.equal(
+    document.activeElement,
+    focusable[focusable.length - 1]!,
+    'Shift+Tab from the container routes to the LAST control instead of escaping the dialog',
+  );
+
+  dialog.focus();
+  pressKey('Tab');
+  assert.equal(
+    document.activeElement,
+    focusable[0]!,
+    'Tab from the container routes deterministically to the FIRST control',
+  );
+});
+
 test('the harness itself is not vacuous — a dialog that never opens takes no focus', async (t) => {
   // The failure mode this guards: a harness where `act()` silently no-ops would make every
   // assertion above pass for the wrong reason. If focus moved here, the tests are measuring
