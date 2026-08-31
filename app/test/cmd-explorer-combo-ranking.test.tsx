@@ -34,6 +34,19 @@ test('ranking explainer copy renders visibly (not hover-only)', () => {
   assert.match(explorerSrc, /\{COMBO_RANKING_EXPLAINER\}/, 'explainer rendered from the shared constant');
 });
 
+test('the explainer NAMES the candidate set — the server truncates by charge before we rank', () => {
+  // The rows arrive already limited to the highest-charge combos (order by charge desc, limit
+  // CMD_SEARCH_TOP_N), and S is not monotone in charged, so a bare "ranked by realized dollars"
+  // claim would be false about which combos are on screen. The caption must scope itself.
+  const src = readFileSync(join(here, '../../src/collections/comboRanking.ts'), 'utf8');
+  assert.match(src, /highest-charge combos/, 'the caption names the candidate set');
+  assert.match(
+    src,
+    /ranked by recent realized dollars, with a boost for combos that earn more per line/,
+    'the ruled wording survives inside the scoped sentence',
+  );
+});
+
 test('drill-down behavior is byte-identical — same handler, same values, same keyboard path', () => {
   // The row's activation still calls onDrill with the SERVER row's own codes.
   assert.match(explorerSrc, /onClick=\{drillable \? \(\) => onDrill\(g\.cpt as string, g\.revenue as string\) : undefined\}/);

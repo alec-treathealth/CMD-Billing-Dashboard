@@ -40,9 +40,21 @@ export const COMBO_RECENCY_HALF_LIFE_DAYS = 45;
 /** Below this many lines in the window, a facility gets "Insufficient data" and NO band. */
 export const CONFIDENCE_MIN_LINES = 40;
 
-/** Ranked-by tooltip/caption copy — pinned here so UI and tests share one string. */
+/**
+ * Ranked-by caption copy — pinned here so UI and tests share one string.
+ *
+ * ⚠ THE SCOPE CLAUSE IS LOAD-BEARING, NOT HEDGING (added 2026-08-31 after review).
+ * `buildCmdSearchSummaryQueries` emits `group by cpt_code, revenue_code order by charge desc
+ * nulls last, count desc limit CMD_SEARCH_TOP_N`, so the client only ever RECEIVES the
+ * highest-CHARGE combos — this module reorders that set, it cannot reach past it. S is not
+ * monotone in charged (it divides by n^0.3), so a combo just under the charge cut can score
+ * higher than several rows on screen. The bare sentence "Ranked by recent realized dollars"
+ * therefore asserted something false about which combos are present. Naming the candidate set
+ * is what makes the claim true without touching a query (a widened top-N is a payload decision,
+ * deliberately not taken here).
+ */
 export const COMBO_RANKING_EXPLAINER =
-  'Ranked by recent realized dollars, with a boost for combos that earn more per line.';
+  "Among this selection's highest-charge combos: ranked by recent realized dollars, with a boost for combos that earn more per line.";
 
 /**
  * â or p̂: (n·obs + K·prior) / (n + K). `obs` null (the SQL guards a meaningless denominator to
