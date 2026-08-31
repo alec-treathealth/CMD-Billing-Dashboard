@@ -1594,7 +1594,7 @@ function applyDateWindow(
     }
     // The SPAN cap is this surface's rule, applied after the primitive has confirmed the range is
     // representable at all. Reject, do not clamp.
-    if (bounds.windowDays > CMD_CUSTOM_MAX_DAYS) return false;
+    if (bounds.windowDays > CMD_CUSTOM_MAX_DAYS || (filter.includeScheduled === true && businessWindowBounds({ kind: 'custom', from: customFrom, to: applyScheduledBound(filter, bounds.to, now) }, now).windowDays > CMD_CUSTOM_MAX_DAYS)) return false;
     readerFilter.from = bounds.from;
     readerFilter.to = applyScheduledBound(filter, bounds.to, now);
     readerFilter.businessToday = businessToday;
@@ -1626,7 +1626,8 @@ function applyDateWindow(
  */
 function applyScheduledBound(filter: CmdReportFilter, defaultTo: string, now: Date): string {
   if (filter.includeScheduled !== true) return defaultTo;
-  return businessDayPlus(FUTURE_PAYMENT_HORIZON_DAYS + 1, now);
+  const scheduledTo = businessDayPlus(FUTURE_PAYMENT_HORIZON_DAYS + 1, now);
+    return scheduledTo > defaultTo ? scheduledTo : defaultTo;
 }
 
 type PhiIndexTokens = { memberIdBidx?: string; memberIdPrefixBidx?: string; groupNumberBidx?: string };

@@ -19,6 +19,7 @@
  * per-user saved view; shown columns are also what search matches. Rows order by the sort key.
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState, useTransition } from 'react';
+import { businessDayPlus } from '@/../src/businessWindow';
 import {
   Activity,
   ArrowDown,
@@ -1532,7 +1533,9 @@ export function CmdCollectionsExplorer({
     // Both dates are INCLUSIVE, so an N-day span is (to - from) + 1.
     const span =
       Math.round((Date.parse(`${draftTo}T00:00:00Z`) - Date.parse(`${draftFrom}T00:00:00Z`)) / 86_400_000) + 1;
-    if (!Number.isFinite(span) || span < 1) {
+    const scheduledTo = includeScheduled ? businessDayPlus(15, new Date()) : draftTo;
+      const effectiveSpan = Math.round((Date.parse(`${scheduledTo}T00:00:00Z`) - Date.parse(`${draftFrom}T00:00:00Z`)) / 86_400_000);
+      if (!Number.isFinite(span) || span < 1 || !Number.isFinite(effectiveSpan) || effectiveSpan > CUSTOM_MAX_DAYS) {
       setCustomError('That range is not a valid pair of dates.');
       return;
     }
