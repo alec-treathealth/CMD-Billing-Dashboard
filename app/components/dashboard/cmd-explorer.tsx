@@ -2114,6 +2114,18 @@ export function CmdCollectionsExplorer({
         />
       )}
 
+      {/* ---- AI analysis (streamed, both modes) ---------------------------- */}
+      {/* Keyed on the search signature: any filter/search/prefix/view change remounts it to idle and
+          its unmount cleanup aborts an in-flight stream, so a stale answer can't describe a new
+          selection.
+          ⚠ ORDER: this sits ABOVE the cohort panel as of 2026-08-31 (it is the primary read; the
+          prefix-wide cohort panel below is reference and now opens collapsed). This is a PLAIN
+          SIBLING reorder — `aiInput` is computed in THIS component from the `cohort` state, never
+          from anything CohortCurvePanel renders, and the two carry different render gates
+          (`hasAnySearch` vs `cohortPresence.rendered`), so neither has ever been able to assume the
+          other is mounted. Moving them changes paint order and nothing else. */}
+      {hasAnySearch && <CollectionsAiPanel key={aiKey} input={aiInput} view={view} />}
+
       {/* ---- Alpha-prefix cohort payer-behavior curve (PHI-gated, Session D) --- */}
       {/* Kept mounted through its exit animation so it fades out instead of popping; during the exit
           window the live state has reset to idle, so render the frozen snapshot. */}
@@ -2146,11 +2158,6 @@ export function CmdCollectionsExplorer({
           )}
         </div>
       )}
-
-      {/* ---- AI analysis (streamed, where the curves were; both modes) ------ */}
-      {/* Keyed on the search signature: any filter/search/prefix/view change remounts it to idle and
-          its unmount cleanup aborts an in-flight stream, so a stale summary can't linger. */}
-      {hasAnySearch && <CollectionsAiPanel key={aiKey} input={aiInput} view={view} />}
 
       {/* ---- Detail grid -------------------------------------------------- */}
       <div ref={gridRef} className="space-y-3">
@@ -3494,7 +3501,17 @@ function CohortCurvePanel({
   // before the early returns (rules-of-hooks) even though the control only renders in the
   // 'ready'/'refreshing' branch below. (The chart/table toggle is gone — the curves were removed;
   // the panel now shows the per-bucket tables directly.)
-  const [collapsed, setCollapsed] = useState(false);
+  //
+  // ⚠ COLLAPSED BY DEFAULT — RULED 2026-08-31. The cohort read is prefix-wide and deliberately
+  // ignores the grid's filters, so it is REFERENCE rather than the primary answer; it now opens
+  // folded and the AI analysis panel sits above it. This is a PRESENTATION default only:
+  //   · the fetch is NOT gated on expansion (see the effect on `cohortActive` in the parent) — the
+  //     panel is collapsed-but-LOADED, because `aiInput` reads the same `cohort` state and a lazy
+  //     fetch would silently empty the AI read's cohort branch;
+  //   · it is NOT persisted (no localStorage / sessionStorage) — it resets every render by design.
+  // Nothing below the fold was removed: the per-bucket tables and the click-to-drilldown are intact
+  // and reachable on expand (#309's pins still assert they exist).
+  const [collapsed, setCollapsed] = useState(true);
   const bodyId = useId();
 
   if (state.kind === 'idle') return null;
@@ -3632,6 +3649,12 @@ function CohortCurvePanel({
           <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
             <Lock className="h-3 w-3" aria-hidden />
             {c.cohort_patients.toLocaleString()} patients · dollar-weighted · min 5/bucket
+          </span>
+          {/* Disclosure trigger. A real <button> (never a div+onClick) so it is in the tab order for
+              free; aria-controls points at the body region, which is why that region is ALWAYS
+              rendered and hidden with the `hidden` attribute rather than unmounted — an
+              aria-controls target that doesn't exist is an ARIA violation, and with the panel now
+              collapsed BY DEFAULT that would be the default state rather than an edge case. */}
           <button
             type="button"
             aria-expanded={!collapsed}
@@ -3639,11 +3662,10 @@ function CohortCurvePanel({
             aria-label={collapsed ? 'Expand cohort payer behavior' : 'Collapse cohort payer behavior'}
             title={collapsed ? 'Expand' : 'Collapse'}
             onClick={() => setCollapsed((v) => !v)}
-            className="shrink-0 rounded-md p-1 text-ink400 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)]"
+            className="shrink-0 rounded-md p-1 text-ink400 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)]"
           >
             <ChevronDown className={`h-4 w-4 transition-transform ${collapsed ? '-rotate-90' : ''}`} aria-hidden />
           </button>
-          </span>
         </div>
       </div>
       <p className="mt-1 text-xs text-muted-foreground">
@@ -3658,62 +3680,63 @@ function CohortCurvePanel({
         </p>
       )}
 
-      {!collapsed && (
-        <div id={bodyId} className={memberIdActive ? 'opacity-70' : undefined}>
-          {/* Two axes side by side — per-bucket TABLES (the recharts curves were removed; the tables
-              carry the same values + the click-to-drilldown affordance). The whole-cohort yield cards
-              moved UP into the summary panel above, deduplicated across cohort + selection modes. */}
-          <div className="mt-3 grid grid-cols-1 overflow-hidden rounded-lg border border-line lg:grid-cols-2">
-            <div className="p-3 lg:border-r lg:border-line">
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                By visit number
-              </div>
-              <div className="mb-1 text-[11px] text-ink400">{visitTakeaway} Click a row for details.</div>
-              <CohortBucketTable
-                points={posDollars}
-                bucketLabel={(b) => `Visit ${b}`}
-                usd={usd}
-                selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
-                onSelectBucket={(b) => onSelectPoint('position', b)}
-              />
-              {selectedPoint?.axis === 'position' && drilldown && (
-                <CohortDrilldownPanel
-                  axis="position"
-                  bucket={selectedPoint.bucket}
-                  state={drilldown}
-                  onClose={onCloseDrilldown}
-                />
-              )}
+      {/* Always MOUNTED, hidden with the `hidden` attribute when folded (the census-panel
+          precedent: `hidden` rather than CSS-hidden-but-focusable, so the subtree leaves the a11y
+          tree AND the tab order). Kept in the DOM so `aria-controls` above always resolves. */}
+      <div id={bodyId} hidden={collapsed} className={memberIdActive ? 'opacity-70' : undefined}>
+        {/* Two axes side by side — per-bucket TABLES (the recharts curves were removed; the tables
+            carry the same values + the click-to-drilldown affordance). The whole-cohort yield cards
+            moved UP into the summary panel above, deduplicated across cohort + selection modes. */}
+        <div className="mt-3 grid grid-cols-1 overflow-hidden rounded-lg border border-line lg:grid-cols-2">
+          <div className="p-3 lg:border-r lg:border-line">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              By visit number
             </div>
-            <div className="p-3">
-              <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                By days since first visit
-              </div>
-              <div className="mb-1 text-[11px] text-ink400">{daysTakeaway} Click a row for details.</div>
-              <CohortBucketTable
-                points={daysDollars}
-                bucketLabel={(b) => `Days ${b}–${b + dayBucketWidth - 1}`}
-                usd={usd}
-                selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
-                onSelectBucket={(b) => onSelectPoint('days', b)}
+            <div className="mb-1 text-[11px] text-ink400">{visitTakeaway} Click a row for details.</div>
+            <CohortBucketTable
+              points={posDollars}
+              bucketLabel={(b) => `Visit ${b}`}
+              usd={usd}
+              selectedBucket={selectedPoint?.axis === 'position' ? selectedPoint.bucket : null}
+              onSelectBucket={(b) => onSelectPoint('position', b)}
+            />
+            {selectedPoint?.axis === 'position' && drilldown && (
+              <CohortDrilldownPanel
+                axis="position"
+                bucket={selectedPoint.bucket}
+                state={drilldown}
+                onClose={onCloseDrilldown}
               />
-              {selectedPoint?.axis === 'days' && drilldown && (
-                <CohortDrilldownPanel
-                  axis="days"
-                  bucket={selectedPoint.bucket}
-                  dayBucketWidth={dayBucketWidth}
-                  state={drilldown}
-                  onClose={onCloseDrilldown}
-                />
-              )}
-            </div>
+            )}
           </div>
-          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-ink400">
-            <span>&lt;5-patient buckets are suppressed</span>
-            <span>· “—” = allowed too small to divide</span>
+          <div className="p-3">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              By days since first visit
+            </div>
+            <div className="mb-1 text-[11px] text-ink400">{daysTakeaway} Click a row for details.</div>
+            <CohortBucketTable
+              points={daysDollars}
+              bucketLabel={(b) => `Days ${b}–${b + dayBucketWidth - 1}`}
+              usd={usd}
+              selectedBucket={selectedPoint?.axis === 'days' ? selectedPoint.bucket : null}
+              onSelectBucket={(b) => onSelectPoint('days', b)}
+            />
+            {selectedPoint?.axis === 'days' && drilldown && (
+              <CohortDrilldownPanel
+                axis="days"
+                bucket={selectedPoint.bucket}
+                dayBucketWidth={dayBucketWidth}
+                state={drilldown}
+                onClose={onCloseDrilldown}
+              />
+            )}
           </div>
         </div>
-      )}
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-ink400">
+          <span>&lt;5-patient buckets are suppressed</span>
+          <span>· “—” = allowed too small to divide</span>
+        </div>
+      </div>
     </div>
   );
 }
