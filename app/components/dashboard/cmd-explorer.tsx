@@ -1268,6 +1268,8 @@ export function CmdCollectionsExplorer({
       isGrouped: boolean,
     ) => {
       const myReq = ++reqRef.current;
+        // Every loadPage call replaces the result set or its ordering. Background refreshes do not use loadPage.
+        scrollportRef.current?.scrollTo({ top: 0, left: 0, behavior: 'auto' });
       setStatus('loading');
       setPhi(new Map());
       setRevealed(false);
