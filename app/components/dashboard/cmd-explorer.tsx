@@ -1270,6 +1270,44 @@ export function CmdCollectionsExplorer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recencyDays, customFrom, customTo, includeScheduled, facilityKey, payerKey, employerKey, nameMatchKey, refinement, hasPhiSearch, dMember, dAlpha, dGroup]);
 
+  /**
+   * Put the results grid back at row 1, on BOTH axes.
+   *
+   * REPLACES `gridRef.scrollIntoView()`. That call existed because the grid sat below the fold and
+   * the page had to be scrolled down to it; the grid now lives in its own always-visible scrollport,
+   * so moving the DOCUMENT is both unnecessary and wrong.
+   *
+   * ⚠ CALLED FROM `loadPage`, NOT FROM THE INDIVIDUAL HANDLERS — and that placement is the fix for
+   * a real bug (Qodo, PR #314). It was originally wired to the two refinement handlers only, which
+   * left FOUR other paths that replace the rows without resetting: the pager's Prev/Next, the
+   * filter/sort/group effect, and the midnight-rollover reload. Paging while scrolled to row 40
+   * opened the next page still at row 40, hiding its first results — and this change is what made
+   * that the NORMAL interaction rather than a rare one, because the pager is now always on screen
+   * instead of below 50 rows. `loadPage` is the single function every one of those paths goes
+   * through and the only place `rows` is replaced, so resetting here cannot be missed by a new
+   * call site. Every current caller loads a logically new result set (all four reset the page or
+   * the cursor), so there is no background same-page refresh whose position must be preserved;
+   * the audited PHI reveal does not go through here.
+   *
+   * Horizontal resets too: a column offset is just as stale as a vertical one once the row set
+   * changes, and a 17-column grid is usually panned right when the user hits Next.
+   *
+   * `prefers-reduced-motion` is honoured explicitly. globals.css zeroes CSS animation and
+   * `scroll-behavior`, but a scripted `scrollTo({behavior:'smooth'})` passes its own behaviour and
+   * ignores the stylesheet, so the check has to happen here (WCAG 2.3.3).
+   *
+   * Declared ABOVE `loadPage` deliberately: it is in that callback's dependency array, and a
+   * `const` referenced in a dep array evaluated before its own declaration is a TDZ crash.
+   */
+  const resetGridScroll = useCallback(() => {
+    requestAnimationFrame(() => {
+      const el = scrollportRef.current;
+      if (!el) return;
+      const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+      el.scrollTo({ top: 0, left: 0, behavior: reduced ? 'auto' : 'smooth' });
+    });
+  }, []);
+
   const loadPage = useCallback(
     async (
       target: number,
@@ -1311,11 +1349,14 @@ export function CmdCollectionsExplorer({
         });
         setPage(target);
         setStatus('ready');
+        // The rows just changed, so any surviving scroll offset now points at different data.
+        // After the early return above, so a superseded load never yanks the winner's position.
+        resetGridScroll();
       } catch {
         if (myReq === reqRef.current) setStatus('error');
       }
     },
-    [view],
+    [view, resetGridScroll],
   );
 
   /**
@@ -1671,31 +1712,11 @@ export function CmdCollectionsExplorer({
         prev && prev.kind === kind && 'value' in prev && prev.value === value ? null : { kind, value },
       );
     }
-    resetGridScroll();
+    // No resetGridScroll() here on purpose: every branch above changes a value `filterArg` depends
+    // on, which drives the reload effect into loadPage, which owns the reset. A second call here
+    // would fire before the new rows exist and is exactly the two-mechanisms-for-one-job split that
+    // left the pager unwired in the first place.
   }
-
-  /**
-   * Put the results grid back at row 1 after a refinement changes what it holds.
-   *
-   * REPLACES `gridRef.scrollIntoView()`. That call existed because the grid sat below the fold and
-   * the page had to be scrolled down to it; the grid now lives in its own always-visible scrollport,
-   * so moving the DOCUMENT is both unnecessary and wrong. What the reader needs is the top of the
-   * NEW result set — otherwise a refinement applied while scrolled to row 40 lands them in the
-   * middle of a different, usually shorter, list. Both axes reset: a horizontal offset is just as
-   * stale as a vertical one once the columns re-render.
-   *
-   * `prefers-reduced-motion` is honoured explicitly. globals.css zeroes CSS animation and
-   * `scroll-behavior`, but a scripted `scrollTo({behavior:'smooth'})` passes its own behaviour and
-   * ignores the stylesheet, so the check has to happen here (WCAG 2.3.3).
-   */
-  const resetGridScroll = useCallback(() => {
-    requestAnimationFrame(() => {
-      const el = scrollportRef.current;
-      if (!el) return;
-      const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
-      el.scrollTo({ top: 0, left: 0, behavior: reduced ? 'auto' : 'smooth' });
-    });
-  }, []);
 
   /**
    * Apply (or toggle off) a (CPT, Revenue-code) COMBO refinement — narrows the grid by BOTH codes
@@ -1707,7 +1728,7 @@ export function CmdCollectionsExplorer({
         ? null
         : { kind: 'combo', cpt, revenue },
     );
-    resetGridScroll();
+    // See applyRefinement: loadPage owns the scroll reset, reached via the filterArg reload effect.
   }
 
   /**

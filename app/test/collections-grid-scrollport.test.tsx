@@ -167,11 +167,46 @@ test('pagination sits outside the scrollport so it stays on screen', () => {
   assert.doesNotMatch(scrollportSrc, /<Pager/, 'Pager must not be inside the scroll container');
 });
 
-test('the refinement scroll reset targets the scrollport, not the document', () => {
+test('the scroll reset targets the scrollport, not the document', () => {
   // It used to be gridRef.scrollIntoView() — a DOCUMENT scroll, which is meaningless now that the
   // grid is always on screen, and which would fight overscroll-contain.
   assert.doesNotMatch(explorerCode, /scrollIntoView/, 'no document-level scroll remains');
   assert.match(explorerCode, /scrollportRef\.current[\s\S]{0,200}scrollTo/, 'reset targets the scrollport');
+  // Both axes: a column offset is as stale as a vertical one once the row set changes.
+  assert.match(explorerCode, /scrollTo\(\{ top: 0, left: 0/, 'both axes reset');
   // A scripted smooth scroll ignores the stylesheet's reduced-motion override, so it must check.
   assert.match(explorerCode, /prefers-reduced-motion: reduce/, 'reduced motion is honoured');
+});
+
+test('EVERY path that replaces rows resets the scroll — the reset lives in loadPage', () => {
+  /*
+   * THE REGRESSION THIS EXISTS FOR (Qodo, PR #314). The reset was wired to the two refinement
+   * handlers only, leaving the pager, the filter/sort/group effect and the midnight-rollover reload
+   * to swap the rows underneath a retained offset — so Next while scrolled to row 40 opened the
+   * next page at row 40. Pinning "loadPage calls it" rather than "the handlers call it" is the
+   * point: loadPage is the one function all four paths go through, so a new call site inherits the
+   * reset instead of having to remember it.
+   */
+  const loadPageSrc = (() => {
+    const from = explorerCode.indexOf('const loadPage = useCallback(');
+    assert.ok(from > 0, 'loadPage located');
+    const to = explorerCode.indexOf('[view, resetGridScroll],', from);
+    assert.ok(to > from, 'loadPage dependency array located');
+    return explorerCode.slice(from, to);
+  })();
+  assert.match(loadPageSrc, /resetGridScroll\(\)/, 'loadPage resets the scroll after a load');
+  assert.match(loadPageSrc, /setStatus\('ready'\)[\s\S]{0,400}resetGridScroll\(\)/, 'reset runs on the success path');
+  // Declared before loadPage, or its own dependency array is a TDZ crash at first render.
+  assert.ok(
+    explorerCode.indexOf('const resetGridScroll') < explorerCode.indexOf('const loadPage'),
+    'resetGridScroll must be declared above loadPage (it is in its dep array)',
+  );
+  // And NOT duplicated back into the refinement handlers — two mechanisms for one job is what
+  // allowed the gap. They reach loadPage through the filterArg reload effect.
+  const handlers = explorerCode.slice(
+    explorerCode.indexOf('function applyRefinement('),
+    explorerCode.indexOf('function selectDrilldownPoint('),
+  );
+  assert.ok(handlers.length > 0, 'refinement handlers located');
+  assert.doesNotMatch(handlers, /resetGridScroll\(\)/, 'handlers must not re-add their own reset');
 });
