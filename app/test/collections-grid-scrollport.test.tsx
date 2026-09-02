@@ -93,6 +93,27 @@ test('the height chain is bounded at the route and unbroken through the grid', (
   assert.ok(chainLinks.length >= 3, `expected >=3 min-h-0 flex links, found ${chainLinks.length}`);
 });
 
+test('grid density: house type scale, tight rows, and the header offset that tracks it', () => {
+  // `text-xs` is 13px in this config — the smallest HOUSE size, above the design system's 12px
+  // floor for meaning-bearing text. `text-sm` (15px) is a body size and cost ~12px per row.
+  assert.match(scrollportCode, /<table className="w-full caption-bottom text-xs">/, 'grid uses the 13px house size');
+  assert.doesNotMatch(scrollportCode, /text-\[\d+px\]/, 'never an arbitrary px size — the 12px floor is repo-wide');
+  // Cell padding overrides the primitive's p-2; vertical padding is what sets row height.
+  assert.match(explorerCode, /'px-2\.5 py-1'/, 'cells use tightened vertical padding');
+  // THE PAIRED CONSTANT. scroll-margin-top on body rows must equal the sticky header height, or a
+  // focused row scrolled to the top lands underneath it. h-8 (2rem) ↔ scroll-mt-8.
+  assert.match(explorerCode, /sticky top-0 z-20 h-8 bg-ground/, 'header is h-8');
+  assert.match(explorerCode, /scroll-mt-8/, 'row scroll-margin matches the h-8 header');
+  assert.doesNotMatch(explorerCode, /scroll-mt-10/, 'stale offset for the old h-10 header must be gone');
+  // Brand numeric face on the date/code columns (globals.css maps .ths-num to IBM Plex Mono
+  // tabular). PHI columns stay OUT — they render as a mask until an audited reveal.
+  assert.match(explorerCode, /const IS_MONO = new Set<string>\(\[[^\]]*'charge_date'/, 'date columns get the numeric face');
+  for (const phiKey of ['patient_name', 'member_id_raw', 'group_number']) {
+    const monoLine = explorerCode.slice(explorerCode.indexOf('const IS_MONO'), explorerCode.indexOf('const DEFAULT_ORDER'));
+    assert.ok(!monoLine.includes(phiKey), `${phiKey} must not be in IS_MONO — it renders masked`);
+  }
+});
+
 test('the grid keeps a min-height floor so it cannot collapse at 200% zoom', () => {
   // flex-1 with no floor + a tall filter panel = a few pixels of table on a short viewport.
   // The floor makes the column overflow and the DOCUMENT scroll instead, which is the
@@ -126,9 +147,12 @@ test('the shadcn Table wrapper is not used here — it would restore a second sc
     /<div className="relative w-full overflow-auto">/,
     'the primitive still has its own non-overridable scroll wrapper (if this changes, revisit)',
   );
+  // The primitive's own classes minus its size, which this grid sets for itself (see the density
+  // test above). If <Table> were restored, `caption-bottom` would come back on the inner element
+  // and the wrapper div with it.
   assert.match(
     scrollportSrc,
-    /<table className="w-full caption-bottom text-sm">/,
+    /<table className="w-full caption-bottom text-(xs|sm)">/,
     'the results grid renders a bare <table> carrying the primitive\'s own classes',
   );
   assert.doesNotMatch(scrollportCode, /<Table[ >]/, 'the wrapper component must not come back');

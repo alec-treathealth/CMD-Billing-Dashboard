@@ -75,7 +75,11 @@ export default async function CollectionsPage({
        When the filter panel plus the grid's min-height floor exceed this box, the content
        overflows and the DOCUMENT scrolls. That is the intended fallback, not a failure: a
        container-scrolled grid is the normal-desktop behaviour, not an absolute. */
-    <main className="mx-auto flex h-[calc(100dvh-3.5rem)] max-w-[1800px] flex-col gap-6 p-6 sm:p-10">
+    /* `sm:py-8` rather than the shell's usual `sm:p-10`: horizontal padding is unchanged, but on a
+       viewport-bounded route the 8px per side that the standard shell spends on vertical padding is
+       the difference between the pager sitting on screen and the document scrolling. Measured at
+       1440x900 — the most common laptop size here — it closes the last 4px of overflow. */
+    <main className="mx-auto flex h-[calc(100dvh-3.5rem)] max-w-[1800px] flex-col gap-6 p-6 sm:px-10 sm:py-8">
       {/* Same control, same placement as Overview — see the note there.
           Wrapped only to carry `shrink-0`: TenantTabs takes no className, and a flex child that is
           allowed to shrink gets squashed (its content then overlaps the next sibling) the moment

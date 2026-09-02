@@ -205,6 +205,17 @@ const INDIGO_FACILITY_CODES = new Set(facilityCodesForEntity(INDIGO_ENTITY_ID));
 const COLUMN_LABEL: Record<string, string> = Object.fromEntries(COLUMNS.map((c) => [c.key, c.label]));
 const IS_PHI = new Set<string>(COLUMNS.filter((c) => c.phi).map((c) => c.key));
 const IS_NUMERIC = new Set<string>(COLUMNS.filter((c) => c.numeric).map((c) => c.key));
+/**
+ * Columns that read as FIGURES even though they are not money, so they get the house numeric face
+ * (`ths-num` → IBM Plex Mono, tabular) like the money columns already do via `tabular-nums`.
+ * The design system names "numeric dates" and codes as part of that role, and the practical win is
+ * column alignment: proportional digits make a stack of ISO dates and CPT codes ragged, tabular
+ * ones line up, which is most of what makes a 17-column financial grid scannable.
+ *
+ * PHI columns are deliberately EXCLUDED. They render as `••••••` until an audited reveal, so the
+ * face would apply to a mask most of the time — and this change must not touch the masking path.
+ */
+const IS_MONO = new Set<string>(['charge_date', 'payment_received', 'cpt_code', 'revenue_code']);
 const DEFAULT_ORDER: ColKey[] = COLUMNS.map((c) => c.key);
 // Columns hidden by default for users WITHOUT a saved view — data kept, re-showable via the column
 // picker. A user's saved view carries its own explicit visibility (hidden_columns) and still governs.
@@ -1833,29 +1844,46 @@ export function CmdCollectionsExplorer({
       {/* `shrink-0`: the filter panel must stay whole and always visible — it is the control
           surface for the grid below it. Allowed to shrink, it squashes and its content overlaps
           the panel beneath. */}
-      <div className="shrink-0 rounded-xl border border-line bg-card p-4 shadow-ths">
-        <div className="flex flex-wrap items-end gap-3">
+      <div className="shrink-0 rounded-xl border border-line bg-card px-4 py-3 shadow-ths">
+        {/* `items-start`, NOT `items-end`. Every cell here is label-over-control, so bottom-aligning
+            them only lines up the CONTROLS — and because the Window cell used to carry a third row
+            (the Include-scheduled checkbox), its label floated ~26px above the other three. Four
+            labels on four different baselines is what read as "bad spacing"; top-aligning puts them
+            on one line. The checkbox itself has moved down to the scope line, where there is unused
+            width, so the Window cell is now label+control like its siblings.
+            `ml-auto` on the Window cell sends the slack to the middle instead of trailing off the
+            right edge, and the picker wrappers cap the pickers so they stop sprawling to ~430px on
+            a wide monitor. */}
+        <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
           {/* Guided search — Facility + Payer multi-select tag pickers (replaces the old free-text
               bar + facility dropdown). Both scope the grid AND the summary; empty = no restriction.
               Options load once per tenant and filter client-side as the user types. */}
-          <MultiSelectTagPicker
-            label="Facility"
-            placeholder="Type to find facilities…"
-            icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
-            options={facilityPickerOptions}
-            selected={facilitySelection}
-            onToggle={toggleFacility}
-            onClear={clearFacilities}
-          />
-          <MultiSelectTagPicker
-            label="Payer"
-            placeholder="Type to find payers…"
-            icon={<CreditCard className="h-3.5 w-3.5" aria-hidden />}
-            options={payerPickerOptions}
-            selected={payerSelection}
-            onToggle={togglePayer}
-            onClear={clearPayers}
-          />
+          {/* Each picker is wrapped only to CAP its width. The picker's own root is
+              `min-w-[15rem] flex-1` (a shared component — 4 other surfaces mount it, so it is not
+              edited here), which on an 1800px container stretches each one to ~430px of empty
+              type-ahead. The wrapper keeps the floor and adds a ceiling. */}
+          <div className="min-w-[15rem] max-w-[22rem] flex-1">
+            <MultiSelectTagPicker
+              label="Facility"
+              placeholder="Type to find facilities…"
+              icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+              options={facilityPickerOptions}
+              selected={facilitySelection}
+              onToggle={toggleFacility}
+              onClear={clearFacilities}
+            />
+          </div>
+          <div className="min-w-[15rem] max-w-[22rem] flex-1">
+            <MultiSelectTagPicker
+              label="Payer"
+              placeholder="Type to find payers…"
+              icon={<CreditCard className="h-3.5 w-3.5" aria-hidden />}
+              options={payerPickerOptions}
+              selected={payerSelection}
+              onToggle={togglePayer}
+              onClear={clearPayers}
+            />
+          </div>
           {/* ⚠ ALWAYS MOUNTED as of 2026-08-17 — it used to be gated on `employerMode === 'employer'`.
               THE MOUNT ITSELF WAS THE BUG. Every picker in this row is `min-w-[15rem] flex-1`, so
               adding a third one makes flexbox re-divide the free space: Facility and Payer visibly
@@ -1873,15 +1901,17 @@ export function CmdCollectionsExplorer({
               because unmounting is the reflow we just removed. serverDriven: onQueryChange feeds the
               debounced search and the returned set is passed through unfiltered (server-matched). */}
           {hasEmployerData && (
-            <MultiSelectTagPicker
-              label="Employer"
-              placeholder="Type to find employers…"
-              icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
-              options={employerPickerOptions}
-              selected={employerSelection}
-              onToggle={toggleEmployer}
-              onClear={clearEmployers}
-            />
+            <div className="min-w-[15rem] max-w-[22rem] flex-1">
+              <MultiSelectTagPicker
+                label="Employer"
+                placeholder="Type to find employers…"
+                icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+                options={employerPickerOptions}
+                selected={employerSelection}
+                onToggle={toggleEmployer}
+                onClear={clearEmployers}
+              />
+            </div>
           )}
           {/* Time window: ONE segmented control — [7d][14d][30d][90d][6m][1y][Custom ▾] plus the
               "Include scheduled" toggle beneath it.
@@ -1917,7 +1947,7 @@ export function CmdCollectionsExplorer({
               at px-3/py-1.5 (~48x34, comfortably over the 24x24 WCAG 2.5.8 target minimum), and the
               active segment carries fill + WEIGHT + an inset ring so selection never rests on tint
               alone (WCAG 1.4.1 — colour must not be the only channel). */}
-          <div>
+          <div className="ml-auto">
             <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
               <CalendarRange className="h-3.5 w-3.5" aria-hidden />
               Window
@@ -2026,108 +2056,124 @@ export function CmdCollectionsExplorer({
               )}
               </div>
             </div>
-            {/* INCLUDE SCHEDULED — an upper-bound override, off by default.
-                ⚠ NEVER HIDDEN OR DISABLED, even when it currently changes nothing (ruled
-                2026-08-30). All 106 future-dated charges today are Indigo, so on the BXR tab this
-                toggle is inert — but a control that appears and disappears with the data is worse
-                than an inert one: the reader cannot learn what it does, and its absence looks like
-                a bug rather than an empty set. */}
-            <label className="mt-2 flex items-center gap-2 text-xs font-medium text-muted-foreground">
-              <input
-                type="checkbox"
-                checked={includeScheduled}
-                onChange={(e) => setIncludeScheduled(e.target.checked)}
-                className="h-4 w-4 rounded border-ink400"
-              />
-              Include scheduled payments
-            </label>
           </div>
         </div>
 
         {/* Gated patient lookup — only for PHI-entitled roles. Matched via keyed blind indexes
             server-side (exact member ID / 3-char alpha prefix / exact group #), audited, results
-            masked. The raw value is never substring-matched and never revealed by the search. */}
+            masked. The raw value is never substring-matched and never revealed by the search.
+
+            Type size: `text-xs` (13px) throughout, NOT the `text-[11px]` this block shipped with —
+            the design system's 12px floor for meaning-bearing text is repo-wide ("no text-[…px]
+            below it, anywhere") and text-xs is the smallest house size. Same correction the tag
+            picker already took. It costs a few pixels back; the row merge below more than pays. */}
         {canRevealPhi && (
-          <div className="mt-3 rounded-lg border border-line bg-surface p-3">
-            <div className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <div className="mt-2.5 rounded-lg border border-line bg-surface px-3 py-2.5">
+            <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
               <Fingerprint className="h-3.5 w-3.5 text-[var(--brand-ink)]" aria-hidden />
               Patient lookup
               <span className="inline-flex items-center gap-1 font-normal normal-case text-ink400">
                 <Lock className="h-3 w-3" aria-hidden /> encrypted · exact match · audited
               </span>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
+            {/* ONE ROW, not two stacked ones. The exact-match fields and the partial-match name
+                search are still visibly SEPARATE — that distinction is real and documented below —
+                but the separator is now a vertical rule inside a wrapping row instead of a
+                horizontal border between two rows, which reclaims ~70px of panel height. On a
+                narrow viewport the row simply wraps and the rule hides, so nothing is lost. */}
+            <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
               <PhiField label="Member ID" value={phiMemberId} onChange={setPhiMemberId} placeholder="exact member ID" width="w-48" />
               <PhiField label="Alpha prefix" value={phiAlphaPrefix} onChange={setPhiAlphaPrefix} placeholder="3-letter" width="w-28" maxLength={3} />
               <PhiField label="Group #" value={phiGroup} onChange={setPhiGroup} placeholder="exact group #" width="w-40" />
-            </div>
+              <div aria-hidden className="hidden h-8 w-px shrink-0 bg-line lg:block" />
 
-            {/* PATIENT NAME — deliberately SEPARATE from the exact-match fields above, because it
-                behaves differently: it is a PARTIAL match, over the whole book.
+              {/* PATIENT NAME — deliberately SEPARATE from the exact-match fields to its left,
+                  because it behaves differently: it is a PARTIAL match, over the whole book. The
+                  separation is now the vertical rule above rather than a horizontal border; the
+                  distinction is unchanged, only its geometry.
 
-                It used to be inert until something else narrowed the rows, because the search
-                decrypted candidate ROWS and had to be capped at 2,000 of 686,503. Migration 0105
-                made the candidate set the ~11k distinct patients instead, so the gate had nothing
-                left to protect and is gone. What has NOT changed is the entitlement: the entire
-                block is behind canRevealPhi, and the server re-checks it. */}
-            <div className="mt-2 border-t border-line pt-2">
-              <div className="flex flex-wrap items-end gap-2">
-                <div className="flex flex-col gap-1">
-                  <label htmlFor="phi-patient-name" className="text-[11px] font-medium text-muted-foreground">
-                    Patient name
-                  </label>
-                  <input
-                    id="phi-patient-name"
-                    type="text"
-                    value={nameQuery}
-                    maxLength={120}
-                    onChange={(e) => setNameQuery(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') runNameSearch();
-                    }}
-                    placeholder="full or partial name"
-                    // autoComplete off: this value is PHI and must not be stored by the browser.
-                    autoComplete="off"
-                    className="w-56 rounded-md border border-line bg-canvas px-2 py-1 text-sm text-ink900 placeholder:text-ink400 disabled:cursor-not-allowed disabled:opacity-50"
-                    aria-describedby="phi-patient-name-help"
-                  />
-                </div>
+                  It used to be inert until something else narrowed the rows, because the search
+                  decrypted candidate ROWS and had to be capped at 2,000 of 686,503. Migration 0105
+                  made the candidate set the ~11k distinct patients instead, so the gate had nothing
+                  left to protect and is gone. What has NOT changed is the entitlement: the entire
+                  block is behind canRevealPhi, and the server re-checks it.
+
+                  The label now sits INLINE, matching PhiField, so all four controls share one
+                  baseline instead of this one hanging 20px lower than its neighbours. */}
+              <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span className="whitespace-nowrap">Patient name</span>
+                <input
+                  id="phi-patient-name"
+                  type="text"
+                  value={nameQuery}
+                  maxLength={120}
+                  onChange={(e) => setNameQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') runNameSearch();
+                  }}
+                  placeholder="full or partial name"
+                  // autoComplete off: this value is PHI and must not be stored by the browser.
+                  autoComplete="off"
+                  className="h-8 w-56 rounded-md border border-line bg-canvas px-2 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent)]/25 disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-describedby="phi-patient-name-help"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={runNameSearch}
+                disabled={nameQuery.trim() === '' || nameSearching}
+                className="h-8 rounded-md border border-line bg-surface px-3 text-sm font-medium text-ink900 transition-colors hover:bg-[var(--brand-soft)] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {nameSearching ? 'Searching…' : 'Search'}
+              </button>
+              {nameMatchTokens !== null && (
                 <button
                   type="button"
-                  onClick={runNameSearch}
-                  disabled={nameQuery.trim() === '' || nameSearching}
-                  className="rounded-md border border-line bg-surface px-3 py-1 text-sm font-medium text-ink900 transition-colors hover:bg-[var(--brand-soft)] disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={() => { setNameMatch(null); setNameQuery(''); setNameNotice(null); }}
+                  className="h-8 rounded-md px-2 text-xs text-muted-foreground underline-offset-2 hover:underline"
                 >
-                  {nameSearching ? 'Searching…' : 'Search'}
+                  Clear name filter
                 </button>
-                {nameMatchTokens !== null && (
-                  <button
-                    type="button"
-                    onClick={() => { setNameMatch(null); setNameQuery(''); setNameNotice(null); }}
-                    className="rounded-md px-2 py-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
-                  >
-                    Clear name filter
-                  </button>
-                )}
-              </div>
-              {/* The WHAT, always visible. It used to explain a restriction; now it sets the one
-                  expectation that is still worth setting — the search spans the whole book, so the
-                  grid may show fewer rows than the match count when other filters are active. */}
-              <p id="phi-patient-name-help" className="mt-1 text-[11px] text-muted-foreground">
-                {nameNotice ??
-                  'Matches part of a name across every patient in this view — no need to narrow first. Your other filters still apply to the rows shown.'}
-              </p>
+              )}
             </div>
+            {/* The WHAT, always visible. It used to explain a restriction; now it sets the one
+                expectation that is still worth setting — the search spans the whole book, so the
+                grid may show fewer rows than the match count when other filters are active. */}
+            <p id="phi-patient-name-help" className="mt-1.5 text-xs text-muted-foreground">
+              {nameNotice ??
+                'Matches part of a name across every patient in this view — no need to narrow first. Your other filters still apply to the rows shown.'}
+            </p>
           </div>
         )}
 
-        {/* Active-scope line + active refinement pill. */}
-        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        {/* Active-scope line + Include-scheduled + active refinement pill.
+            The scope line is one short sentence on a full-width row, so it had the spare width to
+            adopt the Include-scheduled toggle from the Window cell — which is what let that cell
+            drop to label+control and pulled ~26px out of the panel. It also reads better here:
+            the toggle changes the WINDOW's upper bound, and this line is where the active window
+            is stated in words. */}
+        <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted-foreground">
           <span>
             {hasAnySearch
               ? `${facilityLabel} · ${payerLabel} · ${windowLabel}`
               : `Browsing ${facilityLabel} · ${payerLabel} · ${windowLabel} — pick a facility or payer to search`}
           </span>
+          {/* INCLUDE SCHEDULED — an upper-bound override, off by default.
+              ⚠ NEVER HIDDEN OR DISABLED, even when it currently changes nothing (ruled
+              2026-08-30). All 106 future-dated charges today are Indigo, so on the BXR tab this
+              toggle is inert — but a control that appears and disappears with the data is worse
+              than an inert one: the reader cannot learn what it does, and its absence looks like
+              a bug rather than an empty set. Moved here from the Window cell 2026-09-02; still
+              always rendered, still always enabled. */}
+          <label className="flex items-center gap-1.5 font-medium">
+            <input
+              type="checkbox"
+              checked={includeScheduled}
+              onChange={(e) => setIncludeScheduled(e.target.checked)}
+              className="h-4 w-4 rounded border-ink400"
+            />
+            Include scheduled payments
+          </label>
           {refinement && (
             <button
               type="button"
@@ -2414,7 +2460,14 @@ export function CmdCollectionsExplorer({
                   it cannot be neutralized from here — it would nest a second scrollport and put the
                   horizontal scrollbar back at the bottom of 50 rows. These are the exact classes
                   the primitive applies. Do not "restore" <Table>. */}
-              <table className="w-full caption-bottom text-sm">
+              {/* DENSITY: `text-xs` is 13px in this config (tailwind.config.ts fontSize.xs), not the
+                  browser's 12px — it is the house scale's smallest size and sits above the design
+                  system's 12px floor for meaning-bearing text. Down from `text-sm` (15px), which is
+                  a body size and too large for a 17-column financial grid: at 15px with p-2 cells a
+                  row is 39px, so a 1440x900 laptop showed SEVEN rows. Never substitute an arbitrary
+                  `text-[11px]` to squeeze further — that floor is machine-enforced elsewhere in the
+                  repo and this grid should not be the exception. */}
+              <table className="w-full caption-bottom text-xs">
                 <TableHeader>
                   <TableRow>
                     <SortableContext items={visibleOrder} strategy={horizontalListSortingStrategy}>
@@ -2438,21 +2491,28 @@ export function CmdCollectionsExplorer({
                 </TableHeader>
                 <TableBody>
                   {rows.map((row) => (
-                    /* `scroll-mt-10` = the h-10 sticky header's height. Nothing in a body row is
-                       focusable today, so this is pre-emptive: the moment a row gains a control,
-                       scrolling it into view would otherwise park it UNDER the pinned header
-                       (WCAG 2.4.3 / 2.4.11). Keep this equal to the header height if that changes. */
-                    <TableRow key={row.id} className="scroll-mt-10 transition-colors hover:bg-[var(--brand-soft)]">
+                    /* `scroll-mt-8` = the sticky header's height, which is now `h-8` (was h-10, and
+                       this was scroll-mt-10 to match). Nothing in a body row is focusable today, so
+                       this is pre-emptive: the moment a row gains a control, scrolling it into view
+                       would otherwise park it UNDER the pinned header (WCAG 2.4.3 / 2.4.11). These
+                       two numbers must move together — a source pin asserts it. */
+                    <TableRow key={row.id} className="scroll-mt-8 transition-colors hover:bg-[var(--brand-soft)]">
                       {visibleOrder.map((c) => (
                         <TableCell
                           key={c}
-                          className={
-                            IS_NUMERIC.has(c)
-                              ? 'text-right tabular-nums'
-                              : IS_PHI.has(c) && !revealed
-                                ? 'text-muted-foreground'
-                                : undefined
-                          }
+                          /* `px-2.5 py-1` overrides the primitive's `p-2` (cn() runs twMerge, so the
+                             call-site value wins). Vertical padding is what sets row height, and at
+                             13px type 4px is enough to keep the row legible — 8px was tuned for 15px
+                             body text. Horizontal stays roomy so columns don't collide.
+                             `ths-num` on the date/code columns: see IS_MONO. */
+                          className={[
+                            'px-2.5 py-1',
+                            IS_NUMERIC.has(c) ? 'text-right tabular-nums' : '',
+                            IS_MONO.has(c) ? 'ths-num' : '',
+                            IS_PHI.has(c) && !revealed ? 'text-muted-foreground' : '',
+                          ]
+                            .filter(Boolean)
+                            .join(' ')}
                         >
                           {c === 'facility' ? (
                             <FacilityCell row={row} fallback={cellText(c, row)} />
@@ -2543,7 +2603,9 @@ function SortableHeadCell({
            `relative` and silently unpinned the header mid-drag. So the drag state now changes only
            the stacking order (z-30, above the sticky z-20 of its neighbours), never the position.
            Do not reintroduce `relative` here. */
-        'sticky top-0 z-20 bg-ground',
+        /* `h-8` overrides the primitive's `h-10` (twMerge). The header is a label row, not a data
+           row — at 13px it needs 32px, and the 8px it gives back is a third of a body row. */
+        'sticky top-0 z-20 h-8 bg-ground',
         numeric ? 'text-right' : '',
         isSorted ? 'text-[var(--brand-ink)]' : '',
         isDragging ? 'z-30 opacity-70' : '',
