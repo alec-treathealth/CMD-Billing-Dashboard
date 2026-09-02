@@ -149,10 +149,20 @@ test('AI payload is byte-identical — cohort branch still reads the cohort stat
 });
 
 test('AI analysis panel renders ABOVE the cohort panel', () => {
-  const ai = explorerSrc.indexOf('{hasAnySearch && <CollectionsAiPanel key={aiKey}');
+  // ANCHORED ON THE COMPONENT TAG, not on the enclosing JSX expression. This used to look for the
+  // literal `{hasAnySearch && <CollectionsAiPanel key={aiKey}`, which broke when the panel gained a
+  // `shrink-0` flex wrapper for the grid-scrollport work — a layout change that did not touch the
+  // ordering this test exists to protect. The gate and the key are asserted separately below, so
+  // the anchor got looser without the test getting weaker.
+  const ai = explorerSrc.indexOf('<CollectionsAiPanel');
   const cohort = explorerSrc.indexOf('{cohortPresence.rendered && (');
   assert.ok(ai > 0 && cohort > 0, 'both panels render');
   assert.ok(ai < cohort, 'AI panel must precede the cohort panel in the JSX');
+  assert.match(
+    explorerSrc,
+    /hasAnySearch && \([\s\S]{0,80}<CollectionsAiPanel key=\{aiKey\}/,
+    'AI panel still gated on hasAnySearch and keyed on aiKey',
+  );
   // Exactly one AI panel — the reorder is a MOVE, not a second mount.
   assert.equal(explorerSrc.split('<CollectionsAiPanel').length - 1, 1, 'AI panel mounted exactly once');
 });

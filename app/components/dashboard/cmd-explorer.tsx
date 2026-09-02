@@ -68,7 +68,10 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+// `Table` is deliberately NOT imported: this grid renders its own <table> so the scrollport can be
+// the ONE scroll container (see the scrollport comment below). The semantic wrappers still come
+// from the shared primitive, so the markup is unchanged.
+import { TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { ControlSelect, Pager } from '@/components/data-grid';
 import { MultiSelectTagPicker, type PickerOption } from '@/components/ui/multi-select-tag-picker';
 // Pure, and deliberately OUTSIDE this file so it can be unit-tested: importing this component pulls
@@ -729,7 +732,8 @@ export function CmdCollectionsExplorer({
    * means "nothing to compare against yet", never "reload now".
    */
   const rolloverRef = useRef(0);
-  const gridRef = useRef<HTMLDivElement>(null);
+  /** The results scrollport — the grid's own scroll container. Reset to the top on a re-query. */
+  const scrollportRef = useRef<HTMLDivElement>(null);
 
   // A "search" is now any active guided selection: facility tags, payer tags, or a PHI lookup.
   // (The free-text term + column-scoped substring search were removed with the search bar.)
@@ -1656,8 +1660,31 @@ export function CmdCollectionsExplorer({
         prev && prev.kind === kind && 'value' in prev && prev.value === value ? null : { kind, value },
       );
     }
-    requestAnimationFrame(() => gridRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+    resetGridScroll();
   }
+
+  /**
+   * Put the results grid back at row 1 after a refinement changes what it holds.
+   *
+   * REPLACES `gridRef.scrollIntoView()`. That call existed because the grid sat below the fold and
+   * the page had to be scrolled down to it; the grid now lives in its own always-visible scrollport,
+   * so moving the DOCUMENT is both unnecessary and wrong. What the reader needs is the top of the
+   * NEW result set — otherwise a refinement applied while scrolled to row 40 lands them in the
+   * middle of a different, usually shorter, list. Both axes reset: a horizontal offset is just as
+   * stale as a vertical one once the columns re-render.
+   *
+   * `prefers-reduced-motion` is honoured explicitly. globals.css zeroes CSS animation and
+   * `scroll-behavior`, but a scripted `scrollTo({behavior:'smooth'})` passes its own behaviour and
+   * ignores the stylesheet, so the check has to happen here (WCAG 2.3.3).
+   */
+  const resetGridScroll = useCallback(() => {
+    requestAnimationFrame(() => {
+      const el = scrollportRef.current;
+      if (!el) return;
+      const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+      el.scrollTo({ top: 0, left: 0, behavior: reduced ? 'auto' : 'smooth' });
+    });
+  }, []);
 
   /**
    * Apply (or toggle off) a (CPT, Revenue-code) COMBO refinement — narrows the grid by BOTH codes
@@ -1669,7 +1696,7 @@ export function CmdCollectionsExplorer({
         ? null
         : { kind: 'combo', cpt, revenue },
     );
-    requestAnimationFrame(() => gridRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+    resetGridScroll();
   }
 
   /**
@@ -1792,9 +1819,21 @@ export function CmdCollectionsExplorer({
       : `${payerSelection.length} payer${payerSelection.length === 1 ? '' : 's'}`;
 
   return (
-    <div className="space-y-4">
+    /* THE HEIGHT CHAIN, top to bottom: <main> (collections/page.tsx) is bounded to the viewport;
+       this root is its growing child; the detail grid below is THIS element's growing child; the
+       scrollport is the grid's. Every link needs `min-h-0`, because a flex item's default
+       `min-height:auto` refuses to shrink below its content — one missing `min-h-0` anywhere in
+       the chain and the whole thing silently reverts to a page-scrolling table.
+
+       CollectionsView renders no DOM of its own, so this div is a DIRECT flex child of <main>.
+       `gap-4` replaces `space-y-4` — same spacing, but margins on flex children interact badly
+       with shrink calculations, and gap does not. */
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
       {/* ---- Search hero -------------------------------------------------- */}
-      <div className="rounded-xl border border-line bg-card p-4 shadow-ths">
+      {/* `shrink-0`: the filter panel must stay whole and always visible — it is the control
+          surface for the grid below it. Allowed to shrink, it squashes and its content overlaps
+          the panel beneath. */}
+      <div className="shrink-0 rounded-xl border border-line bg-card p-4 shadow-ths">
         <div className="flex flex-wrap items-end gap-3">
           {/* Guided search — Facility + Payer multi-select tag pickers (replaces the old free-text
               bar + facility dropdown). Both scope the grid AND the summary; empty = no restriction.
@@ -2103,15 +2142,20 @@ export function CmdCollectionsExplorer({
       </div>
 
       {/* ---- Search summary (search-engine result) ------------------------ */}
+      {/* Wrapped only for `shrink-0` — see the note on the search hero above. Same for the AI and
+          cohort panels below: each is a fixed-size block in the column, and only the detail grid
+          grows. */}
       {hasAnySearch && (
-        <SearchSummaryPanel
-          state={summary}
-          label="your selection"
-          refinement={refinement}
-          onDrill={applyRefinement}
-          onDrillCombo={applyComboRefinement}
-          facilityDisplayName={facilityDisplayName}
-        />
+        <div className="shrink-0">
+          <SearchSummaryPanel
+            state={summary}
+            label="your selection"
+            refinement={refinement}
+            onDrill={applyRefinement}
+            onDrillCombo={applyComboRefinement}
+            facilityDisplayName={facilityDisplayName}
+          />
+        </div>
       )}
 
       {/* ---- AI analysis (streamed, both modes) ---------------------------- */}
@@ -2124,13 +2168,17 @@ export function CmdCollectionsExplorer({
           from anything CohortCurvePanel renders, and the two carry different render gates
           (`hasAnySearch` vs `cohortPresence.rendered`), so neither has ever been able to assume the
           other is mounted. Moving them changes paint order and nothing else. */}
-      {hasAnySearch && <CollectionsAiPanel key={aiKey} input={aiInput} view={view} />}
+      {hasAnySearch && (
+        <div className="shrink-0">
+          <CollectionsAiPanel key={aiKey} input={aiInput} view={view} />
+        </div>
+      )}
 
       {/* ---- Alpha-prefix cohort payer-behavior curve (PHI-gated, Session D) --- */}
       {/* Kept mounted through its exit animation so it fades out instead of popping; during the exit
           window the live state has reset to idle, so render the frozen snapshot. */}
       {cohortPresence.rendered && (
-        <div className={cohortPresence.exiting ? 'animate-ths-exit' : 'animate-ths-reveal'}>
+        <div className={`shrink-0 ${cohortPresence.exiting ? 'animate-ths-exit' : 'animate-ths-reveal'}`}>
           {cohortPresence.exiting && cohortSnapshotRef.current ? (
             // Frozen snapshot fading out — drilldownPoint is already cleared by the effect above
             // (it resets on any cohortActive/prefix change), so no live selection to render here.
@@ -2174,8 +2222,10 @@ export function CmdCollectionsExplorer({
       )}
 
       {/* ---- Detail grid -------------------------------------------------- */}
-      <div ref={gridRef} className="space-y-3">
-        <div className="flex items-center justify-between gap-3">
+      {/* The growing link in the height chain (see the root div). Its own children then split that
+          height three ways: toolbar and pager hold their size, the scrollport takes the rest. */}
+      <div className="flex min-h-0 flex-1 flex-col gap-3">
+        <div className="flex shrink-0 items-center justify-between gap-3">
           {/* The grid pages SNAPSHOT/POSTING rows (full history — one charge line can appear once
               per payment posting/state change), while the summary above counts logical charge
               lines on the 0050 rollup. Two grains, two labels — on purpose. */}
@@ -2281,34 +2331,45 @@ export function CmdCollectionsExplorer({
         </div>
 
         {status === 'error' && (
-          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <div className="shrink-0 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             That page could not be loaded. Try again.
           </div>
         )}
 
         {revealError && (
-          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <div className="shrink-0 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             {revealError}
           </div>
         )}
 
+        {/* The three branches below are siblings in the same flex column as the pager, so the two
+            that are NOT the scrollport need `shrink-0` for the same reason everything else does:
+            allowed to shrink, a tall skeleton squashes and paints over the pager beneath it. */}
         {status === 'loading' && rows.length === 0 ? (
-          <GridSkeleton cols={visibleOrder.length} />
+          <div className="shrink-0">
+            <GridSkeleton cols={visibleOrder.length} />
+          </div>
         ) : rows.length === 0 ? (
-          <div className="py-8 text-center text-sm text-muted-foreground">
+          <div className="shrink-0 py-8 text-center text-sm text-muted-foreground">
             {hasAnySearch ? 'No charge lines match this search.' : 'No charge lines match the current filters.'}
           </div>
         ) : (
-          <div className="relative">
+          /* MIN-HEIGHT FLOOR, and it is load-bearing. `flex-1` with no floor lets a tall filter
+             panel squeeze the grid to a few pixels on a short viewport — which is exactly the
+             200%-zoom case (WCAG 1.4.4) this change exists to satisfy. The floor wins over
+             `flex-1`, the column overflows <main>, and the document scrolls instead. Deliberately
+             NOT `min-h-0` here: the floor is the point. */
+          <div className="relative flex min-h-[20rem] flex-1 flex-col">
             {/* Non-blocking refetch: keep the current page visible, dimmed, with a thin progress bar
-                on top — don't blank to a skeleton on every filter/sort/pagination change. */}
+                on top — don't blank to a skeleton on every filter/sort/pagination change.
+                z-30 so it stays above the sticky header (z-20) it now overlaps. */}
             {gridRefreshing && (
-              <div className="absolute inset-x-0 top-0 z-10 h-0.5 animate-pulse rounded-t-md bg-[var(--brand-accent)]" aria-hidden />
+              <div className="absolute inset-x-0 top-0 z-30 h-0.5 animate-pulse rounded-t-md bg-[var(--brand-accent)]" aria-hidden />
             )}
-            <div
-              aria-busy={gridRefreshing}
-              className={`overflow-x-auto rounded-md border transition-opacity duration-150 ${gridRefreshing ? 'opacity-60' : ''}`}
-            >
+            {/* DndContext moved OUTSIDE the scrollport (it used to sit inside it). It renders no box
+                of its own, but it DOES render two dnd-kit accessibility nodes as siblings of its
+                children; keeping them out of the scrollport means the scroll extent is exactly the
+                table and nothing else. Drag behaviour is unchanged — this is a context provider. */}
             <DndContext
               sensors={sensors}
               collisionDetection={closestCenter}
@@ -2317,7 +2378,43 @@ export function CmdCollectionsExplorer({
                 if (e.over) reorderColumns(String(e.active.id), String(e.over.id));
               }}
             >
-              <Table>
+              {/* ── THE SCROLLPORT ──────────────────────────────────────────────────────────
+                  The ONE scroll container for this grid, on both axes. It replaces a page-level
+                  scroll on both: vertically the document used to move (scrolling the filter panel
+                  out of view), and horizontally the scrollbar belonged to the shadcn <Table>
+                  wrapper — an unbounded-height div, so its bar sat at the bottom of 50 rows and you
+                  had to scroll to the end of the page to reach Facility/Employer.
+
+                  ⚠ WHY A BARE <table> AND NOT <Table>: the shadcn primitive wraps its <table> in its
+                  OWN `overflow-auto` div (components/ui/table.tsx:7), and that div's className is a
+                  hardcoded literal — the `className` prop lands on the inner <table>, so a call site
+                  CANNOT neutralize it. Two nested scrollports is how the horizontal bar ended up in
+                  the wrong place. ui/table.tsx has 11 consumers and is deliberately NOT edited here,
+                  so this one call site drops the wrapper and renders the same <table> markup
+                  directly. The semantic children (TableHeader/Row/Head/Cell) are unchanged.
+
+                  `tabIndex`/`role`/`aria-label`: a scrollable div is unreachable by keyboard unless
+                  it is focusable (WCAG 2.1.1) — with these, Tab lands here and the arrow keys,
+                  PageUp/PageDown, Home/End all scroll it. Do not remove the focus ring; restyle it
+                  if it looks wrong.
+
+                  `overscroll-contain`: reaching the end of the table must not chain the scroll on to
+                  the document and drag the filter panel away. */}
+              <div
+                ref={scrollportRef}
+                aria-busy={gridRefreshing}
+                tabIndex={0}
+                role="region"
+                aria-label="Collections results"
+                className={`min-h-0 flex-1 overflow-auto overscroll-contain rounded-md border transition-opacity duration-150 ${gridRefreshing ? 'opacity-60' : ''}`}
+              >
+              {/* RATIFIED: a bare <table>, NOT the shared <Table>. The scrollport above is the ONE
+                  scroll container; <Table> wraps its table in a second `overflow-auto` div whose
+                  class is a hardcoded literal (the className prop lands on the inner <table>), so
+                  it cannot be neutralized from here — it would nest a second scrollport and put the
+                  horizontal scrollbar back at the bottom of 50 rows. These are the exact classes
+                  the primitive applies. Do not "restore" <Table>. */}
+              <table className="w-full caption-bottom text-sm">
                 <TableHeader>
                   <TableRow>
                     <SortableContext items={visibleOrder} strategy={horizontalListSortingStrategy}>
@@ -2341,7 +2438,11 @@ export function CmdCollectionsExplorer({
                 </TableHeader>
                 <TableBody>
                   {rows.map((row) => (
-                    <TableRow key={row.id} className="transition-colors hover:bg-[var(--brand-soft)]">
+                    /* `scroll-mt-10` = the h-10 sticky header's height. Nothing in a body row is
+                       focusable today, so this is pre-emptive: the moment a row gains a control,
+                       scrolling it into view would otherwise park it UNDER the pinned header
+                       (WCAG 2.4.3 / 2.4.11). Keep this equal to the header height if that changes. */
+                    <TableRow key={row.id} className="scroll-mt-10 transition-colors hover:bg-[var(--brand-soft)]">
                       {visibleOrder.map((c) => (
                         <TableCell
                           key={c}
@@ -2368,12 +2469,16 @@ export function CmdCollectionsExplorer({
                     </TableRow>
                   ))}
                 </TableBody>
-              </Table>
+              </table>
+              </div>
             </DndContext>
-            </div>
           </div>
         )}
 
+        {/* OUTSIDE the scrollport and `shrink-0`, so Previous/Page N/Next stay on screen instead of
+            sitting below 50 rows of table. Wrapped because Pager is shared by four surfaces
+            (claims-explorer, collections, work-table, here) and must not be restyled for one. */}
+        <div className="shrink-0">
         <Pager
           page={page + 1}
           hasPrev={page > 0}
@@ -2386,6 +2491,7 @@ export function CmdCollectionsExplorer({
             if (hasNext) startTransition(() => void loadPage(page + 1, cursors[page + 1] ?? null, filterArg, sort, grouped));
           }}
         />
+        </div>
       </div>
     </div>
   );
@@ -2422,9 +2528,25 @@ function SortableHeadCell({
       aria-sort={isSorted ? (direction === 'asc' ? 'ascending' : 'descending') : undefined}
       className={[
         'select-none',
+        /* PINNED HEADER. Sticky lives on the <th> cells, not on <thead>: a <thead> is not a
+           positioned box in the table layout model, so `position:sticky` on it is a no-op in
+           Safari and historically elsewhere. The cells are what actually pin.
+
+           `bg-ground` (#FBF8F4) is the OPAQUE background, and it must stay opaque — a transparent
+           <th> lets body rows show through as they scroll under it. It matches what the table
+           already renders on: the scrollport sets no background, so the page ground shows through.
+           If the scrollport ever gains its own background, this must change with it.
+
+           ⚠ THE DND-KIT INTERACTION IS THE SUBTLE PART. `useSortable` writes a `transform` into
+           this cell's inline `style` while dragging, and the drag state used to add
+           `relative z-10` — which, merged LAST by twMerge, would have replaced `sticky` with
+           `relative` and silently unpinned the header mid-drag. So the drag state now changes only
+           the stacking order (z-30, above the sticky z-20 of its neighbours), never the position.
+           Do not reintroduce `relative` here. */
+        'sticky top-0 z-20 bg-ground',
         numeric ? 'text-right' : '',
         isSorted ? 'text-[var(--brand-ink)]' : '',
-        isDragging ? 'relative z-10 opacity-70' : '',
+        isDragging ? 'z-30 opacity-70' : '',
       ].join(' ')}
     >
       <span className={`inline-flex items-center gap-1 ${numeric ? 'flex-row-reverse' : ''}`}>

@@ -58,10 +58,32 @@ export default async function CollectionsPage({
   ]);
 
   return (
-    <main className="mx-auto max-w-[1800px] space-y-6 p-6 sm:p-10">
-      {/* Same control, same placement as Overview — see the note there. */}
-      <TenantTabs allowedViews={access.access.allowedViews} />
-      <header>
+    /* BOUNDED FLEX COLUMN — the results grid scrolls inside its own container; the document does
+       not. Everything below depends on this element having a REAL height: `flex-1 min-h-0` further
+       down resolves against it, and without a bound here every descendant falls back to content
+       height and the page scrolls again (the shipped bug this replaces).
+
+       The height is the viewport minus the 3.5rem (`h-14`) global header in app/layout.tsx.
+       HeaderGate DOES render that header on this route — `isFullPageRoute('/dashboard/collections')`
+       is false (lib/shell.ts: the set is /login, /forgot-password, /set-password, plus the
+       /qualify/m prefix) — so the subtraction is not an assumption.
+
+       `dvh`, not `vh`: on mobile the visual viewport shrinks as the URL bar retracts, and `vh`
+       would park the pager under the browser chrome. Viewport-RELATIVE is also what keeps this
+       usable at 200% zoom (WCAG 1.4.4) — never substitute a px height here.
+
+       When the filter panel plus the grid's min-height floor exceed this box, the content
+       overflows and the DOCUMENT scrolls. That is the intended fallback, not a failure: a
+       container-scrolled grid is the normal-desktop behaviour, not an absolute. */
+    <main className="mx-auto flex h-[calc(100dvh-3.5rem)] max-w-[1800px] flex-col gap-6 p-6 sm:p-10">
+      {/* Same control, same placement as Overview — see the note there.
+          Wrapped only to carry `shrink-0`: TenantTabs takes no className, and a flex child that is
+          allowed to shrink gets squashed (its content then overlaps the next sibling) the moment
+          the column runs short. */}
+      <div className="shrink-0">
+        <TenantTabs allowedViews={access.access.allowedViews} />
+      </div>
+      <header className="shrink-0">
         <h1 className="text-2xl font-semibold tracking-tight">Collections</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           CMD charge-line detail, filterable by facility and month. Patient identifiers are
