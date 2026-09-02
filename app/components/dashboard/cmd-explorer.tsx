@@ -84,6 +84,13 @@ import {
 } from '@/lib/collections/facilityPickerOptions';
 import { applyEmployerFilter } from '@/lib/collections/employerSegment';
 import { expandEmployerKeys } from '../../../src/collections/employerCanonical.js';
+import {
+  GROUPED_AGG_SORT_MAX_WINDOW_DAYS,
+  GROUPED_SORTABLE,
+  customWindowDays,
+  groupedSortAllowed,
+  resolveGroupedSort,
+} from '../../../src/collections/groupedSort.js';
 // The AI panel's prompt ASKS for markdown; this renders it as markup instead of printing `**`/`##`.
 import { Markdown } from '@/components/ui/markdown';
 import { PHI_MASK } from '@/lib/phi';
@@ -512,23 +519,25 @@ export function CmdCollectionsExplorer({
    */
   const [grouped, setGrouped] = useState(false);
   /**
-   * Toggling grouping NORMALIZES the sort column, keeping the chosen direction.
+   * Toggling grouping now changes ONLY `grouped`.
    *
-   * ⚠ WITHOUT THIS THE HEADER LIES. Grouped requests always order by payment_received and use only
-   * the direction, so a user who had sorted by Charge Amount and then grouped would see the sort
-   * arrow still on Charge Amount while the rows were ordered by payment date — the indicator and the
-   * server disagreeing, with nothing on screen saying so. The direction is deliberately preserved:
-   * asc/desc was an intentional choice and grouping is not a reason to discard it.
+   * ⚠ IT USED TO REWRITE THE SORT, AND REMOVING THAT IS A FIX, NOT A REGRESSION. The old comment
+   * here was right about the hazard — "grouped requests always order by payment_received, so a user
+   * who had sorted by Charge Amount and then grouped would see the arrow still on Charge Amount
+   * while the rows were ordered by payment date" — but wrong about the remedy. Clamping the STORED
+   * sort destroyed the reader's row-mode choice: group, ungroup, and the ordering you had set was
+   * gone, with nothing to restore it from.
+   *
+   * `effectiveSort` (declared below) now derives the applied ordering instead, so the header and
+   * the request always agree by construction while `sort` keeps what the reader actually picked.
+   * Grouping and un-grouping is therefore lossless, and grouped mode can genuinely honour a
+   * Charge Amount ordering rather than always collapsing to the payment date.
+   *
+   * Direction was already preserved deliberately, and still is — asc/desc is an intentional choice
+   * and neither grouping nor a window change is a reason to discard it.
    */
   const toggleGrouped = useCallback(() => {
-    setGrouped((wasGrouped) => {
-      if (!wasGrouped) {
-        setSort((prev) =>
-          prev.column === 'payment_received' ? prev : { column: 'payment_received', direction: prev.direction },
-        );
-      }
-      return !wasGrouped;
-    });
+    setGrouped((wasGrouped) => !wasGrouped);
   }, []);
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>(() =>
     seededReport ? 'ready' : 'loading',
@@ -560,6 +569,29 @@ export function CmdCollectionsExplorer({
   /** Off by default, and NEVER hidden or disabled — see the toggle's comment. */
   const [includeScheduled, setIncludeScheduled] = useState(false);
   const customActive = customFrom !== '' && customTo !== '';
+  /**
+   * THE WINDOW'S SPAN IN DAYS — the unit grouped mode's aggregate-sort cap is expressed in.
+   *
+   * Deliberately NOT `to - from` of the resolved bounds: a trailing preset is half-open with
+   * `to` = business-today + 1 (so 90d spans 91 days) and Include-scheduled pushes `to` a further
+   * FUTURE_PAYMENT_HORIZON_DAYS out (105). Either would switch sorting off at the DEFAULT window.
+   * A preset contributes its own day count; a custom range goes through `customWindowDays`.
+   *
+   * ⚠ NOT `businessWindowBounds`, WHICH THIS FILE MAY NOT IMPORT. That is the ops calendar — it
+   * reads a clock and knows a timezone — and #304's rule is that this client never derives the ops
+   * day, only compares integers the server sent. app/test/cmd-recency-default.test.tsx pins the
+   * IMPORT itself, on the reasoning that you cannot call what you do not import; reaching for it
+   * here to measure a range the USER typed would hand the client that ability as a side effect.
+   * `customWindowDays` is pure arithmetic on two given dates, and the root suite asserts it agrees
+   * with businessWindowBounds' own windowDays so the two cannot drift.
+   *
+   * `null` = unresolved, which fails CLOSED (no aggregate sort). That is the state while a custom
+   * range is half-typed, or names an unreal date such as 2026-02-30.
+   */
+  const windowDays = useMemo<number | null>(
+    () => (customActive ? customWindowDays(customFrom, customTo) : recencyDays > 0 ? recencyDays : null),
+    [customActive, customFrom, customTo, recencyDays],
+  );
   /** Draft values while the popover is open — the applied range only changes on Apply, so a
    *  half-typed date never fires a fetch. */
   const [draftFrom, setDraftFrom] = useState('');
@@ -667,6 +699,30 @@ export function CmdCollectionsExplorer({
 
   // Server-side sort. Default: most-recent Payment Received first.
   const [sort, setSort] = useState<CmdExplorerSort>({ column: 'payment_received', direction: 'desc' });
+  /**
+   * THE SORT ACTUALLY APPLIED. In row mode it is `sort` unchanged; in grouped mode it is `sort`
+   * clamped to what the allowlist and the window cap permit.
+   *
+   * ⚠ DERIVED, NOT AN EFFECT THAT REWRITES `sort`, and the difference matters three ways:
+   *   · THE HEADER CANNOT LIE. The arrow and the request read the same value, so there is no render
+   *     in which the indicator points at a column the server was not asked to order by. An effect
+   *     would necessarily have a window where the two disagree.
+   *   · NO WASTED FETCH. Widening the window past the cap changes `filterArg` and this value in the
+   *     SAME render, so the reload effect fires once. A corrective setSort would fire it twice —
+   *     once with the blocked sort (which the server would clamp) and again with the fixed one.
+   *   · THE READER'S CHOICE SURVIVES. `sort` still holds what they picked, so narrowing the window
+   *     back to 90d or less restores their Charge Amount ordering instead of silently losing it.
+   *
+   * The clamp itself is resolveGroupedSort — the same function the Server Action applies, imported
+   * rather than reimplemented, so client and server cannot drift on which orderings exist.
+   */
+  const effectiveSort = useMemo<CmdExplorerSort>(
+    () =>
+      grouped
+        ? (resolveGroupedSort(sort.column, sort.direction, windowDays) as CmdExplorerSort)
+        : sort,
+    [grouped, sort, windowDays],
+  );
 
   // Keyset pagination: cursors[p] is the cursor used to fetch page p (cursors[0] = null).
   const [page, setPage] = useState(0);
@@ -1437,7 +1493,7 @@ export function CmdCollectionsExplorer({
         // keep working untouched — the representative id is a real row id, which is what makes the
         // reveal legitimate rather than a re-implementation.
         const res: CmdReportResult | CmdGroupedResult = isGrouped
-          ? await loadCmdReportGrouped(cursor, filter, sortArg.direction, view)
+          ? await loadCmdReportGrouped(cursor, filter, sortArg.direction, view, sortArg.column)
           : await loadCmdReport(cursor, filter, sortArg, view);
         if (myReq !== reqRef.current) return; // a newer navigation superseded this load
         if (!res.ok) {
@@ -1499,7 +1555,7 @@ export function CmdCollectionsExplorer({
       rolloverRef.current = 0;
       setCursors([null]);
       startTransition(() => {
-        void loadPage(0, null, filterArg, sort, grouped);
+        void loadPage(0, null, filterArg, effectiveSort, grouped);
       });
     };
 
@@ -1518,7 +1574,7 @@ export function CmdCollectionsExplorer({
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', maybeReload);
     };
-  }, [loadPage, filterArg, sort, grouped, rows]);
+  }, [loadPage, filterArg, effectiveSort, grouped, rows]);
 
   // (Re)load the first page whenever the filter OR sort changes (resets keyset pagination). The
   // fetch call is UNCHANGED — wrapping it in a transition just marks the refetch non-urgent so the
@@ -1533,9 +1589,9 @@ export function CmdCollectionsExplorer({
     }
     setCursors([null]);
     startTransition(() => {
-      void loadPage(0, null, filterArg, sort, grouped);
+      void loadPage(0, null, filterArg, effectiveSort, grouped);
     });
-  }, [filterArg, sort, grouped, loadPage]);
+  }, [filterArg, effectiveSort, grouped, loadPage]);
 
   // Fetch the aggregate search summary whenever the (debounced) term / columns / window change.
   // Skipped entirely when there's no active search. The summary reflects the SEARCH level (term +
@@ -1671,12 +1727,25 @@ export function CmdCollectionsExplorer({
   // A refetch is in flight but we still have rows on screen → dim + progress bar (don't blank).
   const gridRefreshing = busy && rows.length > 0;
 
+  /**
+   * Toggle the sort, comparing against the ordering the reader can SEE.
+   *
+   * ⚠ IT COMPARES `effectiveSort`, NOT THE STORED `sort`, AND THAT IS NOT A REFINEMENT. In grouped
+   * mode the stored sort can hold a row-mode-only column (Allowed Amount, say) while the header
+   * displays the clamped payment-date ordering. Comparing the stored column would then treat a
+   * click on Payment Received as "switching to a new column" and reset the direction to desc — so
+   * clicking the arrow while it already reads desc would change nothing at all, and the control
+   * would feel broken exactly once per grouping.
+   */
   function toggleSort(key: CmdExplorerSort['column']) {
-    setSort((prev) =>
-      prev.column === key
-        ? { column: key, direction: prev.direction === 'desc' ? 'asc' : 'desc' }
-        : { column: key, direction: 'desc' },
-    );
+    setSort((prev) => {
+      const shown = grouped
+        ? (resolveGroupedSort(prev.column, prev.direction, windowDays) as CmdExplorerSort)
+        : prev;
+      return shown.column === key
+        ? { column: key, direction: shown.direction === 'desc' ? 'asc' : 'desc' }
+        : { column: key, direction: 'desc' };
+    });
   }
 
   // --- column visibility + saved views --------------------------------------
@@ -2617,14 +2686,23 @@ export function CmdCollectionsExplorer({
                         <SortableHeadCell
                           key={c}
                           colKey={c}
-                          // GROUPED MODE sorts by payment_received only (v1). Ordering groups by an
-                          // aggregate is possible but needs its own cursor path per column, and a
-                          // half-tested keyset does not fail loudly — it skips or repeats rows while
-                          // looking right. The other headers render as plain text rather than as a
-                          // control that would silently do nothing.
-                          sortable={grouped ? c === 'payment_received' : SORTABLE_KEYS.has(c)}
-                          isSorted={sort.column === c}
-                          direction={sort.direction}
+                          /*
+                           * GROUPED MODE now sorts by the payment date OR by Charge Amount, the
+                           * latter capped to windows of GROUPED_AGG_SORT_MAX_WINDOW_DAYS or less.
+                           * `groupedSortAllowed` is the same predicate the Server Action clamps
+                           * with, so the control is enabled exactly when the request would be
+                           * honoured. Row mode is unchanged.
+                           *
+                           * The remaining grouped columns are still plain text: ordering by them
+                           * would need its own cursor path per column, and a half-tested keyset does
+                           * not fail loudly — it skips or repeats rows while looking right.
+                           */
+                          sortable={grouped ? groupedSortAllowed(c, windowDays) : SORTABLE_KEYS.has(c)}
+                          windowBlocked={grouped && GROUPED_SORTABLE.has(c) && !groupedSortAllowed(c, windowDays)}
+                          // The DERIVED sort, so the arrow can never point at a column the server
+                          // was not asked to order by — see effectiveSort.
+                          isSorted={effectiveSort.column === c}
+                          direction={effectiveSort.direction}
                           onToggleSort={() => toggleSort(c as CmdExplorerSort['column'])}
                         />
                       ))}
@@ -2761,10 +2839,10 @@ export function CmdCollectionsExplorer({
           hasNext={hasNext}
           disabled={busy}
           onPrev={() => {
-            if (page > 0) startTransition(() => void loadPage(page - 1, cursors[page - 1] ?? null, filterArg, sort, grouped));
+            if (page > 0) startTransition(() => void loadPage(page - 1, cursors[page - 1] ?? null, filterArg, effectiveSort, grouped));
           }}
           onNext={() => {
-            if (hasNext) startTransition(() => void loadPage(page + 1, cursors[page + 1] ?? null, filterArg, sort, grouped));
+            if (hasNext) startTransition(() => void loadPage(page + 1, cursors[page + 1] ?? null, filterArg, effectiveSort, grouped));
           }}
         />
         </div>
@@ -2782,12 +2860,19 @@ export function CmdCollectionsExplorer({
 function SortableHeadCell({
   colKey,
   sortable,
+  windowBlocked = false,
   isSorted,
   direction,
   onToggleSort,
 }: {
   colKey: ColKey;
   sortable: boolean;
+  /**
+   * This column WOULD be sortable but the active window is too wide (grouped mode's aggregate
+   * cap). Distinct from `sortable: false`, which means "never" — the two render differently on
+   * purpose; see the third branch below.
+   */
+  windowBlocked?: boolean;
   isSorted: boolean;
   direction: 'asc' | 'desc';
   onToggleSort: () => void;
@@ -2886,6 +2971,30 @@ function SortableHeadCell({
             ) : (
               <ArrowUpDown className="h-3 w-3 shrink-0 opacity-70 group-hover:opacity-100" aria-hidden />
             )}
+          </button>
+        ) : windowBlocked ? (
+          /* SORTABLE IN PRINCIPLE, BLOCKED BY THE WINDOW — grouped mode only.
+             ⚠ NOTE THIS IS THE OPPOSITE TREATMENT TO THE BRANCH BELOW, AND THE REASONING INVERTS
+             RATHER THAN CONTRADICTS. Below, a column can NEVER be sorted, so an icon would
+             advertise a control that will never work. Here the control WILL work — the reader only
+             has to narrow the window — so showing it disabled WITH THE REASON is what teaches them
+             that. Hiding it instead reads as a bug: the arrows were there a moment ago at 90d and
+             vanished when the window widened, with nothing on screen connecting the two. That is
+             the Include-scheduled ruling (2026-08-30) applied to a second control: "a control that
+             appears and disappears with the data is worse than an inert one."
+             `aria-disabled` rather than the `disabled` attribute, and no onClick: a `disabled`
+             button is removed from the tab order, which would hide the explanation from exactly the
+             keyboard and screen-reader users who cannot see the greyed styling. This stays
+             focusable and announces its reason. */
+          <button
+            type="button"
+            aria-disabled="true"
+            aria-label={`Sort by ${label} — unavailable: needs a window of ${GROUPED_AGG_SORT_MAX_WINDOW_DAYS} days or less`}
+            title={`Sorting grouped rows by ${label} needs a window of ${GROUPED_AGG_SORT_MAX_WINDOW_DAYS} days or less`}
+            className="inline-flex cursor-not-allowed items-center gap-1 opacity-60"
+          >
+            {label}
+            <ArrowUpDown className="h-3 w-3 shrink-0 opacity-40" aria-hidden />
           </button>
         ) : (
           /* Not sortable — see SORTABLE_KEYS for the two distinct reasons (employer is joined

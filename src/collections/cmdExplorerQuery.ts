@@ -10,6 +10,7 @@
  * bound `$n` parameter via the `add` closure — never interpolated.
  */
 import type { CmdExplorerRow } from './cmdExplorer.js';
+import type { GroupedSortColumn } from './groupedSort.js';
 // The SQL layer's one copy of the 'No Facility' literal. Imported rather than re-typed, per that
 // module's own rule that "a site opts in by naming it".
 //
@@ -355,6 +356,18 @@ export interface CmdExplorerCondOptions {
 export interface CmdExplorerBuilderOptions {
   /** Assert a CLOSED window — see CmdExplorerCondOptions.requireWindow. Off unless asked. */
   requireWindow?: boolean;
+  /**
+   * GROUPED MODE ONLY — which column `buildCmdExplorerGroupedQuery` orders by. Defaults to
+   * `payment_received`, which is what every caller got before this option existed.
+   *
+   * ⚠ EVERY OTHER BUILDER IGNORES IT. Row mode takes a real `sort` argument, so there is no call
+   * site where passing this to the wrong builder would be a plausible mistake — but it is silently
+   * inert there, so do not read its presence as evidence that a query is ordered by it.
+   *
+   * The CALLER is responsible for having clamped this through `resolveGroupedSort` first: the
+   * builder emits whatever it is handed, and the window cap is policy, not SQL.
+   */
+  groupedSort?: GroupedSortColumn;
 }
 
 export function cmdExplorerBaseConds(
@@ -1150,6 +1163,20 @@ export function resolveCmdExplorerSort(sort: CmdExplorerSort | undefined): CmdEx
   }
   return { ...CMD_EXPLORER_DEFAULT_SORT };
 }
+
+// --- GROUPED-MODE SORT: the payment date, or ONE aggregate under a window cap ------------------
+//
+// The policy lives in ./groupedSort.js — its own leaf module so a CLIENT component can import the
+// predicate without pulling every SQL string in this file into the browser bundle. Re-exported
+// here so server-side callers keep importing it from the query module alongside the builder that
+// consumes it.
+export {
+  GROUPED_SORTABLE,
+  GROUPED_AGG_SORT_MAX_WINDOW_DAYS,
+  groupedSortAllowed,
+  resolveGroupedSort,
+} from './groupedSort.js';
+export type { GroupedSortColumn } from './groupedSort.js';
 
 /** Accept a cursor only if shaped safely; otherwise treat it as the first page. */
 export function resolveCmdExplorerCursor(
@@ -2177,9 +2204,51 @@ export function buildCmdExplorerGroupedQuery(
   const dir = direction === 'asc' ? 'asc' : 'desc';
   const cmp = direction === 'asc' ? '>' : '<';
 
+  /**
+   * WHICH COLUMN THIS PAGE IS ORDERED BY. Policy (the window cap) lives in resolveGroupedSort; by
+   * the time we are here the decision is made and this just emits SQL.
+   *
+   * The two paths differ in more than an ORDER BY clause, which is why they are branched rather
+   * than parameterised into one string:
+   *   · payment_received is a GROUPING KEY, so its keyset can ALSO be applied as a WHERE prune
+   *     before aggregation — that is what keeps deep paging cheap.
+   *   · sum(charge_amount) is an AGGREGATE. There is no pre-aggregation prune for it (you cannot
+   *     filter on a sum before the rows are grouped), so the keyset lives in HAVING alone and the
+   *     whole window is aggregated on every page. Measured flat at ~62 ms (BXR 90d) on page 1 and
+   *     page 10 — the cost does not grow with depth, it starts at its ceiling.
+   */
+  const sortCol: GroupedSortColumn = opts?.groupedSort === 'charge_amount' ? 'charge_amount' : 'payment_received';
+  const AGG = 'sum(t.charge_amount)';
+
   const having: string[] = [];
   if (cursor !== null) {
-    if (cursor.value === null) {
+    if (sortCol === 'charge_amount') {
+      if (cursor.value === null) {
+        // A NULL sum: every line in that group had a null charge_amount. Under NULLS LAST those
+        // sort after every real total, so only later null-sum groups remain.
+        //
+        // ⚠ UNREACHABLE WITH TODAY'S DATA, AND KEPT ANYWAY. Measured 2026-09-03: 0 of 505,423
+        // charge lines have a null charge_amount, so no group total is null and this arm never
+        // fires — unlike its payment_received counterpart, where nulls are real. It stays because
+        // the column IS nullable in the matview, and the failure mode if that ever changes is the
+        // silent kind: without this arm the trailing NULL block would be dropped from the last
+        // page rather than raising. Do not "simplify" it away on coverage grounds.
+        having.push(`(${AGG} is null and max(t.id) ${cmp} ${add(cursor.id)})`);
+      } else {
+        // ⚠ NO `conds.push(...)` COUNTERPART HERE, and its absence is the point — see the docblock
+        // above. Adding a WHERE prune on charge_amount would filter individual CHARGE LINES by the
+        // cursor's GROUP TOTAL, which is a different quantity: a group whose total clears the
+        // cursor can be assembled from lines that individually do not, so rows would vanish from
+        // groups and the totals on screen would be wrong rather than merely mis-ordered.
+        const vParam = add(cursor.value);
+        const idParam = add(cursor.id);
+        having.push(
+          `(${AGG} ${cmp} ${vParam}::numeric ` +
+            `or (${AGG} = ${vParam}::numeric and max(t.id) ${cmp} ${idParam}) ` +
+            `or ${AGG} is null)`,
+        );
+      }
+    } else if (cursor.value === null) {
       // The cursor row sat in the trailing NULL block: only later NULL-payment groups remain.
       having.push(`(t.payment_received is null and max(t.id) ${cmp} ${add(cursor.id)})`);
     } else {
@@ -2264,7 +2333,12 @@ export function buildCmdExplorerGroupedQuery(
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} ` +
     `group by t.business_entity_id, coalesce(t.member_id_bidx, 'id:' || t.id), ` +
     `t.payment_received, t.facility, t.primary_payer${havingSql} ` +
-    `order by t.payment_received ${dir} nulls last, max(t.id) ${dir} limit ${add(limit)}` +
+    // `max(t.id)` stays the tiebreaker on BOTH paths, and it is what keeps the cursor safe: an id
+    // belongs to exactly one group, so the ordering is TOTAL and no page boundary can drop or
+    // repeat a group. That matters MORE under the aggregate sort than under the date sort — two
+    // groups can easily share a total, where (date, id) could never tie at all.
+    `order by ${sortCol === 'charge_amount' ? AGG : 't.payment_received'} ${dir} nulls last, ` +
+    `max(t.id) ${dir} limit ${add(limit)}` +
     `) g left join collections.cmd_explorer_rows e on e.id = g.id ` +
     // FACILITY RESOLUTION IN GROUPED MODE — resolved on the REPRESENTATIVE id, outside the LIMIT,
     // exactly as employer_name is, and licensed by the same kind of argument.
@@ -2292,11 +2366,34 @@ export function buildCmdExplorerGroupedQuery(
     // a cursor for an arbitrary group and silently skip or repeat pages. Costs nothing over 50 rows.
     // `g.payment_received` is the to_char TEXT here, and sorting it as text is order-identical to the
     // date because ISO-8601 is lexicographically ordered (the same argument row mode relies on).
-    `order by g.payment_received ${dir} nulls last, g.id ${dir}`;
+    // `g.charge_amount` needs no such argument — it is the subquery's numeric `sum`, sorted as a
+    // number. The outer ORDER BY re-states the inner one over the already-limited 50 rows. It must
+    // name the SAME column, or the page would be selected by one ordering and displayed in another.
+    `order by g.${sortCol} ${dir} nulls last, g.id ${dir}`;
   return { sql, params };
 }
 
-/** A grouped row's cursor scalar — the payment date it was ordered by, or null in the NULL block. */
-export function cmdExplorerGroupSortValue(row: CmdExplorerGroupRow): string | null {
+/**
+ * A grouped row's cursor scalar — the value of whichever column the page was ORDERED BY, or null
+ * for a row in the trailing NULL block.
+ *
+ * ⚠ IT MUST AGREE WITH THE ORDERING THE PAGE WAS BUILT WITH. Handing back a payment date while the
+ * page was ordered by total (or the reverse) produces a keyset that compares the wrong quantity —
+ * which does not error, it silently skips or repeats groups at every page boundary. That is the
+ * exact failure the builder's own docblock warns about, so the sort column is a REQUIRED argument
+ * rather than an optional one with a default: a caller that forgets it fails to compile.
+ *
+ * The total is returned as a STRING. `sum(numeric)` can exceed what a double represents exactly,
+ * and the value round-trips through a Server Action to become a `::numeric` bind param, so keeping
+ * it textual end-to-end avoids a float ever touching a comparison that decides page boundaries.
+ */
+export function cmdExplorerGroupSortValue(
+  row: CmdExplorerGroupRow,
+  sortColumn: GroupedSortColumn,
+): string | null {
+  if (sortColumn === 'charge_amount') {
+    const v = row.charge_amount;
+    return v === null || v === undefined ? null : String(v);
+  }
   return row.payment_received ?? null;
 }
