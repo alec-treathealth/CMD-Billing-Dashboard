@@ -745,6 +745,24 @@ export function CmdCollectionsExplorer({
   const rolloverRef = useRef(0);
   /** The results scrollport — the grid's own scroll container. Reset to the top on a re-query. */
   const scrollportRef = useRef<HTMLDivElement>(null);
+  /**
+   * The <table> inside the scrollport. Observed for resize ALONGSIDE the scrollport, and it is not
+   * redundant: hiding a column changes the TABLE's width while the scrollport's box is unchanged
+   * (it is `flex-1` against a fixed parent), so a ResizeObserver watching only the scrollport never
+   * fires for a column show/hide — the case the edge fades most need to re-evaluate for.
+   */
+  const gridTableRef = useRef<HTMLTableElement>(null);
+  /**
+   * WHICH EDGES HAVE CONTENT SCROLLED OUT OF VIEW — the four edge fades' only input.
+   *
+   * One object rather than four `useState` booleans so a scroll tick commits at most ONE state
+   * update; `measureScrollEdges` returns the previous object unless a boolean actually flipped, so
+   * React bails out of the re-render entirely on the overwhelming majority of ticks (scroll fires
+   * far more often than an edge changes).
+   */
+  const [scrollEdges, setScrollEdges] = useState({ top: false, right: false, bottom: false, left: false });
+  /** In-flight rAF handle for the edge measurement; 0 = none pending. See scheduleEdgeMeasure. */
+  const edgeRafRef = useRef(0);
 
   // A "search" is now any active guided selection: facility tags, payer tags, or a PHI lookup.
   // (The free-text term + column-scoped substring search were removed with the search bar.)
@@ -1307,6 +1325,96 @@ export function CmdCollectionsExplorer({
       el.scrollTo({ top: 0, left: 0, behavior: reduced ? 'auto' : 'smooth' });
     });
   }, []);
+
+  /**
+   * ── THE EDGE-FADE MEASUREMENT ────────────────────────────────────────────────────────────────
+   *
+   * Sets the four booleans that drive the edge fades: is there content scrolled out of view past
+   * this edge? Pure geometry off the scrollport — no layout is written, so this never itself
+   * triggers the reflow it is reading.
+   *
+   * WHY THE FADES EXIST AT ALL: a macOS overlay scrollbar is invisible at idle under the default
+   * "Show scroll bars: When scrolling" setting, so the ONLY affordance telling a reader that 11
+   * more columns exist to the right was one that appears after you already scrolled. The fades are
+   * deliberately NOT a second scrollbar — no `scrollbar-width`/`scrollbar-color` is set anywhere on
+   * this surface, because two overlapping mechanisms is how you get a styled bar on one OS setting
+   * and a fade on the other. One affordance, identical under both settings.
+   *
+   * THE 1px TOLERANCE IS LOAD-BEARING, not defensive slop. Fractional device pixels and browser
+   * zoom leave `scrollTop` at values like 0.5, and `scrollHeight - clientHeight` off by a similar
+   * fraction, so an exact `> 0` / `< scrollHeight` comparison paints a fade at a TRUE extreme and
+   * chatters on and off as you nudge against it. One CSS pixel is below the perceptual threshold
+   * for "is there more content" and kills both.
+   */
+  const measureScrollEdges = useCallback(() => {
+    const el = scrollportRef.current;
+    if (!el) return;
+    const { scrollTop, scrollLeft, scrollWidth, scrollHeight, clientWidth, clientHeight } = el;
+    const slack = 1;
+    const next = {
+      top: scrollTop > slack,
+      left: scrollLeft > slack,
+      bottom: scrollTop + clientHeight < scrollHeight - slack,
+      right: scrollLeft + clientWidth < scrollWidth - slack,
+    };
+    setScrollEdges((prev) =>
+      prev.top === next.top && prev.right === next.right && prev.bottom === next.bottom && prev.left === next.left
+        ? prev
+        : next,
+    );
+  }, []);
+
+  /**
+   * rAF-COALESCED so a wheel gesture measures once per painted frame instead of once per event.
+   * `scroll` on a trackpad fires far faster than the compositor paints, and the read touches six
+   * layout properties — unthrottled, that is a forced synchronous layout per event on the one
+   * surface in this app that is already the heaviest thing on screen.
+   */
+  const scheduleEdgeMeasure = useCallback(() => {
+    if (edgeRafRef.current) return; // a measurement is already queued for this frame
+    edgeRafRef.current = requestAnimationFrame(() => {
+      edgeRafRef.current = 0;
+      measureScrollEdges();
+    });
+  }, [measureScrollEdges]);
+
+  /**
+   * FOUR DISTINCT TRIGGERS, each closing a gap the others do not. Do not prune this to one
+   * "obvious" mechanism — every one of them was needed to keep the fades from going stale:
+   *
+   *   1. `scroll` (PASSIVE — this listener never calls preventDefault, and declaring that lets the
+   *      browser keep scrolling off the main thread) — the reader moved.
+   *   2. ResizeObserver on the SCROLLPORT — window resize, and browser zoom, which changes the
+   *      viewport-derived height this box resolves against.
+   *   3. ResizeObserver on the TABLE — a column show/hide, which changes the table's width and
+   *      therefore `scrollWidth` while leaving the scrollport's own box untouched. Observer (2)
+   *      structurally cannot see this; one ResizeObserver watching both targets can.
+   *   4. `rows` in the dependency array — a row REPLACEMENT. Paging 1 → 2 swaps 50 rows for 50
+   *      rows: same table height (so no RO fires) and `resetGridScroll` scrolls to an offset that
+   *      may already be 0,0 (so no `scroll` fires), yet the scroll extent can differ — a short
+   *      final page would otherwise keep painting a bottom fade over content that has none.
+   *
+   * The effect body measures synchronously on every run, which is what makes (4) work, and it is
+   * also the initial measurement — the fades must be correct on first paint, before any input.
+   * `scrollportRef.current` is null while the empty/skeleton branches are rendered instead of the
+   * grid; the early return covers that, and the `rows` dependency is what re-runs this to wire up
+   * once real rows arrive.
+   */
+  useEffect(() => {
+    const el = scrollportRef.current;
+    if (!el) return;
+    measureScrollEdges();
+    el.addEventListener('scroll', scheduleEdgeMeasure, { passive: true });
+    const ro = new ResizeObserver(scheduleEdgeMeasure);
+    ro.observe(el);
+    if (gridTableRef.current) ro.observe(gridTableRef.current);
+    return () => {
+      el.removeEventListener('scroll', scheduleEdgeMeasure);
+      ro.disconnect();
+      if (edgeRafRef.current) cancelAnimationFrame(edgeRafRef.current);
+      edgeRafRef.current = 0;
+    };
+  }, [rows, measureScrollEdges, scheduleEdgeMeasure]);
 
   const loadPage = useCallback(
     async (
@@ -2488,9 +2596,22 @@ export function CmdCollectionsExplorer({
                   row is 39px, so a 1440x900 laptop showed SEVEN rows. Never substitute an arbitrary
                   `text-[11px]` to squeeze further — that floor is machine-enforced elsewhere in the
                   repo and this grid should not be the exception. */}
-              <table className="w-full caption-bottom text-xs">
-                <TableHeader>
-                  <TableRow>
+              <table ref={gridTableRef} className="w-full caption-bottom text-xs">
+                {/* THE OTHER HALF OF THE STICKY-UNDERLINE FIX (see SortableHeadCell).
+                    The cell now draws the line itself, so the collapsed border grid's copy has to
+                    go or the two stack 1px apart — 2px of underline at rest, 1px while stuck.
+                    TWO overrides because the primitive contributes the border TWICE, from two
+                    different elements: `[&_tr]:border-b` on <TableHeader> and `border-b` on
+                    <TableRow>.
+                    ⚠ AND THE ROW OVERRIDE ALONE IS INERT. `[&_tr]:border-b` compiles to
+                    `.\[\&_tr\]\:border-b tr`, specificity (0,1,1), which BEATS a plain
+                    `.border-b-0` (0,1,0) on the row — so the obvious one-line call-site fix loses
+                    a cascade race silently and the header keeps its doubled line. Each override is
+                    therefore placed on the SAME element as the class it cancels, where twMerge
+                    DELETES it outright and no specificity comparison ever happens.
+                    ui/table.tsx is untouched; its 10 other consumers keep the row border. */}
+                <TableHeader className="[&_tr]:border-b-0">
+                  <TableRow className="border-b-0">
                     <SortableContext items={visibleOrder} strategy={horizontalListSortingStrategy}>
                       {visibleOrder.map((c) => (
                         <SortableHeadCell
@@ -2553,6 +2674,80 @@ export function CmdCollectionsExplorer({
               </table>
               </div>
             </DndContext>
+            {/* ── EDGE FADES ──────────────────────────────────────────────────────────────────
+                The idle affordance for "there is more content this way". Each one paints only
+                when `measureScrollEdges` says content is actually scrolled out past that edge, so
+                a grid that fits shows none of them.
+
+                THEY REPLACE NOTHING — this surface never had scrollbar CSS. The bar you see while
+                dragging is the OS overlay scrollbar, which is invisible at idle under macOS's
+                DEFAULT "Show scroll bars: When scrolling". So the affordance was previously
+                OS-preference-dependent by construction, and 11 of the 17 columns sat past the
+                right edge with nothing to indicate it.
+
+                ⚠ SIBLINGS OF THE SCROLLPORT, NOT CHILDREN, and that is not a style preference: an
+                absolutely-positioned child of a scroll container scrolls WITH the content, so a
+                fade parked inside would slide out of view the moment it became relevant. They
+                position against the floor wrapper, which is already `relative` and whose box is
+                exactly the scrollport's (the scrollport is its only in-flow child, `flex-1`). This
+                is the same pattern the refetch progress bar above already uses — no new wrapper.
+
+                ⚠ WHY THEY START BELOW THE HEADER INSTEAD OF RELYING ON z-index. The offset is
+                `calc(2rem + 1px)` — 2rem is the sticky header's `h-8`, and the 1px is the
+                scrollport's own border, which pushes the header's box down by that much. Together
+                they clear the header's LAST pixel row, which is where its underline now lives (see
+                the box-shadow on SortableHeadCell). So no fade overlaps the header at all, and the
+                separation is geometric rather than a paint-order bet.
+
+                IT HAS TO BE GEOMETRIC, and this was measured rather than assumed. `opacity-60`
+                during a refetch makes the scrollport a stacking context, which pulls the header's
+                `z-20` INSIDE it — so in that one state a `z-10` sibling paints above the whole
+                scrollport, header included. At the earlier `top-8` (a 1px overlap) the underline
+                measured 231 → 251 in exactly that state: erased, and only while refetching, which
+                is precisely the kind of state-dependent bug that never shows up in review. The
+                extra pixel removes the overlap so no state can reach it.
+
+                `z-10` is still set — below the header's `z-20`, the drag branch's `z-30` and the
+                progress bar's `z-30` — so the two mechanisms agree instead of one silently
+                carrying the whole thing.
+
+                `inset` by 1px on every side that meets the frame: the scrollport draws a 1px
+                `border`, and a gradient whose opaque stop is ground would erase it along whichever
+                edge is fading. The `rounded-b*` classes clip the two bottom corners to the
+                scrollport's own rounding, as the progress bar does with `rounded-t-md`.
+
+                `to-ground/0` rather than `to-transparent`: same hue at zero alpha. `transparent`
+                is rgba(0,0,0,0), and an engine that interpolates without premultiplying renders
+                that as a grey smudge over a warm ground.
+
+                NO TRANSITION, deliberately, for anyone — so there is no `motion-reduce:` variant
+                to get wrong. Appearance is a mount, not an animation, which satisfies "static
+                presence" and WCAG 2.3.3 by construction rather than by opt-out. The 1px slack in
+                the measurement is what keeps that from reading as a flicker at the extremes. */}
+            {scrollEdges.top && (
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-x-px top-[calc(2rem_+_1px)] z-10 h-6 bg-gradient-to-b from-ground to-ground/0"
+              />
+            )}
+            {scrollEdges.bottom && (
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-x-px bottom-px z-10 h-6 rounded-b-md bg-gradient-to-t from-ground to-ground/0"
+              />
+            )}
+            {scrollEdges.left && (
+              <div
+                aria-hidden
+                className="pointer-events-none absolute bottom-px left-px top-[calc(2rem_+_1px)] z-10 w-8 rounded-bl-md bg-gradient-to-r from-ground to-ground/0"
+              />
+            )}
+            {scrollEdges.right && (
+              <div
+                aria-hidden
+                className="pointer-events-none absolute bottom-px right-px top-[calc(2rem_+_1px)] z-10 w-8 rounded-br-md bg-gradient-to-l from-ground to-ground/0"
+              />
+            )}
           </div>
         )}
 
@@ -2627,6 +2822,19 @@ function SortableHeadCell({
         /* `h-8` overrides the primitive's `h-10` (twMerge). The header is a label row, not a data
            row — at 13px it needs 32px, and the 8px it gives back is a third of a body row. */
         'sticky top-0 z-20 h-8 bg-ground',
+        /* THE UNDERLINE, AS A SHADOW ON THE CELL RATHER THAN A BORDER ON THE ROW.
+           `<table>` is `border-collapse: collapse` (Tailwind preflight), so a `border-b` on the
+           header <tr> belongs to the TABLE'S BORDER GRID, not to the cell. The grid scrolls with
+           the content while the cell is pinned, so the underline slid away the moment the header
+           stuck — measured on merged main: at rest the seam reads as a uniform dark row
+           (stddev 0), while stuck it reads as text glyphs and the dark row is simply gone. That
+           landed with the sticky header in #314 and was invisible in review because a pinned
+           opaque header against a light ground looks nearly right without it.
+           An inset box-shadow is painted by the CELL, so it pins with the cell. The row's own
+           `border-b` is switched off at the call site (see <TableRow> in the header) so the two
+           cannot double up at rest — the shadow is the single source of this line in BOTH states.
+           `hsl(var(--border))` is the same token the row border used; never a hex. */
+        'shadow-[inset_0_-1px_0_hsl(var(--border))]',
         numeric ? 'text-right' : '',
         isSorted ? 'text-[var(--brand-ink)]' : '',
         isDragging ? 'z-30 opacity-70' : '',

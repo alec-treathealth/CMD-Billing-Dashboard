@@ -34,6 +34,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const explorerSrc = readFileSync(join(here, '../components/dashboard/cmd-explorer.tsx'), 'utf8');
 const pageSrc = readFileSync(join(here, '../app/dashboard/collections/page.tsx'), 'utf8');
 const tablePrimitiveSrc = readFileSync(join(here, '../components/ui/table.tsx'), 'utf8');
+const globalsCss = readFileSync(join(here, '../app/globals.css'), 'utf8');
 
 /**
  * Comment-stripped copy, used by every assertion that checks for the ABSENCE of a pattern.
@@ -66,6 +67,33 @@ const scrollportSrc = sliceScrollport(explorerSrc);
  */
 const scrollportCode = sliceScrollport(explorerCode);
 
+/**
+ * The four edge fades. They are SIBLINGS of the scrollport, not children — an absolutely
+ * positioned child of a scroll container scrolls away with the content — so they fall OUTSIDE
+ * `scrollportSrc`, whose slice ends at the DndContext close. Their own slice runs from the first
+ * fade to the pager, which is the next thing rendered after the floor wrapper closes.
+ */
+const sliceFades = (src: string) => {
+  const from = src.indexOf('{scrollEdges.top && (');
+  assert.ok(from > 0, 'edge fades located');
+  const to = src.indexOf('<Pager', from);
+  assert.ok(to > from, 'fade slice terminates before the pager');
+  return src.slice(from, to);
+};
+const fadesSrc = sliceFades(explorerSrc);
+
+/**
+ * The measurement + wiring block: `measureScrollEdges` through the effect that attaches the
+ * listener and the observer, ending where loadPage begins.
+ */
+const edgeLogicSrc = (() => {
+  const from = explorerCode.indexOf('const measureScrollEdges = useCallback(');
+  assert.ok(from > 0, 'measureScrollEdges located');
+  const to = explorerCode.indexOf('const loadPage = useCallback(', from);
+  assert.ok(to > from, 'edge-logic slice terminates at loadPage');
+  return explorerCode.slice(from, to);
+})();
+
 test('the scrollport is keyboard-reachable and announced (WCAG 2.1.1)', () => {
   // A scrollable div is a keyboard trap-in-reverse: reachable by mouse wheel, unreachable by Tab.
   assert.match(scrollportSrc, /tabIndex=\{0\}/, 'scrollport must be focusable');
@@ -96,7 +124,13 @@ test('the height chain is bounded at the route and unbroken through the grid', (
 test('grid density: house type scale, tight rows, and the header offset that tracks it', () => {
   // `text-xs` is 13px in this config — the smallest HOUSE size, above the design system's 12px
   // floor for meaning-bearing text. `text-sm` (15px) is a body size and cost ~12px per row.
-  assert.match(scrollportCode, /<table className="w-full caption-bottom text-xs">/, 'grid uses the 13px house size');
+  // The `ref` is part of the anchor deliberately: it is what the edge-fade ResizeObserver observes
+  // to catch a column show/hide, so dropping it would silently stale the fades (see the fade tests).
+  assert.match(
+    scrollportCode,
+    /<table ref=\{gridTableRef\} className="w-full caption-bottom text-xs">/,
+    'grid uses the 13px house size and exposes its ref',
+  );
   assert.doesNotMatch(scrollportCode, /text-\[\d+px\]/, 'never an arbitrary px size — the 12px floor is repo-wide');
   // Cell padding overrides the primitive's p-2; vertical padding is what sets row height.
   assert.match(explorerCode, /'px-2\.5 py-1'/, 'cells use tightened vertical padding');
@@ -152,7 +186,7 @@ test('the shadcn Table wrapper is not used here — it would restore a second sc
   // and the wrapper div with it.
   assert.match(
     scrollportSrc,
-    /<table className="w-full caption-bottom text-(xs|sm)">/,
+    /<table ref=\{gridTableRef\} className="w-full caption-bottom text-(xs|sm)">/,
     'the results grid renders a bare <table> carrying the primitive\'s own classes',
   );
   assert.doesNotMatch(scrollportCode, /<Table[ >]/, 'the wrapper component must not come back');
@@ -209,4 +243,203 @@ test('EVERY path that replaces rows resets the scroll — the reset lives in loa
   );
   assert.ok(handlers.length > 0, 'refinement handlers located');
   assert.doesNotMatch(handlers, /resetGridScroll\(\)/, 'handlers must not re-add their own reset');
+});
+
+/* ───────────────────────── EDGE FADES — the idle overflow affordance ─────────────────────────
+ *
+ * WHY THEY EXIST: a macOS overlay scrollbar is invisible at idle under the OS default ("Show
+ * scroll bars: When scrolling"), so 11 of 17 columns sat off the right edge with no cue at all.
+ * The fades are the affordance; they replaced nothing, because this surface never had scrollbar
+ * CSS. Ruled 2026-09-02: all four edges, one mechanism only.
+ *
+ * As above, these are SOURCE pins because the component cannot be imported and jsdom has no
+ * layout — `scrollHeight === clientHeight` always, so every boolean below would read `false`
+ * there. Whether a fade actually appears at the right moment is browser-verified.
+ */
+
+test('four independent edge states, derived from scroll geometry alone', () => {
+  assert.match(
+    explorerCode,
+    /useState\(\{ top: false, right: false, bottom: false, left: false \}\)/,
+    'all four edges start clear and are one state object',
+  );
+  // Each boolean must come from the scrollport's own geometry — not from a row count, a page
+  // number, or anything else that can disagree with what is actually on screen.
+  assert.match(edgeLogicSrc, /top: scrollTop > slack/, 'top edge from scrollTop');
+  assert.match(edgeLogicSrc, /left: scrollLeft > slack/, 'left edge from scrollLeft');
+  assert.match(edgeLogicSrc, /bottom: scrollTop \+ clientHeight < scrollHeight - slack/, 'bottom edge from height');
+  assert.match(edgeLogicSrc, /right: scrollLeft \+ clientWidth < scrollWidth - slack/, 'right edge from width');
+  // The tolerance is load-bearing: fractional device pixels and zoom leave scrollTop at e.g. 0.5,
+  // so an exact `> 0` paints a fade at a true extreme and chatters against it.
+  assert.match(edgeLogicSrc, /const slack = 1;/, 'a 1px tolerance guards the extremes');
+  // Bail out of the re-render when nothing flipped — scroll fires far more often than an edge
+  // changes, and this is the one surface where a wasted render is expensive.
+  assert.match(edgeLogicSrc, /\? prev\s*: next,/, 'unchanged measurements must return the previous object');
+});
+
+test('the scroll listener is PASSIVE and coalesced to one measurement per frame', () => {
+  // Passive: this listener never calls preventDefault, and saying so lets the browser keep
+  // scrolling off the main thread. Without it, every wheel tick blocks the compositor.
+  assert.match(
+    edgeLogicSrc,
+    /addEventListener\('scroll', scheduleEdgeMeasure, \{ passive: true \}\)/,
+    'scroll listener must be registered passive',
+  );
+  assert.doesNotMatch(edgeLogicSrc, /addEventListener\('scroll', [^,]+\);/, 'no scroll listener without options');
+  // rAF-coalesced: the measurement reads six layout properties, so one per event would be a
+  // forced synchronous layout per event.
+  assert.match(edgeLogicSrc, /if \(edgeRafRef\.current\) return;/, 'a queued measurement is not queued twice');
+  assert.match(edgeLogicSrc, /requestAnimationFrame\(\(\) => \{[\s\S]{0,120}measureScrollEdges\(\)/, 'measurement runs in a rAF');
+});
+
+test('the ResizeObserver watches BOTH the scrollport and the table', () => {
+  assert.match(edgeLogicSrc, /new ResizeObserver\(scheduleEdgeMeasure\)/, 'a ResizeObserver is wired');
+  assert.match(edgeLogicSrc, /ro\.observe\(el\)/, 'observes the scrollport — window resize and zoom');
+  /*
+   * THE SECOND TARGET IS NOT REDUNDANT, and this is the assertion most likely to be "simplified"
+   * away. Hiding a column changes the TABLE's width, so `scrollWidth` moves while the scrollport's
+   * own box does not (it is flex-1 against a fixed parent). An observer watching only the
+   * scrollport structurally cannot fire for that — the right fade would keep painting over a grid
+   * that no longer overflows, or fail to appear on one that now does.
+   */
+  assert.match(edgeLogicSrc, /ro\.observe\(gridTableRef\.current\)/, 'observes the table — column show/hide');
+});
+
+test('row replacement re-measures, and the effect cleans up after itself', () => {
+  /*
+   * `rows` in the dep array is the fourth trigger and the least obvious. Paging 1 → 2 swaps 50
+   * rows for 50 rows: the table height is unchanged (no ResizeObserver fire) and resetGridScroll
+   * may scroll to an offset that is already 0,0 (no scroll event) — yet a short final page has a
+   * different scroll extent. Without this, a bottom fade keeps painting over content that has none.
+   */
+  assert.match(edgeLogicSrc, /\}, \[rows, measureScrollEdges, scheduleEdgeMeasure\]\);/, 'effect re-runs when rows change');
+  // Measured synchronously in the effect body, which is also the FIRST measurement — the fades
+  // must be correct on first paint, before any scroll or resize.
+  assert.match(edgeLogicSrc, /if \(!el\) return;\s*measureScrollEdges\(\);/, 'effect measures on mount and on every re-run');
+  // Full teardown, or a re-mount leaks a listener, an observer and a pending frame.
+  assert.match(edgeLogicSrc, /removeEventListener\('scroll', scheduleEdgeMeasure\)/, 'listener removed');
+  assert.match(edgeLogicSrc, /ro\.disconnect\(\)/, 'observer disconnected');
+  assert.match(edgeLogicSrc, /cancelAnimationFrame\(edgeRafRef\.current\)/, 'pending frame cancelled');
+});
+
+test('the fades are decorative: hidden from AT, transparent to the pointer, and static', () => {
+  const fades = fadesSrc.match(/<div\s+aria-hidden[\s\S]*?\/>/g) ?? [];
+  assert.equal(fades.length, 4, `expected 4 fade overlays, found ${fades.length}`);
+  for (const f of fades) {
+    assert.match(f, /aria-hidden/, 'each fade is hidden from assistive tech');
+    assert.match(f, /pointer-events-none/, 'each fade must never intercept a click');
+    // STATIC PRESENCE (WCAG 2.3.3). Appearance is a mount, not an animation — so there is no
+    // motion-reduce variant to get wrong, and no pulse or hint to suppress. The 1px slack in the
+    // measurement is what keeps a mount from reading as a flicker at the extremes.
+    assert.doesNotMatch(f, /transition|animate-|duration-/, 'fades must not animate');
+    // Token, not a hex literal — and the SAME token the rows sit on, which is what makes the
+    // 1px geometric overlap with the header invisible in paint (measured: 0 pixel delta).
+    assert.match(f, /from-ground to-ground\/0/, 'gradient runs from the ground token to zero alpha');
+    assert.doesNotMatch(f, /#[0-9a-fA-F]{3,8}/, 'no hex literals in the gradient');
+  }
+  // All four edges are covered, each in its own direction.
+  for (const [edge, dir] of [['top', 'to-b'], ['bottom', 'to-t'], ['left', 'to-r'], ['right', 'to-l']]) {
+    const one = fades.find((f) => fadesSrc.indexOf(f) > fadesSrc.indexOf(`{scrollEdges.${edge} && (`));
+    assert.ok(one, `${edge} fade present`);
+    assert.ok(fadesSrc.includes(`bg-gradient-${dir}`), `${edge} fade fades inward (bg-gradient-${dir})`);
+  }
+});
+
+test('no fade paints over the sticky header — geometrically AND by z-index', () => {
+  /*
+   * TWO MECHANISMS ON PURPOSE, because the z-index alone is conditional. `opacity-60` during a
+   * refetch makes the scrollport a stacking context, which pulls the header's own `z-20` inside it
+   * — so a `z-10` sibling would paint over the header in exactly that state and no other. The
+   * geometric offset is what actually guarantees it; the z-index makes the two agree.
+   */
+  /*
+   * THE PAIRED CONSTANT, now with a third member: the header is `h-8`, body rows carry
+   * `scroll-mt-8`, and the three fades that meet the header start at `calc(2rem + 1px)` — the
+   * same 2rem plus the scrollport's own 1px border, which offsets the header's box downward.
+   *
+   * ⚠ THE +1px IS NOT ROUNDING SLOP. At a plain `top-8` the fade overlapped the header's last
+   * pixel row, which is exactly where the sticky underline lives. That was invisible in the normal
+   * state (the header's z-20 paints over the fade's z-10) and ERASED the underline during a
+   * refetch, when `opacity-60` makes the scrollport a stacking context and the fade wins. Measured
+   * both ways: 231 → 251 (ground) in the refetch state before, unchanged after. Do not "simplify"
+   * this back to top-8.
+   */
+  for (const edge of ['top', 'left', 'right']) {
+    const block = fadesSrc.slice(fadesSrc.indexOf(`{scrollEdges.${edge} && (`));
+    assert.match(
+      block.slice(0, 400),
+      /top-\[calc\(2rem_\+_1px\)\]/,
+      `${edge} fade must clear the header's full box, underline included`,
+    );
+    assert.doesNotMatch(block.slice(0, 400), /\btop-8\b/, `${edge} fade must not sit at the bare h-8 offset`);
+  }
+  assert.match(explorerCode, /sticky top-0 z-20 h-8 bg-ground/, 'header is h-8 and z-20');
+  // Below the header (z-20), the drag branch (z-30) and the refetch progress bar (z-30).
+  for (const f of fadesSrc.match(/<div\s+aria-hidden[\s\S]*?\/>/g) ?? []) {
+    assert.match(f, /\bz-10\b/, 'fades sit at z-10, under the header and the drag state');
+  }
+  // 1px inset on every side that meets the frame, so an opaque gradient stop cannot erase the
+  // scrollport's own border, plus rounded corners matching the scrollport's rounding.
+  assert.ok(fadesSrc.includes('inset-x-px'), 'horizontal fades inset past the border');
+  assert.ok(fadesSrc.includes('rounded-b-md') && fadesSrc.includes('rounded-bl-md') && fadesSrc.includes('rounded-br-md'),
+    'fades clip to the scrollport rounding');
+});
+
+test('the sticky header draws its own underline, so it survives being pinned', () => {
+  /*
+   * THE BUG THIS PINS (introduced with the sticky header in #314, fixed here). `<table>` is
+   * `border-collapse: collapse`, so a `border-b` on the header row belongs to the TABLE'S BORDER
+   * GRID rather than to the cell — and the grid scrolls with the content while the cell stays
+   * pinned. Measured on merged main: at rest the seam reads as a uniform dark row (stddev 0);
+   * while stuck that row is gone and only text glyphs remain. An inset box-shadow is painted by
+   * the CELL, so it pins with the cell.
+   */
+  const headCellSrc = explorerCode.slice(
+    explorerCode.indexOf('function SortableHeadCell({'),
+    explorerCode.indexOf('function SortableColumnItem({'),
+  );
+  assert.ok(headCellSrc.length > 0, 'SortableHeadCell located');
+  assert.match(
+    headCellSrc,
+    /shadow-\[inset_0_-1px_0_hsl\(var\(--border\)\)\]/,
+    'the pinned cell draws its own 1px underline',
+  );
+  // Same token the row border used — never a hex, same rule as the fades.
+  assert.doesNotMatch(headCellSrc, /shadow-\[inset[^\]]*#[0-9a-fA-F]{3,8}/, 'no hex literal in the underline');
+
+  /*
+   * BOTH primitive sources of the collapsed border must be cancelled, or the two lines stack 1px
+   * apart — 2px of underline at rest, 1px while stuck.
+   *
+   * ⚠ AND EACH OVERRIDE MUST SIT ON THE ELEMENT THAT CARRIES THE CLASS IT CANCELS. `[&_tr]:border-b`
+   * on <TableHeader> compiles to `.\[\&_tr\]\:border-b tr`, specificity (0,1,1), which BEATS a
+   * plain `.border-b-0` (0,1,0) on the row — so cancelling it from the row loses a silent cascade
+   * race. On the same element twMerge deletes the class outright and specificity never enters into
+   * it. Moving either override to the other element reintroduces the bug.
+   */
+  assert.match(scrollportCode, /<TableHeader className="\[&_tr\]:border-b-0">/, 'thead cancels its own descendant rule');
+  assert.match(scrollportCode, /<TableRow className="border-b-0">/, 'the header row cancels its own border');
+  // ui/table.tsx keeps both for its 10 other consumers — this is a call-site override, not an edit.
+  assert.match(tablePrimitiveSrc, /\[&_tr\]:border-b/, 'the primitive still sets the row border for everyone else');
+});
+
+test('ONE affordance only — no scrollbar CSS on this surface', () => {
+  /*
+   * RULED 2026-09-02. Two overlapping mechanisms is how you get a styled bar under one macOS
+   * "Show scroll bars" setting and a fade under the other, which is the exact inconsistency the
+   * fades exist to remove. It is also a live trap: Chrome 121+ IGNORES ::-webkit-scrollbar
+   * pseudo-elements once `scrollbar-color` or `scrollbar-width` is set on the same element, so a
+   * belt-and-braces pair silently reduces to whichever half the engine prefers.
+   */
+  for (const prop of ['scrollbar-width', 'scrollbar-color', 'scrollbar-gutter', 'webkit-scrollbar']) {
+    assert.ok(!explorerCode.includes(prop), `${prop} must not appear in the explorer`);
+  }
+  // globals.css may carry exactly ONE ::-webkit-scrollbar rule — .q-marquee, the Qualify /
+  // Payer-Intel ticker, which HIDES its bar and is a different surface entirely.
+  const webkitRules = globalsCss.match(/[^\s{}]+::-webkit-scrollbar/g) ?? [];
+  assert.deepEqual(
+    [...new Set(webkitRules)],
+    ['.q-marquee::-webkit-scrollbar'],
+    'the only ::-webkit-scrollbar rule in globals.css is the q-marquee ticker',
+  );
 });
