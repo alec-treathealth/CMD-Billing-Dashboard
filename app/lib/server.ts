@@ -68,6 +68,7 @@ import {
   buildCmdCollectionsEmployerVocabularyQuery,
   buildCmdExplorerGroupedQuery,
   cmdExplorerGroupSortValue,
+  groupedSortStamp,
   type GroupedSortColumn,
   buildCmdEmployerCoverageQuery,
   buildCohortCurveQueries,
@@ -118,6 +119,8 @@ export {
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
   resolveGroupedSort,
+  resolveGroupedCursor,
+  groupedSortStamp,
   GROUPED_AGG_SORT_MAX_WINDOW_DAYS,
   buildCmdSearchSummaryQueries,
 } from '../../src/collections/cmdExplorerQuery.js';
@@ -2829,8 +2832,17 @@ async function loadCmdExplorerGroupedPage(
     id: Number(r.id),
   }));
   const last = page[page.length - 1];
+  // STAMPED WITH THE ORDERING THAT PRODUCED IT, so the next request can detect a cursor that
+  // belongs to a different ordering instead of comparing the wrong quantity — see
+  // resolveGroupedCursor.
   const nextCursor: CmdExplorerCursor | null =
-    hasMore && last ? { id: last.id, value: cmdExplorerGroupSortValue(last, sortColumn) } : null;
+    hasMore && last
+      ? {
+          id: last.id,
+          value: cmdExplorerGroupSortValue(last, sortColumn),
+          sort: groupedSortStamp(sortColumn, direction),
+        }
+      : null;
   return { rows: page, nextCursor };
 }
 

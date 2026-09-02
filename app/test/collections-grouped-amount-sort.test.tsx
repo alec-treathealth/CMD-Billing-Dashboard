@@ -222,3 +222,52 @@ test('Group by Payment itself is NOT window-gated', () => {
   assert.doesNotMatch(toggleBlock, /groupedSortAllowed/, 'nor the sort rule');
   assert.doesNotMatch(toggleBlock, /disabled=\{/, 'and must never be disabled by window size');
 });
+
+test('the emitted cursor is STAMPED, and the action drops a mismatched one', () => {
+  // Qodo #317: a keyset cursor is only meaningful for the ordering that produced it, and the client
+  // can briefly offer a stale one (the sort changes synchronously; the effect that clears the
+  // cursor list runs after paint). The stamp lets the reader detect that instead of comparing the
+  // wrong quantity. Degrading to page 1 is the same failure direction as the sort clamp.
+  assert.match(serverCode, /sort: groupedSortStamp\(sortColumn, direction\),/, 'the next cursor carries its ordering');
+  assert.match(actionsCode, /resolveGroupedCursor\(safeCursor, safeSort\.column, safeSort\.direction\)/);
+  assert.match(actionsCode, /loadCmdExplorerGroupedNonPhi\(\s*pagedCursor,/, 'only the validated cursor is paged');
+});
+
+// ── Copy removed 2026-09-03 — it must not creep back ────────────────────────────────────────────
+test('the Collections subtitle is gone, and PHI masking is unaffected', () => {
+  const pageSrc = readFileSync(join(here, '../app/dashboard/collections/page.tsx'), 'utf8');
+  const pageCode = strip(pageSrc);
+  assert.doesNotMatch(pageCode, /CMD charge-line detail, filterable by facility and month/);
+  assert.doesNotMatch(pageCode, /masked by default and revealed in bulk/);
+  // ⚠ THE SENTENCE WENT; THE CONTROL DID NOT. Masking and the audited reveal are enforced
+  // server-side, never by telling the reader about them — so the entitlement must still be
+  // resolved here and passed down.
+  assert.match(pageCode, /canRevealPhi=\{access\.access\.canRevealPhi\}/, 'the PHI entitlement still flows');
+});
+
+test('the patient-name explainer is gone, but its element still carries NOTICES', () => {
+  /*
+   * The <p> was doing two jobs: a static explainer AND `nameNotice`, which carries the match count,
+   * "no matches", and every error path of the name search. Deleting the element would have silently
+   * removed the only place those surface — so it renders only when there IS a notice, and
+   * aria-describedby is conditional on the same value so it can never dangle.
+   */
+  assert.doesNotMatch(explorerCode, /Matches part of a name across every patient in this view/);
+  assert.match(explorerCode, /\{nameNotice !== null && \(/, 'the element renders only for a notice');
+  assert.match(explorerCode, /<p id="phi-patient-name-help"/, 'and it is still there to render into');
+  assert.match(
+    explorerCode,
+    /aria-describedby=\{nameNotice !== null \? 'phi-patient-name-help' : undefined\}/,
+    'a dangling aria-describedby is worse than none',
+  );
+  // The notice paths themselves are untouched.
+  assert.ok((explorerCode.match(/setNameNotice\(/g) ?? []).length >= 6, 'every notice path survives');
+});
+
+test('the freshness line names its source', () => {
+  const fresh = strip(readFileSync(join(here, '../components/dashboard/data-freshness.tsx'), 'utf8'));
+  // BOTH branches — the stale one is a separate return and was missed by the obvious single edit.
+  const hits = fresh.match(/CollaborateMD collections data last updated at \{stamp\}/g) ?? [];
+  assert.equal(hits.length, 2, `both the current and stale branches renamed, found ${hits.length}`);
+  assert.doesNotMatch(fresh, /Collections data last updated/, 'the old label is gone');
+});

@@ -1150,6 +1150,15 @@ export const CMD_EXPLORER_DEFAULT_SORT: CmdExplorerSort = {
 export interface CmdExplorerCursor {
   id: number;
   value: string | number | null;
+  /**
+   * GROUPED MODE ONLY — the ordering this cursor was minted under, as `column|direction`.
+   *
+   * A keyset cursor is only meaningful for the ordering that produced it, and grouped mode now has
+   * more than one. Stamping the ordering onto the cursor lets the reader DETECT a mismatch instead
+   * of comparing the wrong quantity. Optional so row-mode cursors (which have a single ordering per
+   * request already) are unaffected, and so cursors minted before this field existed still parse.
+   */
+  sort?: string;
 }
 
 /** Clamp a sort to the allowlist; fall back to the Payment-Received-DESC default otherwise. */
@@ -1186,7 +1195,58 @@ export function resolveCmdExplorerCursor(
   if (!Number.isSafeInteger(cursor.id) || cursor.id < 1) return null;
   const v = cursor.value;
   if (v !== null && typeof v !== 'string' && typeof v !== 'number') return null;
-  return { id: cursor.id, value: v ?? null };
+  return { id: cursor.id, value: v ?? null, ...(typeof cursor.sort === 'string' ? { sort: cursor.sort } : {}) };
+}
+
+/** The ordering stamp carried on a grouped cursor — see CmdExplorerCursor.sort. */
+export function groupedSortStamp(column: GroupedSortColumn, direction: 'asc' | 'desc'): string {
+  return `${column}|${direction}`;
+}
+
+/**
+ * Accept a grouped cursor only if it belongs to the ordering being requested; otherwise return
+ * null, which the loader treats as "first page".
+ *
+ * ── THE BUG THIS CLOSES (Qodo, PR #317) ────────────────────────────────────────────────────────
+ * A keyset cursor is only meaningful for the ordering that produced it. `toggleSort` updates the
+ * sort synchronously, so the derived ordering changes in that same render, while the effect that
+ * clears the cursor list is passive and runs after paint. For one painted frame the pager therefore
+ * offers a cursor minted under the PREVIOUS ordering alongside the NEW one.
+ *
+ * Measured consequence, both ways: the two value types are mutually unparseable, so Postgres
+ * RAISES rather than returning wrong rows — `invalid input syntax for type numeric: "2026-09-02"`
+ * feeding a date cursor to the total ordering, and `invalid input syntax for type date: "83930.00"`
+ * the other way. The user saw "That page could not be loaded." So this was never silent data
+ * corruption — but it was a real error on a fast click, and one variant IS silent: flipping only
+ * the DIRECTION keeps the value type valid while reversing the comparison, which skips or repeats
+ * groups at the boundary. Hence the stamp carries the direction too, not just the column.
+ *
+ * ⚠ THE VALUE-SHAPE CHECK IS NOT REDUNDANT WITH THE STAMP, and dropping it would leave the bug
+ * open across a deploy. Cursors already sitting in a browser when this ships carry NO stamp, so a
+ * stamp-only check would wave them through for as long as those tabs stay open. The shape check
+ * catches them because it tests the value itself: a date string can never be a total, and a total
+ * can never be a date.
+ *
+ * Returning null rather than raising is the same failure direction as resolveGroupedSort's clamp —
+ * the reader lands on page 1, never on an error.
+ */
+export function resolveGroupedCursor(
+  cursor: CmdExplorerCursor | null,
+  column: GroupedSortColumn,
+  direction: 'asc' | 'desc',
+): CmdExplorerCursor | null {
+  if (cursor === null) return null;
+  // A stamped cursor must match the ordering exactly.
+  if (cursor.sort !== undefined && cursor.sort !== groupedSortStamp(column, direction)) return null;
+  const v = cursor.value;
+  if (v === null) return cursor; // the trailing NULLS LAST block is valid under either ordering
+  if (column === 'charge_amount') {
+    // A total: parseable as a finite number. '2026-09-02' is not.
+    const n = typeof v === 'number' ? v : Number(String(v).trim());
+    return String(v).trim() !== '' && Number.isFinite(n) ? cursor : null;
+  }
+  // A payment date: ISO 'YYYY-MM-DD'. '83930.00' is not.
+  return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? cursor : null;
 }
 
 // --- page query -------------------------------------------------------------

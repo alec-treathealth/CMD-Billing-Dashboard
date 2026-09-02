@@ -28,7 +28,9 @@ const stale: FreshnessState = {
 
 test('a current read renders the plain last-updated line', () => {
   const html = renderToStaticMarkup(<FreshnessLine state={current} now={NOW} />);
-  assert.match(html, /Collections data last updated/);
+  // Renamed 2026-09-03: the source of this data is CollaborateMD, and saying so is the point of
+  // the line — "Collections data" restated the tab's own name.
+  assert.match(html, /CollaborateMD collections data last updated at/);
   assert.doesNotMatch(html, /not refreshed/);
   assert.doesNotMatch(html, /unavailable/);
 });

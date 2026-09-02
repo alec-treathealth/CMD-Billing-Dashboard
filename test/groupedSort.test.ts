@@ -22,6 +22,7 @@ import {
   resolveGroupedSort,
 } from '../src/collections/groupedSort.js';
 import { businessWindowBounds } from '../src/businessWindow.js';
+import { groupedSortStamp, resolveGroupedCursor } from '../src/collections/cmdExplorerQuery.js';
 
 test('the payment date is orderable at EVERY window, including unresolved', () => {
   // It is a grouping key served by a matching index, so it never pays the aggregate cost. This is
@@ -127,4 +128,65 @@ test('customWindowDays refuses malformed, unreal and inverted ranges', () => {
   assert.equal(customWindowDays('2026-09-10', '2026-09-01'), null, 'inverted');
   // And every refusal reaches groupedSortAllowed as "too wide", i.e. fails closed.
   assert.equal(groupedSortAllowed('charge_amount', customWindowDays('2026-02-30', '2026-03-05')), false);
+});
+
+// ── The cursor must belong to the ordering that produced it (Qodo, PR #317) ─────────────────────
+test('resolveGroupedCursor drops a cursor minted under a DIFFERENT ordering', () => {
+  /*
+   * A keyset cursor is only meaningful for the ordering that produced it. The client can briefly
+   * offer a stale one: toggleSort changes the sort synchronously, while the effect that clears the
+   * cursor list is passive and runs after paint.
+   *
+   * Measured consequence before this guard, both directions: Postgres RAISES rather than returning
+   * wrong rows — `invalid input syntax for type numeric: "2026-09-02"` and `invalid input syntax
+   * for type date: "83930.00"`. Never silent corruption, but a real error on a fast click.
+   */
+  const dateCur = { id: 10, value: '2026-09-02', sort: groupedSortStamp('payment_received', 'desc') };
+  const amtCur = { id: 10, value: '83930.00', sort: groupedSortStamp('charge_amount', 'desc') };
+
+  assert.equal(resolveGroupedCursor(dateCur, 'charge_amount', 'desc'), null, 'date cursor, total ordering');
+  assert.equal(resolveGroupedCursor(amtCur, 'payment_received', 'desc'), null, 'total cursor, date ordering');
+  // Matching orderings pass through unchanged.
+  assert.deepEqual(resolveGroupedCursor(dateCur, 'payment_received', 'desc'), dateCur);
+  assert.deepEqual(resolveGroupedCursor(amtCur, 'charge_amount', 'desc'), amtCur);
+});
+
+test('the stamp carries DIRECTION too — the one variant that would be silent', () => {
+  // Flipping only the direction keeps the value type valid while reversing the comparison, so a
+  // stale cursor skips or repeats groups WITHOUT erroring. The column alone cannot catch it.
+  const cur = { id: 10, value: '83930.00', sort: groupedSortStamp('charge_amount', 'desc') };
+  assert.equal(resolveGroupedCursor(cur, 'charge_amount', 'asc'), null, 'direction flip is a mismatch');
+  assert.deepEqual(resolveGroupedCursor(cur, 'charge_amount', 'desc'), cur);
+});
+
+test('⚠ an UNSTAMPED cursor is still validated by its value shape', () => {
+  /*
+   * NOT REDUNDANT WITH THE STAMP, and dropping this would leave the bug open across a deploy:
+   * cursors already sitting in a browser when this ships carry no stamp at all, so a stamp-only
+   * check waves them through for as long as those tabs stay open. The shape check tests the value
+   * itself — a date can never be a total, and a total can never be a date.
+   */
+  assert.equal(resolveGroupedCursor({ id: 1, value: '2026-09-02' }, 'charge_amount', 'desc'), null);
+  assert.equal(resolveGroupedCursor({ id: 1, value: '83930.00' }, 'payment_received', 'desc'), null);
+  // Correct pairings still work unstamped, so pagination survives the deploy itself.
+  assert.ok(resolveGroupedCursor({ id: 1, value: '2026-09-02' }, 'payment_received', 'desc'));
+  assert.ok(resolveGroupedCursor({ id: 1, value: '83930.00' }, 'charge_amount', 'desc'));
+  assert.ok(resolveGroupedCursor({ id: 1, value: 83930 }, 'charge_amount', 'desc'), 'a numeric value is fine');
+});
+
+test('a NULL-value cursor is valid under either ordering', () => {
+  // It addresses the trailing NULLS LAST block, which both orderings have.
+  for (const col of ['payment_received', 'charge_amount'] as const) {
+    assert.deepEqual(resolveGroupedCursor({ id: 3, value: null }, col, 'desc'), { id: 3, value: null });
+  }
+});
+
+test('resolveGroupedCursor rejects junk values rather than passing them to a cast', () => {
+  for (const v of ['', '   ', 'abc', '2026-9-2', 'NaN']) {
+    assert.equal(resolveGroupedCursor({ id: 1, value: v }, 'charge_amount', 'desc'), null, `amount:${v}`);
+  }
+  for (const v of ['', 'abc', '2026-9-2', '20260902', '1']) {
+    assert.equal(resolveGroupedCursor({ id: 1, value: v }, 'payment_received', 'desc'), null, `date:${v}`);
+  }
+  assert.equal(resolveGroupedCursor(null, 'charge_amount', 'desc'), null, 'null in, null out');
 });

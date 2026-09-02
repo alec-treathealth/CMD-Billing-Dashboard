@@ -2313,7 +2313,10 @@ export function CmdCollectionsExplorer({
                   // autoComplete off: this value is PHI and must not be stored by the browser.
                   autoComplete="off"
                   className="h-8 w-56 rounded-md border border-line bg-canvas px-2 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent)]/25 disabled:cursor-not-allowed disabled:opacity-50"
-                  aria-describedby="phi-patient-name-help"
+                  // Conditional, because the element it names now renders only when there IS a
+                  // notice. A dangling aria-describedby is worse than none: a screen reader
+                  // announces nothing and the author believes the field is described.
+                  aria-describedby={nameNotice !== null ? 'phi-patient-name-help' : undefined}
                 />
               </label>
               <button
@@ -2334,13 +2337,23 @@ export function CmdCollectionsExplorer({
                 </button>
               )}
             </div>
-            {/* The WHAT, always visible. It used to explain a restriction; now it sets the one
-                expectation that is still worth setting — the search spans the whole book, so the
-                grid may show fewer rows than the match count when other filters are active. */}
-            <p id="phi-patient-name-help" className="mt-1.5 text-xs text-muted-foreground">
-              {nameNotice ??
-                'Matches part of a name across every patient in this view — no need to narrow first. Your other filters still apply to the rows shown.'}
-            </p>
+            {/* NOTICES ONLY — the standing explainer is gone (Alec, 2026-09-03). It read "Matches
+                part of a name across every patient in this view — no need to narrow first. Your
+                other filters still apply to the rows shown.", which describes what a search box
+                obviously does and cost a permanent line inside the panel.
+
+                ⚠ THE ELEMENT IS NOT DELETED, AND THAT IS THE WHOLE CARE REQUIRED HERE. It was
+                doing two jobs: the static sentence AND `nameNotice`, which carries real feedback —
+                the match count, "no matches", and every error path of the name search including
+                "The name search could not be completed right now." Deleting the <p> would have
+                silently removed the only place those surface. So it now renders ONLY when there is
+                a notice, and `aria-describedby` on the input is conditional on the same value so it
+                can never point at an element that is not in the DOM. */}
+            {nameNotice !== null && (
+              <p id="phi-patient-name-help" className="mt-1.5 text-xs text-muted-foreground">
+                {nameNotice}
+              </p>
+            )}
           </div>
         )}
 

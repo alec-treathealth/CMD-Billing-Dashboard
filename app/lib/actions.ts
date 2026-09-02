@@ -60,6 +60,7 @@ import {
   type CmdNameSearchResult,
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
+  resolveGroupedCursor,
   resolveGroupedSort,
   CMD_EXPLORER_SEARCH_COLUMNS,
   sanitizeGridColumns,
@@ -1902,9 +1903,17 @@ export async function loadCmdReportGrouped(
    * payment-date order, never a timeout.
    */
   const safeSort = resolveGroupedSort(sortColumn, safeDirection, windowDays);
+  /**
+   * AND THE CURSOR MUST BELONG TO THAT ORDERING (Qodo, PR #317). A keyset cursor is only
+   * meaningful for the ordering that produced it; the client can briefly offer one minted under
+   * the previous ordering, because the sort changes synchronously while the effect that clears the
+   * cursor list runs after paint. A mismatch degrades to the FIRST PAGE rather than erroring — the
+   * same failure direction as the sort clamp above.
+   */
+  const pagedCursor = resolveGroupedCursor(safeCursor, safeSort.column, safeSort.direction);
   try {
     const page = await loadCmdExplorerGroupedNonPhi(
-      safeCursor,
+      pagedCursor,
       readerFilter,
       safeSort.direction,
       entityIds,
