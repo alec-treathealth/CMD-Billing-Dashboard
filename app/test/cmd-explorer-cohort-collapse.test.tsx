@@ -47,6 +47,31 @@ test('cohort panel is collapsed by default', () => {
   );
 });
 
+test('EVERY cohort opens collapsed — the panel is keyed on (tenant, prefix)', () => {
+  // Qodo #313: the initializer above is necessary but NOT sufficient, and asserting it alone is
+  // what let this through. `useState(true)` runs only at MOUNT, and the panel does not unmount on a
+  // prefix or tenant change — `cohortActive` stays true across "ABC" → "XYZ", so useDelayedUnmount
+  // keeps it rendered and the fetch converts ready → refreshing to hold the prior curve on screen.
+  // Without a key, expanding one cohort left the NEXT cohort expanded.
+  //
+  // This pins the MECHANISM (a key derived from view + prefix), which is the most a source-level
+  // test can reach: the component cannot be imported under node:test at all, so the remount itself
+  // is browser-verified, not asserted here.
+  const live = explorerSrc.match(/<CohortCurvePanel\b[\s\S]*?state=\{cohort\}/);
+  assert.ok(live, 'the live cohort panel element exists');
+  assert.match(live[0], /key=\{`\$\{view\}\|\$\{dAlpha\}`\}/, 'live panel keyed on (tenant, prefix)');
+
+  // The exit-fade snapshot deliberately reuses the SAME key so the instance survives the fade and
+  // does not snap shut on its way off screen.
+  const snap = explorerSrc.match(/<CohortCurvePanel\b[\s\S]*?state=\{\{ kind: 'ready', data: cohortSnapshotRef/);
+  assert.ok(snap, 'the exit-snapshot cohort panel element exists');
+  assert.match(
+    snap[0],
+    /key=\{`\$\{view\}\|\$\{cohortSnapshotRef\.current\.prefix\}`\}/,
+    'snapshot panel keyed on the identity it snapshotted',
+  );
+});
+
 test('collapse state is per-render only — never persisted', () => {
   // The ruling is explicit: no localStorage / sessionStorage for this default. Matches on member
   // ACCESS (the trailing dot) so the panel's own docblock naming the rule doesn't trip its own test.

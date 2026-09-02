@@ -2135,6 +2135,11 @@ export function CmdCollectionsExplorer({
             // Frozen snapshot fading out — drilldownPoint is already cleared by the effect above
             // (it resets on any cohortActive/prefix change), so no live selection to render here.
             <CohortCurvePanel
+              // Deliberately the SAME key the live panel carried a moment ago (same view, and the
+              // snapshot's prefix IS the prefix that just cleared), so the instance survives into
+              // the exit fade and the panel fades out in the state the user left it — rather than
+              // snapping shut on its way off screen.
+              key={`${view}|${cohortSnapshotRef.current.prefix}`}
               state={{ kind: 'ready', data: cohortSnapshotRef.current.data }}
               prefix={cohortSnapshotRef.current.prefix}
               selectedPoint={null}
@@ -2144,6 +2149,15 @@ export function CmdCollectionsExplorer({
             />
           ) : (
             <CohortCurvePanel
+              // KEYED ON COHORT IDENTITY (Qodo #313, 2026-09-01). `collapsed` lives inside the panel
+              // and its useState initializer runs ONLY at mount — but the panel does not unmount on a
+              // prefix or tenant change: `cohortActive` stays true across "ABC" → "XYZ", the fetch
+              // converts ready → refreshing to keep the prior curve visible, and this JSX position is
+              // otherwise stable. So an expanded panel stayed expanded for the NEXT cohort, defeating
+              // the collapsed-by-default ruling in exactly the search-one-prefix-then-another flow the
+              // panel exists for. The key remounts it per (tenant, prefix) — the React-idiomatic
+              // "reset all state when the identity changes", rather than a second source of truth.
+              key={`${view}|${dAlpha}`}
               state={cohort}
               prefix={dAlpha}
               // P1 scope disclosure: with an exact Member-ID lookup active the grid narrows to
