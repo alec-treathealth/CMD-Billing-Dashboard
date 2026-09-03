@@ -193,8 +193,123 @@ test('no PHI column is ever projected', () => {
 
 // ── 5. The cursor scalar ────────────────────────────────────────────────────────────────────────
 test('cmdExplorerGroupSortValue reads the payment date, normalising undefined to null', () => {
+  // The sort column is now a REQUIRED second argument — see the helper's docblock. Passing it
+  // explicitly here is the point: a cursor scalar taken from a different column than the page was
+  // ordered by produces a keyset that compares the wrong quantity and silently skips or repeats
+  // groups at every boundary.
   const row = { payment_received: '2026-08-01' } as CmdExplorerGroupRow;
-  assert.equal(cmdExplorerGroupSortValue(row), '2026-08-01');
-  assert.equal(cmdExplorerGroupSortValue({} as CmdExplorerGroupRow), null);
-  assert.equal(cmdExplorerGroupSortValue({ payment_received: null } as CmdExplorerGroupRow), null);
+  assert.equal(cmdExplorerGroupSortValue(row, 'payment_received'), '2026-08-01');
+  assert.equal(cmdExplorerGroupSortValue({} as CmdExplorerGroupRow, 'payment_received'), null);
+  assert.equal(
+    cmdExplorerGroupSortValue({ payment_received: null } as CmdExplorerGroupRow, 'payment_received'),
+    null,
+  );
+});
+
+test('cmdExplorerGroupSortValue reads the TOTAL under an aggregate sort, as a string', () => {
+  const row = { payment_received: '2026-08-01', charge_amount: '83930.00' } as unknown as CmdExplorerGroupRow;
+  // The same row yields a DIFFERENT scalar per ordering — which is the whole reason the column has
+  // to be passed rather than inferred.
+  assert.equal(cmdExplorerGroupSortValue(row, 'charge_amount'), '83930.00');
+  assert.equal(cmdExplorerGroupSortValue(row, 'payment_received'), '2026-08-01');
+  // Textual end to end: sum(numeric) can exceed exact double range, and this value becomes a
+  // ::numeric bind param that decides page boundaries. A number must not be introduced here.
+  assert.equal(typeof cmdExplorerGroupSortValue(row, 'charge_amount'), 'string');
+  // A group whose every line had a null charge_amount sums to NULL — the trailing NULLS LAST block.
+  assert.equal(
+    cmdExplorerGroupSortValue({ charge_amount: null } as unknown as CmdExplorerGroupRow, 'charge_amount'),
+    null,
+  );
+  assert.equal(cmdExplorerGroupSortValue({} as CmdExplorerGroupRow, 'charge_amount'), null);
+});
+
+// ── 6. AGGREGATE ORDERING — sort groups by their TOTAL, capped by window size ───────────────────
+//
+// Shipped 2026-09-03. As above these are SQL-SHAPE tests; the behaviour a shape test cannot prove
+// was verified against production first and is recorded here:
+//   · KEYSET CORRECTNESS — paged the full result set through the real cursor in BOTH directions,
+//     on BXR (475 groups / 10 pages) and Consolidated (1,471 / 30): zero repeats, zero skips, order
+//     identical to the same ordering taken unpaginated, and (total, id) monotonic across every page
+//     boundary. That is the property the builder's docblock warns is silently violable.
+//   · COST — the reason for the cap. Ordering by the payment date is index-served and stops early
+//     (~708 rows, ~87 groups, 2.8 ms on BXR 90d); ordering by a sum cannot stop early and reads the
+//     window (14,489 rows, 2,998 groups, 62 ms). Flat across page depth, linear in window size:
+//     Consolidated measures 10 / 74 / 207 / 402 / 724 ms at 7d / 30d / 90d / 180d / 1y.
+const buildAgg = (
+  cursor: Parameters<typeof buildCmdExplorerGroupedQuery>[0] = null,
+  dir: 'asc' | 'desc' = 'desc',
+) => buildCmdExplorerGroupedQuery(cursor, {}, dir, 50, ENTITY, { groupedSort: 'charge_amount' });
+
+test('the default ordering is UNCHANGED when no grouped sort is requested', () => {
+  // Every pre-existing caller must keep the payment-date ordering it already had.
+  const { sql } = build();
+  assert.match(sql, /order by t\.payment_received desc nulls last, max\(t\.id\) desc/);
+  assert.match(sql, /order by g\.payment_received desc nulls last, g\.id desc$/);
+  assert.doesNotMatch(sql, /order by sum\(t\.charge_amount\)/, 'no aggregate ordering unless asked');
+});
+
+test('an aggregate sort orders BOTH the inner keyset and the outer projection by the total', () => {
+  const { sql } = buildAgg();
+  assert.match(sql, /order by sum\(t\.charge_amount\) desc nulls last, max\(t\.id\) desc limit/);
+  // The outer ORDER BY must name the SAME column: the page is SELECTED by the inner ordering and
+  // DISPLAYED by the outer one, so a mismatch would show 50 correct rows in the wrong order.
+  assert.match(sql, /order by g\.charge_amount desc nulls last, g\.id desc$/);
+  assert.doesNotMatch(sql, /order by t\.payment_received/, 'the date ordering is replaced, not kept');
+});
+
+test('direction flows through to both orderings', () => {
+  const { sql } = buildAgg(null, 'asc');
+  assert.match(sql, /order by sum\(t\.charge_amount\) asc nulls last, max\(t\.id\) asc limit/);
+  assert.match(sql, /order by g\.charge_amount asc nulls last, g\.id asc$/);
+});
+
+test('⚠ the aggregate keyset lives in HAVING and emits NO pre-aggregation WHERE prune', () => {
+  /*
+   * THE LOAD-BEARING ASSERTION IN THIS FILE. The payment_received path pushes its cursor into the
+   * WHERE clause as well, pruning charge lines before they are grouped — that is what keeps deep
+   * paging cheap. Copying that onto the aggregate path is the obvious "optimisation" and it is
+   * WRONG in a way that does not raise: it would filter individual CHARGE LINES by the cursor's
+   * GROUP TOTAL, two different quantities. A group whose total clears the cursor can be built from
+   * lines that individually do not, so rows would silently vanish out of groups and the totals on
+   * screen would be understated — not merely mis-ordered.
+   */
+  const { sql } = buildAgg({ id: 900, value: '40000.00' });
+  assert.match(sql, /having \(sum\(t\.charge_amount\) < \$\d+::numeric/, 'keyset compares the total');
+  assert.match(sql, /or \(sum\(t\.charge_amount\) = \$\d+::numeric and max\(t\.id\) < \$\d+\)/, 'ties break on id');
+  assert.match(sql, /or sum\(t\.charge_amount\) is null\)/, 'the trailing NULLS LAST block stays reachable');
+  // The WHERE clause must not mention charge_amount at all.
+  const where = sql.slice(sql.indexOf(' where '), sql.indexOf(' group by '));
+  assert.doesNotMatch(where, /charge_amount/, 'NO charge_amount predicate before aggregation');
+});
+
+test('the cursor total is a BOUND PARAMETER, never interpolated', () => {
+  const { sql, params } = buildAgg({ id: 7, value: "1'; drop table x--" });
+  assert.doesNotMatch(sql, /drop table/, 'the value never reaches the SQL text');
+  assert.ok(params.includes("1'; drop table x--"), 'it is bound instead');
+  // Cast explicitly so a text bind compares as a number, not as a string.
+  assert.match(sql, /::numeric/, 'the bound total is cast to numeric');
+});
+
+test('a NULL-total cursor selects only the trailing NULL block', () => {
+  // Defensive symmetry with the payment_received path. Unreachable with today's data (0 of 505,423
+  // charge lines have a null charge_amount) but the column is nullable — see the builder's note.
+  const { sql } = buildAgg({ id: 12, value: null });
+  assert.match(sql, /having \(sum\(t\.charge_amount\) is null and max\(t\.id\) < \$\d+\)/);
+  assert.doesNotMatch(sql, /::numeric/, 'no total to compare against in the NULL block');
+});
+
+test('max(t.id) remains the tiebreaker, which is what keeps the ordering TOTAL', () => {
+  // It matters MORE here than under the date sort: two groups can easily share a total, where
+  // (payment_received, id) could never tie at all. Without a total order a page boundary may drop
+  // or duplicate a group.
+  const { sql } = buildAgg({ id: 5, value: '100.00' });
+  assert.match(sql, /max\(t\.id\) < \$\d+/);
+  assert.match(sql, /, max\(t\.id\) desc limit/);
+});
+
+test('the group key is untouched by the ordering change', () => {
+  // Ordering must not silently re-grain the result: same five-part key as the date-ordered query.
+  const grouping = /group by t\.business_entity_id, coalesce\(t\.member_id_bidx, 'id:' \|\| t\.id\), t\.payment_received, t\.facility, t\.primary_payer/;
+  assert.match(build().sql, grouping);
+  assert.match(buildAgg().sql, grouping);
 });

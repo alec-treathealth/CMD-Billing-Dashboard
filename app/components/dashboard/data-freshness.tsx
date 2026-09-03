@@ -80,7 +80,7 @@ export function FreshnessLine({ state, now = Date.now() }: { state: FreshnessSta
         className="mt-2 text-xs text-muted-foreground"
         title={`Last updated ${iso} · last checked ${state.measuredAt}`}
       >
-        Collections data last updated {stamp}{' '}
+        CollaborateMD collections data last updated at {stamp}{' '}
         <span className="text-amber-700 dark:text-amber-500">
           · not refreshed since {agoLabel(state.measuredAt, now)}
         </span>
@@ -90,7 +90,7 @@ export function FreshnessLine({ state, now = Date.now() }: { state: FreshnessSta
 
   return (
     <p className="mt-2 text-xs text-muted-foreground" title={iso}>
-      Collections data last updated {stamp}
+      CollaborateMD collections data last updated at {stamp}
     </p>
   );
 }

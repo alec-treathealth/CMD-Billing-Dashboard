@@ -10,6 +10,7 @@
  * bound `$n` parameter via the `add` closure — never interpolated.
  */
 import type { CmdExplorerRow } from './cmdExplorer.js';
+import type { GroupedSortColumn } from './groupedSort.js';
 // The SQL layer's one copy of the 'No Facility' literal. Imported rather than re-typed, per that
 // module's own rule that "a site opts in by naming it".
 //
@@ -355,6 +356,18 @@ export interface CmdExplorerCondOptions {
 export interface CmdExplorerBuilderOptions {
   /** Assert a CLOSED window — see CmdExplorerCondOptions.requireWindow. Off unless asked. */
   requireWindow?: boolean;
+  /**
+   * GROUPED MODE ONLY — which column `buildCmdExplorerGroupedQuery` orders by. Defaults to
+   * `payment_received`, which is what every caller got before this option existed.
+   *
+   * ⚠ EVERY OTHER BUILDER IGNORES IT. Row mode takes a real `sort` argument, so there is no call
+   * site where passing this to the wrong builder would be a plausible mistake — but it is silently
+   * inert there, so do not read its presence as evidence that a query is ordered by it.
+   *
+   * The CALLER is responsible for having clamped this through `resolveGroupedSort` first: the
+   * builder emits whatever it is handed, and the window cap is policy, not SQL.
+   */
+  groupedSort?: GroupedSortColumn;
 }
 
 export function cmdExplorerBaseConds(
@@ -1137,6 +1150,15 @@ export const CMD_EXPLORER_DEFAULT_SORT: CmdExplorerSort = {
 export interface CmdExplorerCursor {
   id: number;
   value: string | number | null;
+  /**
+   * GROUPED MODE ONLY — the ordering this cursor was minted under, as `column|direction`.
+   *
+   * A keyset cursor is only meaningful for the ordering that produced it, and grouped mode now has
+   * more than one. Stamping the ordering onto the cursor lets the reader DETECT a mismatch instead
+   * of comparing the wrong quantity. Optional so row-mode cursors (which have a single ordering per
+   * request already) are unaffected, and so cursors minted before this field existed still parse.
+   */
+  sort?: string;
 }
 
 /** Clamp a sort to the allowlist; fall back to the Payment-Received-DESC default otherwise. */
@@ -1151,6 +1173,20 @@ export function resolveCmdExplorerSort(sort: CmdExplorerSort | undefined): CmdEx
   return { ...CMD_EXPLORER_DEFAULT_SORT };
 }
 
+// --- GROUPED-MODE SORT: the payment date, or ONE aggregate under a window cap ------------------
+//
+// The policy lives in ./groupedSort.js — its own leaf module so a CLIENT component can import the
+// predicate without pulling every SQL string in this file into the browser bundle. Re-exported
+// here so server-side callers keep importing it from the query module alongside the builder that
+// consumes it.
+export {
+  GROUPED_SORTABLE,
+  GROUPED_AGG_SORT_MAX_WINDOW_DAYS,
+  groupedSortAllowed,
+  resolveGroupedSort,
+} from './groupedSort.js';
+export type { GroupedSortColumn } from './groupedSort.js';
+
 /** Accept a cursor only if shaped safely; otherwise treat it as the first page. */
 export function resolveCmdExplorerCursor(
   cursor: CmdExplorerCursor | null | undefined,
@@ -1159,7 +1195,58 @@ export function resolveCmdExplorerCursor(
   if (!Number.isSafeInteger(cursor.id) || cursor.id < 1) return null;
   const v = cursor.value;
   if (v !== null && typeof v !== 'string' && typeof v !== 'number') return null;
-  return { id: cursor.id, value: v ?? null };
+  return { id: cursor.id, value: v ?? null, ...(typeof cursor.sort === 'string' ? { sort: cursor.sort } : {}) };
+}
+
+/** The ordering stamp carried on a grouped cursor — see CmdExplorerCursor.sort. */
+export function groupedSortStamp(column: GroupedSortColumn, direction: 'asc' | 'desc'): string {
+  return `${column}|${direction}`;
+}
+
+/**
+ * Accept a grouped cursor only if it belongs to the ordering being requested; otherwise return
+ * null, which the loader treats as "first page".
+ *
+ * ── THE BUG THIS CLOSES (Qodo, PR #317) ────────────────────────────────────────────────────────
+ * A keyset cursor is only meaningful for the ordering that produced it. `toggleSort` updates the
+ * sort synchronously, so the derived ordering changes in that same render, while the effect that
+ * clears the cursor list is passive and runs after paint. For one painted frame the pager therefore
+ * offers a cursor minted under the PREVIOUS ordering alongside the NEW one.
+ *
+ * Measured consequence, both ways: the two value types are mutually unparseable, so Postgres
+ * RAISES rather than returning wrong rows — `invalid input syntax for type numeric: "2026-09-02"`
+ * feeding a date cursor to the total ordering, and `invalid input syntax for type date: "83930.00"`
+ * the other way. The user saw "That page could not be loaded." So this was never silent data
+ * corruption — but it was a real error on a fast click, and one variant IS silent: flipping only
+ * the DIRECTION keeps the value type valid while reversing the comparison, which skips or repeats
+ * groups at the boundary. Hence the stamp carries the direction too, not just the column.
+ *
+ * ⚠ THE VALUE-SHAPE CHECK IS NOT REDUNDANT WITH THE STAMP, and dropping it would leave the bug
+ * open across a deploy. Cursors already sitting in a browser when this ships carry NO stamp, so a
+ * stamp-only check would wave them through for as long as those tabs stay open. The shape check
+ * catches them because it tests the value itself: a date string can never be a total, and a total
+ * can never be a date.
+ *
+ * Returning null rather than raising is the same failure direction as resolveGroupedSort's clamp —
+ * the reader lands on page 1, never on an error.
+ */
+export function resolveGroupedCursor(
+  cursor: CmdExplorerCursor | null,
+  column: GroupedSortColumn,
+  direction: 'asc' | 'desc',
+): CmdExplorerCursor | null {
+  if (cursor === null) return null;
+  // A stamped cursor must match the ordering exactly.
+  if (cursor.sort !== undefined && cursor.sort !== groupedSortStamp(column, direction)) return null;
+  const v = cursor.value;
+  if (v === null) return cursor; // the trailing NULLS LAST block is valid under either ordering
+  if (column === 'charge_amount') {
+    // A total: parseable as a finite number. '2026-09-02' is not.
+    const n = typeof v === 'number' ? v : Number(String(v).trim());
+    return String(v).trim() !== '' && Number.isFinite(n) ? cursor : null;
+  }
+  // A payment date: ISO 'YYYY-MM-DD'. '83930.00' is not.
+  return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? cursor : null;
 }
 
 // --- page query -------------------------------------------------------------
@@ -2177,9 +2264,51 @@ export function buildCmdExplorerGroupedQuery(
   const dir = direction === 'asc' ? 'asc' : 'desc';
   const cmp = direction === 'asc' ? '>' : '<';
 
+  /**
+   * WHICH COLUMN THIS PAGE IS ORDERED BY. Policy (the window cap) lives in resolveGroupedSort; by
+   * the time we are here the decision is made and this just emits SQL.
+   *
+   * The two paths differ in more than an ORDER BY clause, which is why they are branched rather
+   * than parameterised into one string:
+   *   · payment_received is a GROUPING KEY, so its keyset can ALSO be applied as a WHERE prune
+   *     before aggregation — that is what keeps deep paging cheap.
+   *   · sum(charge_amount) is an AGGREGATE. There is no pre-aggregation prune for it (you cannot
+   *     filter on a sum before the rows are grouped), so the keyset lives in HAVING alone and the
+   *     whole window is aggregated on every page. Measured flat at ~62 ms (BXR 90d) on page 1 and
+   *     page 10 — the cost does not grow with depth, it starts at its ceiling.
+   */
+  const sortCol: GroupedSortColumn = opts?.groupedSort === 'charge_amount' ? 'charge_amount' : 'payment_received';
+  const AGG = 'sum(t.charge_amount)';
+
   const having: string[] = [];
   if (cursor !== null) {
-    if (cursor.value === null) {
+    if (sortCol === 'charge_amount') {
+      if (cursor.value === null) {
+        // A NULL sum: every line in that group had a null charge_amount. Under NULLS LAST those
+        // sort after every real total, so only later null-sum groups remain.
+        //
+        // ⚠ UNREACHABLE WITH TODAY'S DATA, AND KEPT ANYWAY. Measured 2026-09-03: 0 of 505,423
+        // charge lines have a null charge_amount, so no group total is null and this arm never
+        // fires — unlike its payment_received counterpart, where nulls are real. It stays because
+        // the column IS nullable in the matview, and the failure mode if that ever changes is the
+        // silent kind: without this arm the trailing NULL block would be dropped from the last
+        // page rather than raising. Do not "simplify" it away on coverage grounds.
+        having.push(`(${AGG} is null and max(t.id) ${cmp} ${add(cursor.id)})`);
+      } else {
+        // ⚠ NO `conds.push(...)` COUNTERPART HERE, and its absence is the point — see the docblock
+        // above. Adding a WHERE prune on charge_amount would filter individual CHARGE LINES by the
+        // cursor's GROUP TOTAL, which is a different quantity: a group whose total clears the
+        // cursor can be assembled from lines that individually do not, so rows would vanish from
+        // groups and the totals on screen would be wrong rather than merely mis-ordered.
+        const vParam = add(cursor.value);
+        const idParam = add(cursor.id);
+        having.push(
+          `(${AGG} ${cmp} ${vParam}::numeric ` +
+            `or (${AGG} = ${vParam}::numeric and max(t.id) ${cmp} ${idParam}) ` +
+            `or ${AGG} is null)`,
+        );
+      }
+    } else if (cursor.value === null) {
       // The cursor row sat in the trailing NULL block: only later NULL-payment groups remain.
       having.push(`(t.payment_received is null and max(t.id) ${cmp} ${add(cursor.id)})`);
     } else {
@@ -2264,7 +2393,12 @@ export function buildCmdExplorerGroupedQuery(
     `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} ` +
     `group by t.business_entity_id, coalesce(t.member_id_bidx, 'id:' || t.id), ` +
     `t.payment_received, t.facility, t.primary_payer${havingSql} ` +
-    `order by t.payment_received ${dir} nulls last, max(t.id) ${dir} limit ${add(limit)}` +
+    // `max(t.id)` stays the tiebreaker on BOTH paths, and it is what keeps the cursor safe: an id
+    // belongs to exactly one group, so the ordering is TOTAL and no page boundary can drop or
+    // repeat a group. That matters MORE under the aggregate sort than under the date sort — two
+    // groups can easily share a total, where (date, id) could never tie at all.
+    `order by ${sortCol === 'charge_amount' ? AGG : 't.payment_received'} ${dir} nulls last, ` +
+    `max(t.id) ${dir} limit ${add(limit)}` +
     `) g left join collections.cmd_explorer_rows e on e.id = g.id ` +
     // FACILITY RESOLUTION IN GROUPED MODE — resolved on the REPRESENTATIVE id, outside the LIMIT,
     // exactly as employer_name is, and licensed by the same kind of argument.
@@ -2292,11 +2426,34 @@ export function buildCmdExplorerGroupedQuery(
     // a cursor for an arbitrary group and silently skip or repeat pages. Costs nothing over 50 rows.
     // `g.payment_received` is the to_char TEXT here, and sorting it as text is order-identical to the
     // date because ISO-8601 is lexicographically ordered (the same argument row mode relies on).
-    `order by g.payment_received ${dir} nulls last, g.id ${dir}`;
+    // `g.charge_amount` needs no such argument — it is the subquery's numeric `sum`, sorted as a
+    // number. The outer ORDER BY re-states the inner one over the already-limited 50 rows. It must
+    // name the SAME column, or the page would be selected by one ordering and displayed in another.
+    `order by g.${sortCol} ${dir} nulls last, g.id ${dir}`;
   return { sql, params };
 }
 
-/** A grouped row's cursor scalar — the payment date it was ordered by, or null in the NULL block. */
-export function cmdExplorerGroupSortValue(row: CmdExplorerGroupRow): string | null {
+/**
+ * A grouped row's cursor scalar — the value of whichever column the page was ORDERED BY, or null
+ * for a row in the trailing NULL block.
+ *
+ * ⚠ IT MUST AGREE WITH THE ORDERING THE PAGE WAS BUILT WITH. Handing back a payment date while the
+ * page was ordered by total (or the reverse) produces a keyset that compares the wrong quantity —
+ * which does not error, it silently skips or repeats groups at every page boundary. That is the
+ * exact failure the builder's own docblock warns about, so the sort column is a REQUIRED argument
+ * rather than an optional one with a default: a caller that forgets it fails to compile.
+ *
+ * The total is returned as a STRING. `sum(numeric)` can exceed what a double represents exactly,
+ * and the value round-trips through a Server Action to become a `::numeric` bind param, so keeping
+ * it textual end-to-end avoids a float ever touching a comparison that decides page boundaries.
+ */
+export function cmdExplorerGroupSortValue(
+  row: CmdExplorerGroupRow,
+  sortColumn: GroupedSortColumn,
+): string | null {
+  if (sortColumn === 'charge_amount') {
+    const v = row.charge_amount;
+    return v === null || v === undefined ? null : String(v);
+  }
   return row.payment_received ?? null;
 }

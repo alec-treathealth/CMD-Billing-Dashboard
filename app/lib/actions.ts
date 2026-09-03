@@ -60,6 +60,8 @@ import {
   type CmdNameSearchResult,
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
+  resolveGroupedCursor,
+  resolveGroupedSort,
   CMD_EXPLORER_SEARCH_COLUMNS,
   sanitizeGridColumns,
   gridViewsFor,
@@ -1578,28 +1580,50 @@ function applyPayerFilter(filter: CmdReportFilter, readerFilter: { primary_payer
  *
  * Returns false on invalid input — REJECTED, never clamped. `now` is injectable for determinism.
  */
+/**
+ * Resolve the window onto `readerFilter` and RETURN ITS SPAN IN DAYS, or null if it is invalid.
+ *
+ * ⚠ THE RETURN VALUE USED TO BE A BOOLEAN. It now carries the span because grouped mode's
+ * aggregate sort is capped by window size (GROUPED_AGG_SORT_MAX_WINDOW_DAYS), and the caller needs
+ * the resolved number to apply that cap. Deriving it a second time at the call site was the
+ * obvious alternative and is exactly what must not happen: this function already branches on
+ * custom-vs-preset, applies the custom span cap, and rejects unreal dates, so a parallel
+ * computation would be a second definition of "how wide is this window" — free to drift from the
+ * one that actually built the bounds.
+ *
+ * ⚠ THE SPAN IS THE WINDOW'S OWN DAY COUNT, NOT `to - from`, and the two genuinely differ. A
+ * trailing preset resolves to a half-open `[from, to)` with `to` = business-today + 1, so the 90d
+ * preset spans 91 days; "Include scheduled" then pushes `to` a further FUTURE_PAYMENT_HORIZON_DAYS
+ * out, making it 105. Returning `to - from` would have made a 90-day cap reject the DEFAULT
+ * window, and reject it again whenever Include-scheduled was ticked. Callers get the semantic
+ * number a reader would recognise: 7, 14, 30, 90, 180, 365, or a custom range's own span.
+ *
+ * Every `null` return is still an "Invalid date window." rejection at the call sites — falsy
+ * checks were replaced with explicit `=== null` so that a legitimate span can never be read as a
+ * failure (no preset is 0, but a future custom same-day range could be).
+ */
 function applyDateWindow(
   filter: CmdReportFilter,
   readerFilter: { from?: string; to?: string; businessToday?: string },
   now: Date = new Date(),
-): boolean {
+): number | null {
   const businessToday = businessDayIso(now);
   let window: BusinessWindow;
 
   if (filter.customFrom !== undefined || filter.customTo !== undefined) {
     const { customFrom, customTo } = filter;
-    if (typeof customFrom !== 'string' || typeof customTo !== 'string') return false;
+    if (typeof customFrom !== 'string' || typeof customTo !== 'string') return null;
     let bounds;
     try {
       // The primitive validates shape, real-ness (2026-02-30 is refused, not rolled forward),
       // from <= to, and the supported year range. It throws rather than returning a sentinel.
       bounds = businessWindowBounds({ kind: 'custom', from: customFrom, to: customTo }, now);
     } catch {
-      return false;
+      return null;
     }
     // The SPAN cap is this surface's rule, applied after the primitive has confirmed the range is
     // representable at all. Reject, do not clamp.
-    if (bounds.windowDays > CMD_CUSTOM_MAX_DAYS) return false;
+    if (bounds.windowDays > CMD_CUSTOM_MAX_DAYS) return null;
     readerFilter.from = bounds.from;
     // ⚠ NO applyScheduledBound HERE, DELIBERATELY — see that helper's docblock. An explicit range
     // already answers the scheduled question in both directions, and overriding `to` would both
@@ -1607,17 +1631,17 @@ function applyDateWindow(
     // user asked for are the bounds they get.
     readerFilter.to = bounds.to;
     readerFilter.businessToday = businessToday;
-    return true;
+    return bounds.windowDays;
   }
 
   const days = filter.windowDays ?? 90;
-  if (!CMD_WINDOW_PRESETS.has(days)) return false;
+  if (!CMD_WINDOW_PRESETS.has(days)) return null;
   window = { kind: 'trailing', days };
   const bounds = businessWindowBounds(window, now);
   readerFilter.from = bounds.from;
   readerFilter.to = applyScheduledBound(filter, bounds.to, now);
   readerFilter.businessToday = businessToday;
-  return true;
+  return days;
 }
 
 /**
@@ -1762,7 +1786,8 @@ export async function loadCmdReport(
   if (!applySearchFilter(filter, readerFilter)) {
     return { ok: false, error: 'Invalid search.' };
   }
-  if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
+  const windowDays = applyDateWindow(filter, readerFilter);
+  if (windowDays === null) return { ok: false, error: 'Invalid date window.' };
   // Employer segment + picked employers (missing until 2026-08-17 — see CmdReportFilter).
   if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
   // Patient-name search result ids. `[]` is preserved on purpose (searched, matched nothing).
@@ -1818,6 +1843,13 @@ export async function loadCmdReportGrouped(
   filter: CmdReportFilter = {},
   direction: 'asc' | 'desc' = 'desc',
   view?: DashboardView,
+  /**
+   * Which column to order groups by. Optional and defaulted so every existing caller keeps the
+   * payment-date ordering it already had. Untyped as `string` on purpose — it crosses the Server
+   * Action boundary from the browser, so it is UNTRUSTED input and is narrowed by
+   * resolveGroupedSort below rather than being trusted as a union.
+   */
+  sortColumn?: string,
 ): Promise<CmdGroupedResult> {
   const entityIds = await viewEntityScope(view);
   if (entityIds === null) {
@@ -1849,7 +1881,8 @@ export async function loadCmdReportGrouped(
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
   if (!applySearchFilter(filter, readerFilter)) return { ok: false, error: 'Invalid search.' };
-  if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
+  const windowDays = applyDateWindow(filter, readerFilter);
+  if (windowDays === null) return { ok: false, error: 'Invalid date window.' };
   if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
   if (!applyRowIds(filter, readerFilter)) return { ok: false, error: 'Invalid name-search result.' };
   if (!applyPatientMembers(filter, readerFilter)) {
@@ -1858,8 +1891,34 @@ export async function loadCmdReportGrouped(
   const phi = await resolvePhiSearch(filter.phiSearch, view, true);
   if (!phi.ok) return { ok: false, error: phi.error };
   if (phi.phiIndex) readerFilter.phiIndex = phi.phiIndex;
+  /**
+   * THE WINDOW CAP, ENFORCED SERVER-SIDE. `resolveGroupedSort` is the SAME predicate the client
+   * uses to enable or disable the header control, imported from src rather than reimplemented, so
+   * the two cannot drift into disagreeing about which orderings are available.
+   *
+   * This is a BACKSTOP, not the mechanism. Our client normalises the sort back to payment_received
+   * in the same state update that widens the window, so a legitimate request never needs clamping;
+   * this exists so a stale or hand-made request cannot buy the 724 ms full-year aggregate query.
+   * Clamping rather than erroring is the right failure direction — worst case a reader gets
+   * payment-date order, never a timeout.
+   */
+  const safeSort = resolveGroupedSort(sortColumn, safeDirection, windowDays);
+  /**
+   * AND THE CURSOR MUST BELONG TO THAT ORDERING (Qodo, PR #317). A keyset cursor is only
+   * meaningful for the ordering that produced it; the client can briefly offer one minted under
+   * the previous ordering, because the sort changes synchronously while the effect that clears the
+   * cursor list runs after paint. A mismatch degrades to the FIRST PAGE rather than erroring — the
+   * same failure direction as the sort clamp above.
+   */
+  const pagedCursor = resolveGroupedCursor(safeCursor, safeSort.column, safeSort.direction);
   try {
-    const page = await loadCmdExplorerGroupedNonPhi(safeCursor, readerFilter, safeDirection, entityIds);
+    const page = await loadCmdExplorerGroupedNonPhi(
+      pagedCursor,
+      readerFilter,
+      safeSort.direction,
+      entityIds,
+      safeSort.column,
+    );
     // ⚠ THE ROLLOVER INSTANT IS COMPUTED OUTSIDE THE CACHED READ, ON PURPOSE (#304). It rides the
     // RESULT envelope, never the filter: the filter is an unstable_cache key, so putting an
     // absolute instant in it would mint a new cache entry on every request. It is also derived from
@@ -2108,7 +2167,8 @@ export async function loadCmdSearchSummary(
   if (!applyFacilityFilter(filter, readerFilter)) return { ok: false, error: 'Invalid facility.' };
   if (!applyPayerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid payer.' };
   if (!applySearchFilter(filter, readerFilter)) return { ok: false, error: 'Invalid search.' };
-  if (!applyDateWindow(filter, readerFilter)) return { ok: false, error: 'Invalid date window.' };
+  const windowDays = applyDateWindow(filter, readerFilter);
+  if (windowDays === null) return { ok: false, error: 'Invalid date window.' };
   // Employer segment + picked employers (missing until 2026-08-17 — see CmdReportFilter).
   if (!applyEmployerFilter(filter, readerFilter)) return { ok: false, error: 'Invalid employer filter.' };
   // Patient-name search result ids. `[]` is preserved on purpose (searched, matched nothing).

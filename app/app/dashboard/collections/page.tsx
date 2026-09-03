@@ -88,11 +88,16 @@ export default async function CollectionsPage({
         <TenantTabs allowedViews={access.access.allowedViews} />
       </div>
       <header className="shrink-0">
+        {/* NO SUBTITLE, deliberately (Alec, 2026-09-03). It read "CMD charge-line detail,
+            filterable by facility and month. Patient identifiers are masked by default and revealed
+            in bulk on an explicit, audited action." — every clause of which the page itself already
+            says: the filters are visible controls, and the masked cells sit next to a "Reveal all"
+            button. Prose that restates a visible affordance costs vertical space on a
+            viewport-bounded route and teaches nothing.
+            ⚠ Removing the SENTENCE changes no BEHAVIOUR: masking and the audited reveal are
+            enforced server-side (canRevealPhi + the gated action), never by telling the reader
+            about them. */}
         <h1 className="text-2xl font-semibold tracking-tight">Collections</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          CMD charge-line detail, filterable by facility and month. Patient identifiers are
-          masked by default and revealed in bulk on an explicit, audited action.
-        </p>
         {/* ⚠ THIS IS THE APP'S FIRST DATA-STREAMING SUSPENSE BOUNDARY, and it is not the same
             mechanism as the four in app/layout.tsx. Those wrap CLIENT components that call
             useSearchParams, with fallback={null} — a CSR bailout so the static routes sharing that

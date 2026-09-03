@@ -68,6 +68,8 @@ import {
   buildCmdCollectionsEmployerVocabularyQuery,
   buildCmdExplorerGroupedQuery,
   cmdExplorerGroupSortValue,
+  groupedSortStamp,
+  type GroupedSortColumn,
   buildCmdEmployerCoverageQuery,
   buildCohortCurveQueries,
   buildCohortTotalsQuery,
@@ -116,6 +118,10 @@ export {
   sanitizeGridColumns,
   resolveCmdExplorerSort,
   resolveCmdExplorerCursor,
+  resolveGroupedSort,
+  resolveGroupedCursor,
+  groupedSortStamp,
+  GROUPED_AGG_SORT_MAX_WINDOW_DAYS,
   buildCmdSearchSummaryQueries,
 } from '../../src/collections/cmdExplorerQuery.js';
 import {
@@ -2806,6 +2812,7 @@ async function loadCmdExplorerGroupedPage(
   filter: CmdExplorerFilter,
   direction: 'asc' | 'desc',
   entityIds: string[],
+  sortColumn: GroupedSortColumn,
 ): Promise<CmdExplorerGroupPage> {
   const limit = CMD_EXPLORER_PAGE_SIZE + 1;
   // ⚠ requireWindow: the Collections window must be CLOSED at both ends. Opted in HERE, at the
@@ -2814,6 +2821,7 @@ async function loadCmdExplorerGroupedPage(
   // same builders and omit this, keeping their own window semantics.
   const { sql, params } = buildCmdExplorerGroupedQuery(cursor, filter, direction, limit, entityIds, {
     requireWindow: true,
+    groupedSort: sortColumn,
   });
   const { rows } = await readerExecutor().query<CmdExplorerGroupRow & { id: string }>(sql, params);
   const hasMore = rows.length > CMD_EXPLORER_PAGE_SIZE;
@@ -2824,8 +2832,17 @@ async function loadCmdExplorerGroupedPage(
     id: Number(r.id),
   }));
   const last = page[page.length - 1];
+  // STAMPED WITH THE ORDERING THAT PRODUCED IT, so the next request can detect a cursor that
+  // belongs to a different ordering instead of comparing the wrong quantity — see
+  // resolveGroupedCursor.
   const nextCursor: CmdExplorerCursor | null =
-    hasMore && last ? { id: last.id, value: cmdExplorerGroupSortValue(last) } : null;
+    hasMore && last
+      ? {
+          id: last.id,
+          value: cmdExplorerGroupSortValue(last, sortColumn),
+          sort: groupedSortStamp(sortColumn, direction),
+        }
+      : null;
   return { rows: page, nextCursor };
 }
 
@@ -2840,7 +2857,13 @@ export const loadCmdExplorerGroupedNonPhi = unstable_cache(
     filter: CmdExplorerFilter,
     direction: 'asc' | 'desc',
     entityIds: string[],
-  ): Promise<CmdExplorerGroupPage> => loadCmdExplorerGroupedPage(cursor, filter, direction, entityIds),
+    // ⚠ PART OF THE CACHE KEY, AND IT HAS TO BE. unstable_cache keys on the ARGUMENT LIST, so a
+    // sort column carried in any other way (a module constant, a field on `filter` set later, a
+    // closure) would let a totals-ordered page be served for a date-ordered request at the same
+    // cursor — wrong rows, in the wrong order, with no error and a 15-minute lifetime.
+    sortColumn: GroupedSortColumn,
+  ): Promise<CmdExplorerGroupPage> =>
+    loadCmdExplorerGroupedPage(cursor, filter, direction, entityIds, sortColumn),
   ['cmd-explorer-grouped'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
