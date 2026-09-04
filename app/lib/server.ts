@@ -3183,7 +3183,14 @@ export async function streamCollectionsAiAnalysis(
 ): Promise<CollectionsAiStreamResult> {
   if (!isSufficientForAi(input)) return { ok: false, reason: 'insufficient' };
 
-  const model = process.env.ANTHROPIC_MODEL || 'claude-opus-4-8';
+  // FALLBACK ALIGNED TO PRODUCTION (2026-09-04). Production sets ANTHROPIC_MODEL=claude-opus-5 in
+  // Vercel by hand, so this literal never executes there — it executes in LOCAL DEV whenever .env
+  // lacks the variable. It said 'claude-opus-4-8' (Active, legacy tier — a real model, not a 404),
+  // which meant local dev ran a model that does NOT think unless asked while production ran one that
+  // does: the 2026-09-04 truncation (thinking drawing from max_tokens) could not reproduce locally.
+  // The fallback must be the model production runs so a dev repro is a repro. Per-surface knob
+  // first if one is ever added (Qualify's pattern), then the shared knob, then this.
+  const model = process.env.ANTHROPIC_MODEL || 'claude-opus-5';
   let sdk: Anthropic;
   try {
     sdk = new Anthropic(); // reads ANTHROPIC_API_KEY from env; never logged

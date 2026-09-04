@@ -899,7 +899,18 @@ These are wrong in the code today. Fix opportunistically; never copy them.
 - `supabase/migrations/0067_*` looks applicable but is **stale**: as authored it
   drops 0068's covering index and 0069's MAINTAIN grant. Leave it alone.
 - The agent still defaults to model `claude-opus-4-8` (`DEFAULT_MODEL`,
-  `src/agent/agent.ts`). Flag before relying on it for new AI work.
+  `src/agent/agent.ts`; `src/agent/veris_agent.ts` too). Flag before relying on it for
+  new AI work. ⚠ **"Stale" means LEGACY, not INVALID** — `claude-opus-4-8` is Active on
+  platform.claude.com (retirement ≥ 2027-05-28); it does not 404. Two facts settled
+  2026-09-04: **production runs `ANTHROPIC_MODEL=claude-opus-5`, set by hand in Vercel**,
+  so every in-code fallback is shadowed there — and that is exactly why the fallback
+  still matters: it runs in **local dev whenever `.env` lacks the var**, and Opus 4.8
+  does not think unless asked while Opus 5 does, so the Collections AI truncation
+  (thinking drawing from `max_tokens`, #319) could not reproduce locally. The
+  **Collections panel fallback** (`app/lib/server.ts`, `streamCollectionsAiAnalysis`)
+  is now `claude-opus-5` for that reason; the agent's `DEFAULT_MODEL` is unchanged
+  because the agent is not mounted in the UI (`/ask` is a redirect stub) — align it in
+  the same way if it is ever remounted.
 
 <!-- Ground truth re-verified against HEAD d0f8635 (branch staging) on 2026-08-02:
      test counts run live (root 858, app 176; both typechecks clean), cron table
