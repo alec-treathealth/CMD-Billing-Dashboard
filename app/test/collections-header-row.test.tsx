@@ -23,7 +23,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { tenantTabsVisible } from '../components/dashboard/tenant-tabs';
+import { tenantTabsVisible } from '../lib/tenant-tabs';
 import type { DashboardView } from '@/lib/views';
 
 const here = dirname(fileURLToPath(import.meta.url));
