@@ -11,6 +11,19 @@
  * plus (cohort mode) the deleted curves' per-bucket VALUES. It NEVER receives the alpha-prefix
  * string, a member id / blind-index token, a patient name/DOB, or any raw charge row — there is no
  * schema field that can carry them, and unknown keys are stripped.
+ *
+ * LENGTH, MEASURED (2026-09-04, `claude-opus-5`, real aggregates — a 46,773-line selection and a
+ * 195-patient cohort — at a 4096 cap so nothing clipped; 3 runs per cell). Output tokens INCLUDE
+ * the model's adaptive thinking, which draws from `max_tokens` before any text is streamed:
+ *   A  prompt as it was ........ 1,101–1,578 out (text ≈ 524–599, thinking ≈ 571–979)  17–23 s
+ *   B  + per-section budget .....   490–792 out (text ≈ 266–307, thinking ≈ 208–509)  10–13 s  ← SHIPPED
+ *   C  B + output_config.effort:'low' 448–484 out (text ≈ 252–279, thinking ≈ 191–214)   8–10 s
+ * Every A run exceeded the old 1024 cap — production clipped every answer (Vercel log 2026-09-04:
+ * output_tokens == 1024 exactly). B is what SYSTEM_PROMPT now says and what AI_MAX_TOKENS is sized
+ * to. C was measured and DELIBERATELY DEFERRED (Alec, 2026-09-04): B constrains length, C constrains
+ * the model's reasoning budget, and this panel's product IS the reasoning — a same-agent read
+ * validates formatting far better than analytical depth, so C's marginal ~300 tokens and 2–3 s do
+ * not buy an unquantified quality risk. Re-measure before reaching for it.
  */
 import { z } from 'zod';
 
@@ -120,8 +133,48 @@ export const INSUFFICIENT_COPY = {
 export const AI_SECTIONS = ['TL;DR', 'Signals', 'Risks'] as const;
 export type AiSection = (typeof AI_SECTIONS)[number];
 
-/** Token ceiling for the analysis (set explicitly — this is a short structured summary). */
-export const AI_MAX_TOKENS = 1024;
+/**
+ * Token ceiling for the analysis — thinking AND text, because on `claude-opus-5` adaptive thinking is
+ * on by default and its tokens come out of this cap before a single text delta is streamed.
+ *
+ * WHY 1536 (measured, see the module docblock): with the per-section budget in SYSTEM_PROMPT the
+ * observed maximum across real selection + cohort payloads was 792 output tokens, so 1536 is 1.9×
+ * headroom. The prompt as it was measured 1,101–1,578, which is why the previous 1024 clipped EVERY
+ * production run (the panel then rendered headers with missing bodies and nothing errored). A larger
+ * cap alone was rejected: it raises spend on a surface whose account has already hit zero once, and a
+ * clip is rarer at any ceiling but never impossible — which is what AI_TRUNCATED_MARK is for.
+ * Change this only with a new measurement; the test pins the value, not a floor.
+ */
+export const AI_MAX_TOKENS = 1536;
+
+/**
+ * THE ONE-CODE-POINT WIRE CONVENTION on the AI stream. The Server Action returns
+ * `ReadableStream<string>` of text deltas; when the model stopped at `max_tokens` the server enqueues
+ * exactly this code point AFTER the last delta and before close, so the client can say the read was
+ * cut short instead of presenting a clipped answer as complete. U+E000 is Unicode private-use, a
+ * single UTF-16 code unit (a chunk boundary cannot split it), and `splitAiStream` strips it before
+ * anything renders or reaches `parseAiSections`.
+ *
+ * COLLISION-SAFE BY CONSTRUCTION (Qodo #319): the input labels admit arbitrary Unicode and the prompt
+ * asks the model to repeat them, so "no model output contains it" is a probability, not a guarantee.
+ * The server therefore replaces any U+E000 INSIDE a model text delta with U+FFFD before enqueueing,
+ * which makes U+E000 on the wire mean exactly one thing — the server's own terminal mark — and the
+ * client sets `truncated` only when the mark is the LAST code unit of the accumulation.
+ */
+export const AI_TRUNCATED_MARK = '\uE000';
+
+/**
+ * Split the accumulated stream into renderable text + the truncation flag. Pure; run it on EVERY
+ * render path (mid-stream and final) so the mark can never paint and never reaches the section
+ * parser. `truncated` is true only for a TERMINAL mark — the server appends it after the last delta
+ * and closes, so once it arrives nothing follows it, and detection on the accumulated string works
+ * regardless of how the transport chunked the text. A mark anywhere else cannot come from the server
+ * (it sanitises deltas) and is stripped defensively without flagging.
+ */
+export function splitAiStream(acc: string): { text: string; truncated: boolean } {
+  const truncated = acc.endsWith(AI_TRUNCATED_MARK);
+  return { text: acc.includes(AI_TRUNCATED_MARK) ? acc.split(AI_TRUNCATED_MARK).join('') : acc, truncated };
+}
 
 const SYSTEM_PROMPT = [
   'You are a revenue-cycle analyst for OUT-OF-NETWORK behavioral-health billing. You are given a',
@@ -141,13 +194,16 @@ const SYSTEM_PROMPT = [
   'or trends not present in the data. Be specific and quantitative (cite the percentages / payer /',
   'CPT names you were given). Be concise. If the data is thin or mixed, say so plainly.',
   '',
+  // LENGTH BUDGET (measured 2026-09-04, see the module docblock): without it the answer ran to
+  // 342–381 words and 1,101–1,578 output tokens and clipped at the ceiling on every production run.
+  'Length budget: the WHOLE answer stays under 220 words. Cite the numbers; never restate the tables.',
   'Output EXACTLY these three markdown sections, in this order, and nothing else:',
   '## TL;DR',
-  'One or two sentences — the single most important read.',
+  'One or two sentences, 40 words at most — the single most important read.',
   '## Signals',
-  '2–4 short bullets — concrete patterns worth acting on (name the payer/CPT/facility + number).',
+  '2–4 bullets, each ONE line of 25 words at most — concrete patterns worth acting on (name the payer/CPT/facility + number).',
   '## Risks',
-  '2–4 short bullets — caveats, thin buckets, reversal noise, or where the number may mislead.',
+  '2–4 bullets, each ONE line of 25 words at most — caveats, thin buckets, reversal noise, or where the number may mislead.',
 ].join('\n');
 
 /** Build the {system, user} messages for one analysis call. The user turn is the JSON aggregate. */

@@ -2188,6 +2188,11 @@ export async function loadCmdSearchSummary(
   }
 }
 
+/**
+ * `stream` is text deltas plus, at most, one trailing `AI_TRUNCATED_MARK` code point when the model
+ * stopped at its token ceiling — see `CollectionsAiStreamResult` in server.ts for the convention.
+ * Consumers run the accumulated text through `splitAiStream` on every render; never render it raw.
+ */
 export type CollectionsAiAnalysisResult =
   | { ok: true; stream: ReadableStream<string> }
   | { ok: false; reason: 'insufficient' | 'error' | 'unauthorized' };
