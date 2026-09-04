@@ -106,6 +106,31 @@ test('the placeholder reserves a box with the SAME classes as the real line', ()
   assert.equal(placeholder, real, 'fallback and real line must share one class list (no shift)');
 });
 
+/*
+ * BOTH PLACEMENTS, because the parity above is only half the contract since 2026-09-04.
+ * /dashboard renders the line stacked under an <h1>; /dashboard/collections renders it `inline`,
+ * as a flex-row sibling of the tenant tabs. Passing `inline` to the real line and not to its
+ * fallback (or the reverse) reserves 8px of margin the other one does not have — a shift on cold
+ * load, and exactly the mistake a single shared prop makes easy.
+ */
+test('the placeholder tracks the real line in BOTH placements, and the two placements differ', () => {
+  for (const inline of [false, true]) {
+    const real = classAttr(renderToStaticMarkup(<FreshnessLine state={current} now={NOW} inline={inline} />));
+    const placeholder = classAttr(renderToStaticMarkup(<FreshnessLinePlaceholder inline={inline} />));
+    assert.equal(placeholder, real, `inline=${inline}: fallback and real line must share one class list`);
+  }
+  // EVERY state, not just the happy one: 'stale' and 'unavailable' are separate returns and were
+  // each a separate copy of the class string before lineClass existed.
+  for (const state of [current, stale, { status: 'unavailable' } as FreshnessState]) {
+    const stacked = classAttr(renderToStaticMarkup(<FreshnessLine state={state} now={NOW} />));
+    const inline = classAttr(renderToStaticMarkup(<FreshnessLine state={state} now={NOW} inline />));
+    assert.match(stacked, /(^| )mt-2( |$)/, 'the stacked placement keeps its gap to the heading');
+    assert.doesNotMatch(inline, /(^| )mt-2( |$)/, 'the inline placement must not offset itself in a centred row');
+    // The margin is the ONLY difference — the type scale and colour are the same line either way.
+    assert.equal(inline, stacked.replace(/(^| )mt-2( |$)/, '$1').trim(), 'only the top margin differs');
+  }
+});
+
 test('the placeholder reserves a NON-COLLAPSING line box', () => {
   const html = renderToStaticMarkup(<FreshnessLinePlaceholder />);
   // U+00A0, not a plain space. HTML collapses ordinary whitespace, so ' ' would give the <p> no
