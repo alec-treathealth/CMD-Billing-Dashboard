@@ -74,3 +74,12 @@ test('the wire convention is documented where the stream type is declared — bo
   assert.match(actionType, /AI_TRUNCATED_MARK/, 'client-facing type points at the convention');
   assert.match(actionType, /splitAiStream/, 'and at the one function that strips it');
 });
+
+test('the model fallback is the model production runs — a dev repro must be a repro', () => {
+  // Production sets ANTHROPIC_MODEL=claude-opus-5 in Vercel, so this literal executes only in local
+  // dev when .env lacks the var. It was 'claude-opus-4-8' (a real, Active model — not a 404), which
+  // does not think unless asked; Opus 5 does, and the 2026-09-04 truncation could not reproduce
+  // locally because of it. Keep the fallback equal to the production model.
+  assert.match(code, /const model = process\.env\.ANTHROPIC_MODEL \|\| 'claude-opus-5';/, 'fallback is claude-opus-5');
+  assert.doesNotMatch(code, /claude-opus-4-8/, 'the legacy id is gone from this path');
+});
