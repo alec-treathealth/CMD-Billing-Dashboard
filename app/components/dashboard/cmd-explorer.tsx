@@ -835,10 +835,17 @@ export function CmdCollectionsExplorer({
 
   // A "search" is now any active guided selection: facility tags, payer tags, or a PHI lookup.
   // (The free-text term + column-scoped substring search were removed with the search bar.)
-  const hasAnySearch =
-    facilitySelection.length > 0 ||
-    payerSelection.length > 0 ||
-    hasPhiSearch;
+  // ⚠ WIDENED (Qodo #320, 2026-09-04). This was facility ‖ payer ‖ PHI fields only, so an
+  // employer-only filter or a patient-name search — both added 2026-08-18 — rendered NO result
+  // cards, kept the 20rem landing floor, and (PR2) had nothing to scroll to: the summary effect
+  // sets `idle` whenever this is false. A name search that matched NOBODY is still a search —
+  // `nameMatchTokens` is `[]` then, not null, and the grid shows empty rather than every row — so
+  // the yield card correctly reads "No charge lines match". `hasOtherFilters` is kept apart because
+  // the name-search notice needs "filters BESIDES the name" (a second name search must not claim
+  // "the grid also applies your other filters" when there are none).
+  const hasOtherFilters =
+    facilitySelection.length > 0 || payerSelection.length > 0 || employerSelection.length > 0 || hasPhiSearch;
+  const hasAnySearch = hasOtherFilters || nameMatchTokens !== null;
 
   // Patient-name search needs nothing but the PHI entitlement now.
   //
@@ -913,7 +920,7 @@ export function CmdCollectionsExplorer({
         r.matchedPatients === 0
           ? `No patient name matched across all ${r.patientsInScope.toLocaleString()} patients.`
           : `${r.matchedPatients.toLocaleString()} of ${r.patientsInScope.toLocaleString()} patients matched` +
-            `${hasAnySearch ? ' — the grid also applies your other filters.' : '.'}`,
+            `${hasOtherFilters ? ' — the grid also applies your other filters.' : '.'}`,
       );
       // ⚠ IT TAKES BOTH NUMBERS, AND EACH ALONE WAS WRONG ONCE — this condition has been broken in
       // both directions and the two failures are worth keeping side by side:
@@ -939,7 +946,7 @@ export function CmdCollectionsExplorer({
     } finally {
       setNameSearching(false);
     }
-  }, [nameQuery, nameSearchAllowed, view, hasAnySearch]);
+  }, [nameQuery, nameSearchAllowed, view, hasOtherFilters]);
 
   /**
    * Stable dep key for the name-search result, mirroring payerKey/facilityKey.

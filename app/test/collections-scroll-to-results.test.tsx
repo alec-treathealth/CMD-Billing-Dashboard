@@ -106,3 +106,21 @@ test('targets the yield card wrapper, honours reduced motion, lands with a 16px 
   // Exactly one document scroll in the file.
   assert.equal((code.match(/\.scrollIntoView\(/g) ?? []).length, 1, 'one document-level scroll');
 });
+
+test('every search the summary refetches on COUNTS as a search — employer and name included (Qodo #320)', () => {
+  // `hasAnySearch` gates the summary fetch (idle when false), the result cards, the 31rem floor and
+  // the scroll. It excluded the employer filter and the patient-name match from the day they shipped
+  // (2026-08-18), so those searches rendered nothing to scroll to. A zero-match name search is still a
+  // search: nameMatchTokens is [] then, not null.
+  assert.match(
+    code,
+    /const hasOtherFilters =\s*facilitySelection\.length > 0 \|\| payerSelection\.length > 0 \|\| employerSelection\.length > 0 \|\| hasPhiSearch;/,
+    'other-filters predicate names all four non-name inputs',
+  );
+  assert.match(code, /const hasAnySearch = hasOtherFilters \|\| nameMatchTokens !== null;/, 'a name match is a search');
+  // The name-search notice speaks of filters BESIDES the name, so it must not read hasAnySearch —
+  // a second name search would otherwise claim "other filters" it does not have.
+  assert.match(code, /\$\{hasOtherFilters \? ' — the grid also applies your other filters\.' : '\.'\}/, 'notice uses hasOtherFilters');
+  assert.doesNotMatch(code, /\$\{hasAnySearch \? ' — the grid also applies/, 'notice must not use hasAnySearch');
+  assert.match(code, /\}, \[nameQuery, nameSearchAllowed, view, hasOtherFilters\]\);/, 'runNameSearch deps follow');
+});
