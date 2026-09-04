@@ -37,6 +37,23 @@ const FMT = new Intl.DateTimeFormat('en-US', {
   minute: '2-digit',
 });
 
+/**
+ * The wrapper <p>'s class list, in its two placements. ONE function, because the Suspense fallback
+ * below must reserve a box with the SAME metric as the real line — a second copy of this string is
+ * exactly how a fallback stops matching (see FreshnessLinePlaceholder's docblock, and the parity
+ * test that derives one from the other).
+ *
+ *   stacked (default) — under an <h1>, as on /dashboard. `mt-2` is the gap to the heading.
+ *   inline            — a flex-row sibling of the tenant tabs, as on /dashboard/collections since
+ *                       2026-09-04. The row's own `items-center` does the alignment, so a top
+ *                       margin there offsets the line ~4px BELOW its neighbours' centre line and
+ *                       adds nothing: the tabs (42.5px) set the row height either way.
+ *
+ * Tailwind's `text-xs` carries the line-height, so matching the class matches the metric.
+ */
+const lineClass = (inline: boolean): string =>
+  `${inline ? '' : 'mt-2 '}text-xs text-muted-foreground`;
+
 /** Coarse "N minutes/hours ago". Coarse on purpose — this is a confidence cue, not a stopwatch. */
 function agoLabel(fromIso: string, now: number): string {
   const ms = now - Date.parse(fromIso);
@@ -53,18 +70,25 @@ function agoLabel(fromIso: string, now: number): string {
  * are testable without a database or a Next request context (the same shape as
  * facility-resolution-render.test.tsx). DataFreshness below is the async data-fetching wrapper.
  */
-export function FreshnessLine({ state, now = Date.now() }: { state: FreshnessState; now?: number }) {
+export function FreshnessLine({
+  state,
+  now = Date.now(),
+  inline = false,
+}: {
+  state: FreshnessState;
+  now?: number;
+  /** Sit in a flex row rather than stacked under a heading — drops the top margin. See lineClass. */
+  inline?: boolean;
+}) {
   if (state.status === 'unavailable') {
     // No cached value AND the read failed. Do not guess, and do not imply the data is current.
     return (
-      <p className="mt-2 text-xs text-muted-foreground">
-        Collections data: last-updated time unavailable right now
-      </p>
+      <p className={lineClass(inline)}>Collections data: last-updated time unavailable right now</p>
     );
   }
 
   if (!state.updatedAt) {
-    return <p className="mt-2 text-xs text-muted-foreground">Collections data: not yet loaded</p>;
+    return <p className={lineClass(inline)}>Collections data: not yet loaded</p>;
   }
 
   const iso = state.updatedAt;
@@ -76,10 +100,7 @@ export function FreshnessLine({ state, now = Date.now() }: { state: FreshnessSta
 
   if (state.status === 'stale') {
     return (
-      <p
-        className="mt-2 text-xs text-muted-foreground"
-        title={`Last updated ${iso} · last checked ${state.measuredAt}`}
-      >
+      <p className={lineClass(inline)} title={`Last updated ${iso} · last checked ${state.measuredAt}`}>
         CollaborateMD collections data last updated at {stamp}{' '}
         <span className="text-amber-700 dark:text-amber-500">
           · not refreshed since {agoLabel(state.measuredAt, now)}
@@ -89,7 +110,7 @@ export function FreshnessLine({ state, now = Date.now() }: { state: FreshnessSta
   }
 
   return (
-    <p className="mt-2 text-xs text-muted-foreground" title={iso}>
+    <p className={lineClass(inline)} title={iso}>
       CollaborateMD collections data last updated at {stamp}
     </p>
   );
@@ -98,15 +119,22 @@ export function FreshnessLine({ state, now = Date.now() }: { state: FreshnessSta
 /**
  * Suspense fallback for <DataFreshness>. Reserves the line box; asserts nothing.
  *
- * WHY A RESERVED BOX RATHER THAN `fallback={null}`. DataFreshness is the LAST CHILD of the
- * <header> on both render sites (/dashboard and /dashboard/collections), so the page body
- * below it — <Dashboard> / <CollectionsView> — is laid out immediately beneath. A null
- * fallback paints the header one line short and then shoves the whole page down when the
- * probe resolves, which is a visible post-paint jump on every cold load. The class list here
- * is byte-identical to FreshnessLine's wrapper <p> above (`mt-2 text-xs text-muted-foreground`
- * — Tailwind's `text-xs` carries the line-height, so matching the class matches the metric),
- * and the non-breaking space gives it the same single line box the real line occupies. The
+ * WHY A RESERVED BOX RATHER THAN `fallback={null}`. On /dashboard, DataFreshness is the LAST
+ * CHILD of the <header>, so the page body below it — <Dashboard> — is laid out immediately
+ * beneath. A null fallback paints the header one line short and then shoves the whole page down
+ * when the probe resolves, which is a visible post-paint jump on every cold load. The class list
+ * comes from `lineClass` — the SAME function FreshnessLine uses, called with the same `inline`
+ * — and the non-breaking space gives it the same single line box the real line occupies. The
  * swap is height-neutral.
+ *
+ * ⚠ THE TWO RENDER SITES NOW DIFFER, AND `inline` IS HOW (2026-09-04). On
+ * /dashboard/collections the line moved OUT of a stacked <header> and INTO the tenant-tab row,
+ * so this fallback must be rendered `inline` there too — matching the real line's placement is
+ * the whole contract, and a stacked fallback under an inline line would reserve 8px of margin
+ * the resolved line does not have. What changes on that route is WHY the reserve matters: the
+ * tabs (42.5px) set the row height, so the row is height-stable regardless — EXCEPT for a
+ * single-entitled-view user, where TenantTabs renders null and this line IS the row. There the
+ * fallback is still the only thing holding its 18px. Never simplify it to null on either route.
  *
  * IT DELIBERATELY REUSES NO FreshnessState WORDING. Not 'not yet loaded', not 'unavailable':
  * both are REAL, EARNED outcomes of a COMPLETED read (see lib/dataFreshness.ts — 'unavailable'
@@ -122,13 +150,13 @@ export function FreshnessLine({ state, now = Date.now() }: { state: FreshnessSta
  * line there. Reserving two lines instead would over-reserve and shift the common single-line
  * case in the opposite direction, so one line is the right trade — not an oversight.
  */
-export function FreshnessLinePlaceholder() {
+export function FreshnessLinePlaceholder({ inline = false }: { inline?: boolean }) {
   // The <p>'s only child is U+00A0 (a non-breaking space), NOT a plain space. It is invisible in
   // most editors, so, explicitly: HTML collapses ordinary whitespace, so a <p> whose only child
   // is ' ' has no line box and reserves nothing at all. The nbsp is load-bearing — the test
   // 'the placeholder reserves a NON-COLLAPSING line box' is what keeps it that way.
   return (
-    <p className="mt-2 text-xs text-muted-foreground" aria-hidden="true">
+    <p className={lineClass(inline)} aria-hidden="true">
       {' '}
     </p>
   );
@@ -138,7 +166,7 @@ export function FreshnessLinePlaceholder() {
 // and collections pages gate an entity-less role BEFORE rendering this, so viewToEntityIds is a
 // safe, non-empty tenant scope). The freshness timestamp is scoped to that tenant, so an Indigo
 // view never shows BXR's last-updated (and vice-versa).
-export async function DataFreshness({ view }: { view: DashboardView }) {
+export async function DataFreshness({ view, inline = false }: { view: DashboardView; inline?: boolean }) {
   const state = await collectionsFreshness(viewToEntityIds(view));
-  return <FreshnessLine state={state} />;
+  return <FreshnessLine state={state} inline={inline} />;
 }

@@ -837,12 +837,13 @@ export function CmdCollectionsExplorer({
   // (The free-text term + column-scoped substring search were removed with the search bar.)
   // ⚠ WIDENED (Qodo #320, 2026-09-04). This was facility ‖ payer ‖ PHI fields only, so an
   // employer-only filter or a patient-name search — both added 2026-08-18 — rendered NO result
-  // cards, kept the 20rem landing floor, and (PR2) had nothing to scroll to: the summary effect
-  // sets `idle` whenever this is false. A name search that matched NOBODY is still a search —
-  // `nameMatchTokens` is `[]` then, not null, and the grid shows empty rather than every row — so
-  // the yield card correctly reads "No charge lines match". `hasOtherFilters` is kept apart because
-  // the name-search notice needs "filters BESIDES the name" (a second name search must not claim
-  // "the grid also applies your other filters" when there are none).
+  // cards, kept the LANDING floor rather than the taller searched one, and (PR2) had nothing to
+  // scroll to: the summary effect sets `idle` whenever this is false. A name search that matched
+  // NOBODY is still a search — `nameMatchTokens` is `[]` then, not null, and the grid shows empty
+  // rather than every row — so the yield card correctly reads "No charge lines match".
+  // `hasOtherFilters` is kept apart because the name-search notice needs "filters BESIDES the
+  // name" (a second name search must not claim "the grid also applies your other filters" when
+  // there are none).
   const hasOtherFilters =
     facilitySelection.length > 0 || payerSelection.length > 0 || employerSelection.length > 0 || hasPhiSearch;
   const hasAnySearch = hasOtherFilters || nameMatchTokens !== null;
@@ -1054,8 +1055,9 @@ export function CmdCollectionsExplorer({
   // ── SCROLL TO RESULTS (item 5, reading iii — ruled 2026-09-03) ────────────────────────────────
   //
   // When a search SETTLES, bring the results into view. With a search active this column overflows
-  // the viewport at every common size (hero + result cards + the 31rem grid floor), so on a short
-  // viewport the grid sat below the fold after every search and nothing took the reader to it.
+  // the viewport at every common size (hero + result cards + the searched grid floor, 35.5rem since
+  // 2026-09-04), so on a short viewport the grid sat below the fold after every search and nothing
+  // took the reader to it.
   //
   // TARGET: the yield card, NOT the grid. Measured (harness, 2026-09-03): at 1440×900 scrolling the
   // yield card to the top lands yield → drill → the whole grid → pager on one screen; scrolling the
@@ -2712,25 +2714,45 @@ export function CmdCollectionsExplorer({
              `flex-1`, the column overflows <main>, and the document scrolls instead. Deliberately
              NOT `min-h-0` here: the floor is the point.
 
-             MODE-DEPENDENT SINCE 2026-09-03 (Alec's ruling, measured in a headless-Chromium harness
-             of this column first):
-               · no search → `min-h-[20rem]`, byte-for-byte what it was. At 1440×900 the landing
-                 state sits ON this floor — the grid's flex share is ~310px against the 320px floor,
-                 the 10px overflowing into <main>'s bottom padding without a document scroll — so
-                 it is the one state that cannot spend height without pushing the pager below the
-                 fold on every page load. THAT MEASUREMENT IS WHY THE FLOOR IS MODE-DEPENDENT AND
-                 NOT SIMPLY RAISED: a global 31rem would make every landing scroll ~155px. Do not
-                 collapse the ternary.
-               · search active → `min-h-[min(31rem,80dvh)]`. The searched column already scrolls at
-                 1440×900 (~270px with the three result cards up), so the floor is what caps
-                 rows-once-scrolled: 320px → 10 rows, 496px → 17. The result cards and the taller
-                 floor land in the same paint, so the grid never visibly resizes on search.
-             ⚠ THE `80dvh` CAP IS WHAT PRESERVES THE 200%-ZOOM GUARANTEE ABOVE. A bare 31rem is
-             496 CSS px inside a 450px viewport (a 1440×900 window at 200%): the scroll container
-             then outgrows the screen and the sticky header scrolls off while the reader is inside
-             the grid — exactly the loss 1.4.4 is about. min() resolves to 360px there: 12 rows,
-             container on screen, header pinned. */
-          <div className={`relative flex flex-1 flex-col ${hasAnySearch ? 'min-h-[min(31rem,80dvh)]' : 'min-h-[20rem]'}`}>
+             MODE-DEPENDENT SINCE 2026-09-03 (Alec's ruling); BOTH VALUES RE-DERIVED 2026-09-04
+             for 15px rows and the reclaimed page chrome, in the same headless-Chromium replica of
+             this column. Rows are 31px at `text-sm`/`py-1` (27px at 13px), the sticky header is
+             32px, and the scrollport's own borders take 2px — so a floor of F holds
+             floor((F − 34) / 31) rows.
+               · no search → `min-h-[min(22rem,80dvh)]` = 352px, RAISED from a bare 20rem.
+                 ⚠ THE RAISE IS ONLY LEGITIMATE BECAUSE THE PREMISE FOR 20rem IS GONE. That value
+                 was byte-for-byte frozen because "at 1440×900 the landing state sits ON this
+                 floor — flex share ~310px against 320 — so it cannot spend height without pushing
+                 the pager below the fold". Measured again after collections/page.tsx cut the
+                 chrome above this column from 180.5px to 74.5px: the landing flex share is now
+                 415.5px, 95.5px of slack, and the floor does not bind at 1440×900 AT ALL (12 rows
+                 there, from flex-1, not from this number). What the floor still governs is the
+                 SHORT viewport and 200% zoom, where 20rem would have quietly dropped the landing
+                 from 10 rows to 9 as the type grew. 22rem = 34 + ten 31px rows + 8px of slack (one
+                 pill row's worth — FacilityCell rows are 33px), so ten rows survive at 200%.
+                 It is not raised FURTHER than that on purpose: 24rem buys an 11th row at 1440×800
+                 and 1366×768 but starts those landings at a 37–69px document scroll, which is the
+                 cost the original ruling was protecting against. Do not collapse the ternary.
+               · search active → `min-h-[min(35.5rem,80dvh)]` = 568px, up from 31rem/496px.
+                 The searched column overflows by ~461px at 1440×900 even after the reclaim (four
+                 fixed blocks above the grid: hero 210, yield 202, AI 104, collapsed drill 58), so
+                 the floor — not the viewport — is what caps rows-once-scrolled, and 31rem at 15px
+                 would have cut the ratified 17 rows to 14. 568px restores exactly 17 (measured
+                 with and without pill rows), and it does so while scrolling the document LESS
+                 than today's 31rem did at 13px (533px vs 567px) because the chrome reclaim came
+                 off the same total. The result cards and the taller floor land in the same paint,
+                 so the grid never visibly resizes on search.
+             ⚠ THE `80dvh` CAP IS WHAT PRESERVES THE 200%-ZOOM GUARANTEE ABOVE, and it is now on
+             BOTH branches. A bare 35.5rem is 568 CSS px inside a 450px viewport (a 1440×900 window
+             at 200%): the scroll container then outgrows the screen and the sticky header scrolls
+             off while the reader is inside the grid — exactly the loss 1.4.4 is about. min()
+             resolves to 360px there — 10 rows at 15px, container on screen, header pinned — on the
+             searched branch and to 352px on the landing branch. Never write either value bare. */
+          <div
+            className={`relative flex flex-1 flex-col ${
+              hasAnySearch ? 'min-h-[min(35.5rem,80dvh)]' : 'min-h-[min(22rem,80dvh)]'
+            }`}
+          >
             {/* Non-blocking refetch: keep the current page visible, dimmed, with a thin progress bar
                 on top — don't blank to a skeleton on every filter/sort/pagination change.
                 z-30 so it stays above the sticky header (z-20) it now overlaps. */}
@@ -2785,14 +2807,30 @@ export function CmdCollectionsExplorer({
                   it cannot be neutralized from here — it would nest a second scrollport and put the
                   horizontal scrollbar back at the bottom of 50 rows. These are the exact classes
                   the primitive applies. Do not "restore" <Table>. */}
-              {/* DENSITY: `text-xs` is 13px in this config (tailwind.config.ts fontSize.xs), not the
-                  browser's 12px — it is the house scale's smallest size and sits above the design
-                  system's 12px floor for meaning-bearing text. Down from `text-sm` (15px), which is
-                  a body size and too large for a 17-column financial grid: at 15px with p-2 cells a
-                  row is 39px, so a 1440x900 laptop showed SEVEN rows. Never substitute an arbitrary
-                  `text-[11px]` to squeeze further — that floor is machine-enforced elsewhere in the
-                  repo and this grid should not be the exception. */}
-              <table ref={gridTableRef} className="w-full caption-bottom text-xs">
+              {/* DENSITY: `text-sm` — 15px in this config (tailwind.config.ts fontSize.sm).
+                  ⚠ THIS REVERSES A RATIFIED CHOICE, AND THE REVERSAL IS LEGITIMATE ONLY BECAUSE THE
+                  CONSTRAINT MOVED. This comment used to argue for `text-xs` (13px) and rejected
+                  15px on the grounds that "at 15px with p-2 cells a row is 39px, so a 1440x900
+                  laptop showed SEVEN rows". Both halves of that are now false:
+                    · `p-2` is not what this grid uses. The cells were tightened to `px-2.5 py-1`
+                      afterwards (see the TableCell note below), so a 15px row measures 31px, not
+                      39 — the 39px figure priced the primitive's padding, not this call site's.
+                    · SEVEN rows was measured before the scrollport (#314), before the min-height
+                      floor, and before the page chrome above this grid was cut from 180.5px to
+                      74.5px (collections/page.tsx, 2026-09-04). MEASURED NOW in a
+                      headless-Chromium replica of this column, at 15px: 12 rows on the landing
+                      state at 1440x900 (was 10 at 13px), 18 at 1920x1080 (was 16), and 17 on a
+                      searched grid once scrolled (unchanged — see the floor above).
+                  So 15px costs 4px per row (31 vs 27) and the chrome reclaim more than pays for it.
+                  Headers cannot wrap at any width — `whitespace-nowrap` is on the ui/table.tsx
+                  primitives and this call site does not override it — so the sticky header stays
+                  32px and every row count above is stable across viewport widths. Horizontally the
+                  17-column table goes 2667px -> 2940px of natural width (+10.2%); it already
+                  overflowed a 1358px scrollport, and the #316 edge fades already advertise it.
+                  Never substitute an arbitrary `text-[11px]` (or any `text-[…px]`) to squeeze
+                  further — the 12px floor is machine-enforced repo-wide and this grid is not the
+                  exception. */}
+              <table ref={gridTableRef} className="w-full caption-bottom text-sm">
                 {/* THE OTHER HALF OF THE STICKY-UNDERLINE FIX (see SortableHeadCell).
                     The cell now draws the line itself, so the collapsed border grid's copy has to
                     go or the two stack 1px apart — 2px of underline at rest, 1px while stuck.
@@ -2848,9 +2886,14 @@ export function CmdCollectionsExplorer({
                         <TableCell
                           key={c}
                           /* `px-2.5 py-1` overrides the primitive's `p-2` (cn() runs twMerge, so the
-                             call-site value wins). Vertical padding is what sets row height, and at
-                             13px type 4px is enough to keep the row legible — 8px was tuned for 15px
-                             body text. Horizontal stays roomy so columns don't collide.
+                             call-site value wins). Vertical padding is what sets row height: at
+                             `py-1` a 15px row measures 31px, where the primitive's `p-2` would make
+                             it 39px — and 39px is the number the old density note mistakenly
+                             attributed to 15px type itself. 4px above and below is what keeps a
+                             financial grid dense without crowding the glyphs; horizontal stays
+                             roomy so columns don't collide.
+                             ⚠ THE TWO ARE COUPLED — every row count in the density note and the
+                             floor above assumes `py-1`. Changing this padding re-derives both.
                              `ths-num` on the date/code columns: see IS_MONO. */
                           className={[
                             'px-2.5 py-1',

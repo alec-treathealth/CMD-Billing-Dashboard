@@ -108,7 +108,7 @@ test('targets the yield card wrapper, honours reduced motion, lands with a 16px 
 });
 
 test('every search the summary refetches on COUNTS as a search — employer and name included (Qodo #320)', () => {
-  // `hasAnySearch` gates the summary fetch (idle when false), the result cards, the 31rem floor and
+  // `hasAnySearch` gates the summary fetch (idle when false), the result cards, the taller floor and
   // the scroll. It excluded the employer filter and the patient-name match from the day they shipped
   // (2026-08-18), so those searches rendered nothing to scroll to. A zero-match name search is still a
   // search: nameMatchTokens is [] then, not null.

@@ -13,7 +13,7 @@ import { Suspense } from 'react';
 import { redirect } from 'next/navigation';
 import { CollectionsView } from '@/components/dashboard';
 import { DataFreshness, FreshnessLinePlaceholder } from '@/components/dashboard/data-freshness';
-import { TenantTabs } from '@/components/dashboard/tenant-tabs';
+import { TenantTabs, tenantTabsVisible } from '@/components/dashboard/tenant-tabs';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
 import { listGridViews, loadCmdReport } from '@/lib/actions';
@@ -75,19 +75,42 @@ export default async function CollectionsPage({
        When the filter panel plus the grid's min-height floor exceed this box, the content
        overflows and the DOCUMENT scrolls. That is the intended fallback, not a failure: a
        container-scrolled grid is the normal-desktop behaviour, not an absolute. */
-    /* `sm:py-8` rather than the shell's usual `sm:p-10`: horizontal padding is unchanged, but on a
-       viewport-bounded route the 8px per side that the standard shell spends on vertical padding is
-       the difference between the pager sitting on screen and the document scrolling. Measured at
-       1440x900 — the most common laptop size here — it closes the last 4px of overflow. */
-    <main className="mx-auto flex h-[calc(100dvh-3.5rem)] max-w-[1800px] flex-col gap-6 p-6 sm:px-10 sm:py-8">
-      {/* Same control, same placement as Overview — see the note there.
-          Wrapped only to carry `shrink-0`: TenantTabs takes no className, and a flex child that is
-          allowed to shrink gets squashed (its content then overlaps the next sibling) the moment
-          the column runs short. */}
-      <div className="shrink-0">
-        <TenantTabs allowedViews={access.access.allowedViews} />
-      </div>
-      <header className="shrink-0">
+    /* VERTICAL PADDING IS ASYMMETRIC ON PURPOSE, and only the BOTTOM half is load-bearing.
+       `sm:pb-8` rather than the shell's usual `sm:p-10`: on a viewport-bounded route the 8px per
+       side that the standard shell spends below the content is the difference between the pager
+       sitting on screen and the document scrolling — measured at 1440x900, it closes the last 4px
+       of overflow, and it is also the slack that absorbs a small floor overflow without a
+       scrollbar (see the grid's floor note).
+       `sm:pt-4` (2026-09-04): the TOP padding was never load-bearing — nothing sits above the
+       header but the global h-14 bar this box is already subtracting — so 16px of it goes back to
+       the grid. Do not "restore symmetry" by putting it back; and do not take it out of pb-8.
+       `gap-4`, not `gap-6`, for the same reason: there is exactly ONE gap left in this column
+       (header -> CollectionsView) now that the tabs and the freshness line share a row, and 24px
+       of it was buying nothing a 16px gap does not. */
+    <main className="mx-auto flex h-[calc(100dvh-3.5rem)] max-w-[1800px] flex-col gap-4 p-6 sm:px-10 sm:pt-4 sm:pb-8">
+      {/* ONE ROW FOR THE TENANT TABS AND THE FRESHNESS LINE (2026-09-04). They used to be two
+          stacked blocks separated by a `gap-6`: tabs, then a <header> carrying the page title and
+          the freshness line. Measured in a headless-Chromium replica of this column, that cost
+          180.5px above the grid at 1440x900; folding them into one row (with the h1 made sr-only
+          and the top padding halved) brings it to 74.5px. The 106px goes straight to the grid,
+          which is the only element on this route that can use it — see the floor note in
+          cmd-explorer.tsx.
+
+          `items-center` aligns the 18px freshness line against the 42.5px tablist, which is what
+          sets the row height. `flex-wrap` + `gap-y-1` is the narrow-viewport escape: at 200% zoom
+          the two do not fit side by side, so the row becomes two lines (64.5px) rather than
+          squashing either one — 84px of the reclaim survives there.
+
+          `justify-between` is CONDITIONAL, via TenantTabs' own visibility predicate rather than a
+          copy of it: with a single entitled view TenantTabs renders null, and `justify-between`
+          on a one-item row would strand the freshness line against the right edge of an 1800px
+          container with nothing opposite it. 3 of today's 17 users are entity `admin`s in exactly
+          that state. */}
+      <header
+        className={`flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 ${
+          tenantTabsVisible(access.access.allowedViews) ? 'justify-between' : ''
+        }`}
+      >
         {/* NO SUBTITLE, deliberately (Alec, 2026-09-03). It read "CMD charge-line detail,
             filterable by facility and month. Patient identifiers are masked by default and revealed
             in bulk on an explicit, audited action." — every clause of which the page itself already
@@ -97,15 +120,33 @@ export default async function CollectionsPage({
             ⚠ Removing the SENTENCE changes no BEHAVIOUR: masking and the audited reveal are
             enforced server-side (canRevealPhi + the gated action), never by telling the reader
             about them. */}
-        <h1 className="text-2xl font-semibold tracking-tight">Collections</h1>
+        {/* SR-ONLY, NOT DELETED (2026-09-04). The visible heading was redundant on screen — the
+            global nav already marks Collections as the active route, so the title restated a label
+            the reader can see — but a page still needs an h1, and deleting it would leave
+            this document's heading order starting at <h2> (WCAG 1.3.1 / 2.4.6). `sr-only` keeps the
+            landmark for assistive tech and the document outline while returning its 32px line box
+            plus the header's internal gap to the grid. Do not "simplify" this to no h1 at all, and
+            do not make it visible again without re-deriving the grid floor below it. */}
+        <h1 className="sr-only">Collections</h1>
+        {/* Same control, same placement as Overview — see the note there.
+            Wrapped only to carry `shrink-0`: TenantTabs takes no className, and a flex child that
+            is allowed to shrink gets squashed (its content then overlaps its sibling) the moment
+            the row runs short. */}
+        <div className="shrink-0">
+          <TenantTabs allowedViews={access.access.allowedViews} />
+        </div>
         {/* ⚠ THIS IS THE APP'S FIRST DATA-STREAMING SUSPENSE BOUNDARY, and it is not the same
             mechanism as the four in app/layout.tsx. Those wrap CLIENT components that call
             useSearchParams, with fallback={null} — a CSR bailout so the static routes sharing that
             layout can still prerender; their fallback is a formality that never meaningfully paints.
             THIS one wraps an ASYNC SERVER component that awaits a database read, so the fallback is
-            LOAD-BEARING: it is what the reader actually sees until the probe resolves, and it is
-            what holds the header's height while they see it. Do not "simplify" it to null — see the
-            reserved-box rationale on FreshnessLinePlaceholder.
+            LOAD-BEARING: it is what the reader actually sees until the probe resolves. Do not
+            "simplify" it to null — see the reserved-box rationale on FreshnessLinePlaceholder.
+            ⚠ WHAT IT HOLDS CHANGED WITH THE ROW (2026-09-04). It used to hold the <header>'s
+            height outright; now the tablist beside it is the taller item, so the row is
+            height-stable for anyone who sees tabs. For a single-entitled-view user TenantTabs
+            renders null and this line IS the row — the reserve is still the only thing standing
+            between them and an 18px jump on every cold load.
 
             WHY THE BOUNDARY EXISTS: DataFreshness is a freshness LABEL that was sitting on the
             blocking shell path. Un-suspended, React cannot flush any of this page until its read
@@ -113,8 +154,13 @@ export default async function CollectionsPage({
             jittered retry (lib/dataFreshness.ts) — an envelope measured at up to ~4.4s in the
             acquire-failure mode, which is observed failing in production. An annotation must not
             be able to hold the grid it annotates. */}
-        <Suspense fallback={<FreshnessLinePlaceholder />}>
-          <DataFreshness view={view} />
+        {/* `inline` on BOTH halves, and they must move together: it drops the stacked variant's
+            `mt-2`, which the row's `items-center` makes wrong (the line would sit ~4px below its
+            neighbours' centre line). The fallback shares one class-list function with the real
+            line, so passing it to one and not the other is a shift — a parity test asserts both
+            placements. */}
+        <Suspense fallback={<FreshnessLinePlaceholder inline />}>
+          <DataFreshness view={view} inline />
         </Suspense>
         {/* Facility Resolution's entry point MOVED to the Claims Desk header (Alec, 2026-08-17):
             the workbench changes claim attribution, which is desk work, not collections reporting.

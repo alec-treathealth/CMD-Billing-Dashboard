@@ -122,15 +122,21 @@ test('the height chain is bounded at the route and unbroken through the grid', (
 });
 
 test('grid density: house type scale, tight rows, and the header offset that tracks it', () => {
-  // `text-xs` is 13px in this config — the smallest HOUSE size, above the design system's 12px
-  // floor for meaning-bearing text. `text-sm` (15px) is a body size and cost ~12px per row.
+  // `text-sm` is 15px in this config, RAISED from text-xs/13px on 2026-09-04 once the page chrome
+  // above this grid was cut from 180.5px to 74.5px. 15px rows measure 31px against 13px's 27px
+  // (`py-1` cells either way), so the reclaim more than covers the 4px/row: 12 landing rows at
+  // 1440x900 where 13px showed 10. The floor test below carries the rest of the measurement.
   // The `ref` is part of the anchor deliberately: it is what the edge-fade ResizeObserver observes
   // to catch a column show/hide, so dropping it would silently stale the fades (see the fade tests).
   assert.match(
     scrollportCode,
-    /<table ref=\{gridTableRef\} className="w-full caption-bottom text-xs">/,
-    'grid uses the 13px house size and exposes its ref',
+    /<table ref=\{gridTableRef\} className="w-full caption-bottom text-sm">/,
+    'grid uses the 15px house size and exposes its ref',
   );
+  // The primitives' `whitespace-nowrap` is what makes every row count in this file width-stable:
+  // a header that could wrap would grow the sticky <th> past h-8 and invalidate all of them.
+  assert.match(tablePrimitiveSrc, /'h-10 whitespace-nowrap px-2 text-left/, 'header cells cannot wrap');
+  assert.doesNotMatch(scrollportCode, /whitespace-normal|whitespace-pre-wrap/, 'the call site must not re-enable wrapping');
   assert.doesNotMatch(scrollportCode, /text-\[\d+px\]/, 'never an arbitrary px size — the 12px floor is repo-wide');
   // Cell padding overrides the primitive's p-2; vertical padding is what sets row height.
   assert.match(explorerCode, /'px-2\.5 py-1'/, 'cells use tightened vertical padding');
@@ -153,24 +159,37 @@ test('the grid keeps a min-height floor so it cannot collapse at 200% zoom — a
   // The floor makes the column overflow and the DOCUMENT scroll instead, which is the
   // intended fallback rather than a failure.
   //
-  // TWO LITERALS + THE CONDITION (2026-09-03). The floor was a global 20rem; it is now
-  //   · `min-h-[20rem]` with no search — byte-for-byte the old value. Measured: at 1440×900 the
-  //     landing state sits ON that floor (flex share ~310px vs 320, the 10px absorbed by <main>'s
-  //     bottom padding), so it is the one state that cannot spend height without pushing the pager
-  //     below the fold on every page load. That is why the floor is conditional and not raised.
-  //   · `min-h-[min(31rem,80dvh)]` with a search — that column already scrolls at 1440×900, so the
-  //     floor is what caps rows-once-scrolled: 320 → 10 rows, 496 → 17.
-  // ⚠ THE dvh CAP IS THE 200% GUARANTEE, not decoration. A bare 31rem is 496 CSS px inside the
-  // 450px viewport a 1440×900 window has at 200% zoom: the scroll container outgrows the screen and
-  // the sticky header scrolls off while the reader is inside the grid. min(31rem, 80dvh) resolves to
-  // 360px there — 12 rows, container on screen, header still pinned. Never "simplify" to `31rem`.
+  // TWO LITERALS + THE CONDITION, both re-derived 2026-09-04 for 15px rows (31px, from 27px) and
+  // the page chrome cut from 180.5px to 74.5px:
+  //   · `min-h-[min(22rem,80dvh)]` = 352px with no search, RAISED from a bare 20rem. The reason
+  //     20rem was frozen — "the landing state sits ON that floor at 1440×900" — no longer holds:
+  //     the landing flex share is now 415.5px, so this floor does not bind there at all (12 rows
+  //     come from flex-1). It governs the short viewport and 200% zoom, where 20rem would have
+  //     dropped the landing from 10 rows to 9 as the type grew. 352 = 34px of header+borders plus
+  //     ten 31px rows plus 8px of slack for a 33px pill row.
+  //   · `min-h-[min(35.5rem,80dvh)]` = 568px with a search, up from 496px. That column still
+  //     overflows by ~461px after the reclaim, so the floor is what caps rows-once-scrolled, and
+  //     496px at 15px would have cut the ratified 17 rows to 14. 568px restores exactly 17.
+  // ⚠ THE dvh CAP IS THE 200% GUARANTEE, not decoration, and it is now on BOTH branches. A bare
+  // 35.5rem is 568 CSS px inside the 450px viewport a 1440×900 window has at 200% zoom: the scroll
+  // container outgrows the screen and the sticky header scrolls off while the reader is inside the
+  // grid. min() resolves to 360px there — 10 rows, container on screen, header still pinned.
   assert.match(
     explorerSrc,
-    /hasAnySearch \? 'min-h-\[min\(31rem,80dvh\)\]' : 'min-h-\[20rem\]'/,
-    'the floor is chosen by hasAnySearch: 20rem landing, min(31rem,80dvh) searched',
+    /hasAnySearch \? 'min-h-\[min\(35\.5rem,80dvh\)\]' : 'min-h-\[min\(22rem,80dvh\)\]'/,
+    'the floor is chosen by hasAnySearch: min(22rem,80dvh) landing, min(35.5rem,80dvh) searched',
   );
-  assert.equal((explorerCode.match(/min-h-\[20rem\]/g) ?? []).length, 1, 'exactly one landing floor');
-  assert.doesNotMatch(explorerCode, /min-h-\[31rem\]/, 'never a bare 31rem — the dvh cap is the 200% guarantee');
+  assert.equal(
+    (explorerCode.match(/min-h-\[min\(22rem,80dvh\)\]/g) ?? []).length,
+    1,
+    'exactly one landing floor',
+  );
+  // EVERY floor must carry the dvh cap. Checked as a shape rather than by banning last cycle's two
+  // literals: a future raise writes a new number, and a ban-list only ever catches the old one.
+  for (const bare of explorerCode.match(/min-h-\[[^\]]*rem[^\]]*\]/g) ?? []) {
+    assert.match(bare, /min\(/, `${bare} must be dvh-capped — the cap is the 200% guarantee`);
+    assert.match(bare, /80dvh/, `${bare} must cap at 80dvh like its sibling`);
+  }
   assert.doesNotMatch(explorerCode, /min-h-\[\d+px\]/, 'never a fixed px floor — WCAG 1.4.4');
 });
 
@@ -225,7 +244,7 @@ test('the scroll reset targets the scrollport, not the document', () => {
   // meaningless while the grid was always on screen. The RESET must never do that again.
   //
   // ⚠ THIS PIN WAS FILE-WIDE UNTIL 2026-09-04 AND IS NOW SCOPED. With a search active the column
-  // overflows the viewport at every common size (the searched grid floor is 31rem), so ONE deliberate
+  // overflows the viewport at every common size (the searched grid floor is min(35.5rem,80dvh)), so ONE deliberate
   // document scroll now exists: the post-search settle that brings the yield card into view
   // (collections-scroll-to-results.test.tsx pins its rules). That scroll is not the reset, does not
   // touch the scrollport, and is the only `scrollIntoView` allowed in this file.
