@@ -39,24 +39,6 @@ import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 
 import { clampView, resolveView, viewOptions, type DashboardView } from '@/lib/views';
 
-/**
- * Does this control render anything? Exported because a CALLER sometimes needs to know: the
- * Collections header lays the tabs and the freshness line out as one row and picks
- * `justify-between` only when there is actually a tablist on the left — with a single entitled
- * view the row holds nothing but the freshness line, and `justify-between` would strand it
- * against the right edge of an 1800px container.
- *
- * It exists so that condition is READ from here rather than re-derived. A caller copying
- * `allowedViews.length > 1` would be a second copy of this component's own "nothing to switch"
- * rule, free to drift from it; pinned in test/collections-header-row.test.tsx.
- * Typed as a PREDICATE rather than a plain boolean so the early return below still narrows
- * `allowedViews` to a defined array for the rest of the component — extracting the check to a
- * `: boolean` function silently un-narrowed it and broke the two lines after it under strict TS.
- */
-export function tenantTabsVisible(allowedViews?: DashboardView[]): allowedViews is DashboardView[] {
-  return (allowedViews?.length ?? 0) > 1;
-}
-
 export function TenantTabs({ allowedViews }: { allowedViews?: DashboardView[] }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -64,9 +46,8 @@ export function TenantTabs({ allowedViews }: { allowedViews?: DashboardView[] })
   const tabsRef = useRef<(HTMLButtonElement | null)[]>([]);
 
   // Nothing to switch with <= 1 entitled view — an entity-scoped user sees their own data and a
-  // one-tab tablist would be chrome that implies a choice they do not have. The predicate is
-  // `tenantTabsVisible` so a caller that needs to lay out around this control reads the same rule.
-  if (!tenantTabsVisible(allowedViews)) return null;
+  // one-tab tablist would be chrome that implies a choice they do not have.
+  if (!allowedViews || allowedViews.length <= 1) return null;
 
   const view = clampView(resolveView({ view: searchParams?.get('view') ?? undefined }), allowedViews);
   const options = viewOptions.filter((o) => allowedViews.includes(o.value));

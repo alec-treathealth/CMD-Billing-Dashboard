@@ -13,7 +13,7 @@ import { Suspense } from 'react';
 import { redirect } from 'next/navigation';
 import { CollectionsView } from '@/components/dashboard';
 import { DataFreshness, FreshnessLinePlaceholder } from '@/components/dashboard/data-freshness';
-import { TenantTabs, tenantTabsVisible } from '@/components/dashboard/tenant-tabs';
+import { TenantTabs } from '@/components/dashboard/tenant-tabs';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
 import { listGridViews, loadCmdReport } from '@/lib/actions';
@@ -101,16 +101,29 @@ export default async function CollectionsPage({
           the two do not fit side by side, so the row becomes two lines (64.5px) rather than
           squashing either one — 84px of the reclaim survives there.
 
-          `justify-between` is CONDITIONAL, via TenantTabs' own visibility predicate rather than a
-          copy of it: with a single entitled view TenantTabs renders null, and `justify-between`
-          on a one-item row would strand the freshness line against the right edge of an 1800px
-          container with nothing opposite it. 3 of today's 17 users are entity `admin`s in exactly
-          that state. */}
-      <header
-        className={`flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 ${
-          tenantTabsVisible(access.access.allowedViews) ? 'justify-between' : ''
-        }`}
-      >
+          ⚠ TENANTTABS IS A DIRECT CHILD HERE — NO WRAPPER DIV, AND THAT IS LOAD-BEARING TWICE
+          OVER (both halves measured; Qodo #323 caught both). The first draft wrapped it in a
+          `<div className="shrink-0">`, carried over from the old COLUMN layout where `shrink-0`
+          meant "do not squash vertically". In a ROW it means "do not shrink horizontally", which
+          is the opposite of what the tablist needs: its own `flex-wrap` can only wrap when its
+          containing block is constrained, so the non-shrinking wrapper took the tablist's
+          max-content width and the page overflowed HORIZONTALLY — measured at 111px past the
+          viewport at 390px wide and 181px at 320px, a WCAG 1.4.10 reflow failure, with the tabs
+          stuck on one line. As a direct child it shrinks to its own min-content instead and wraps
+          to 2 lines at 390px, 3 at 320px, with zero overflow.
+          And the wrapper is ALSO why `justify-between` needed a condition: when a single-entitled-
+          view user makes TenantTabs return null, the empty wrapper was still a zero-width flex
+          item occupying `space-between`'s first slot, which pushed the freshness line to the right
+          edge of an 1800px container. With no wrapper there is no item, and `space-between` puts a
+          lone item flush with main-START — measured at x=40, i.e. exactly the `sm:px-10` inset.
+          So the condition is gone, and with it the reason to reach into TenantTabs for a
+          visibility predicate at all: that predicate was an export from a `'use client'` module
+          being CALLED by this server component, which the compiled server chunk turns into
+          `throw Error("Attempted to call tenantTabsVisible() from the server…")` — a 500 on every
+          render of this route, invisible to `next build` because the route is dynamic and never
+          prerendered. Do not reintroduce the wrapper, and do not call anything from a client
+          module here (a test pins both). */}
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-6 gap-y-1">
         {/* NO SUBTITLE, deliberately (Alec, 2026-09-03). It read "CMD charge-line detail,
             filterable by facility and month. Patient identifiers are masked by default and revealed
             in bulk on an explicit, audited action." — every clause of which the page itself already
@@ -128,13 +141,11 @@ export default async function CollectionsPage({
             plus the header's internal gap to the grid. Do not "simplify" this to no h1 at all, and
             do not make it visible again without re-deriving the grid floor below it. */}
         <h1 className="sr-only">Collections</h1>
-        {/* Same control, same placement as Overview — see the note there.
-            Wrapped only to carry `shrink-0`: TenantTabs takes no className, and a flex child that
-            is allowed to shrink gets squashed (its content then overlaps its sibling) the moment
-            the row runs short. */}
-        <div className="shrink-0">
-          <TenantTabs allowedViews={access.access.allowedViews} />
-        </div>
+        {/* Same control, same placement as Overview — see the note there. NOT wrapped: see the
+            header's own note for why a `shrink-0` wrapper broke wrapping and stranded the
+            freshness line. TenantTabs takes no className and needs none — as a flex item its own
+            root (`flex flex-wrap items-center gap-2`) shrinks to min-content and wraps. */}
+        <TenantTabs allowedViews={access.access.allowedViews} />
         {/* ⚠ THIS IS THE APP'S FIRST DATA-STREAMING SUSPENSE BOUNDARY, and it is not the same
             mechanism as the four in app/layout.tsx. Those wrap CLIENT components that call
             useSearchParams, with fallback={null} — a CSR bailout so the static routes sharing that
