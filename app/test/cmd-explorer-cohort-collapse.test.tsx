@@ -27,10 +27,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const explorerSrc = readFileSync(join(here, '../components/dashboard/cmd-explorer.tsx'), 'utf8');
 
 /**
- * cmd-explorer.tsx holds TWO independent disclosures with the same shape — SearchSummaryPanel has
- * its own `collapsed` / `bodyId` / aria-expanded trigger and is NOT in this PR's scope. Every
- * assertion below is therefore scoped to the CohortCurvePanel slice; a file-wide regex silently
- * matches the wrong component (it did, on the first run of this file).
+ * cmd-explorer.tsx holds TWO independent disclosures with the same shape — SearchDrillPanel (née
+ * SearchSummaryPanel) has its own `collapsed` / `bodyId` / aria-expanded trigger and is pinned by
+ * cmd-explorer-summary-split.test.tsx, not here. Every assertion below is therefore scoped to the
+ * CohortCurvePanel slice; a file-wide regex silently matches the wrong component (it did, on the
+ * first run of this file).
  */
 const cohortPanelSrc = (() => {
   const from = explorerSrc.indexOf('function CohortCurvePanel({');
@@ -149,20 +150,27 @@ test('AI payload is byte-identical — cohort branch still reads the cohort stat
 });
 
 test('AI analysis panel renders ABOVE the cohort panel', () => {
-  // ANCHORED ON THE COMPONENT TAG, not on the enclosing JSX expression. This used to look for the
-  // literal `{hasAnySearch && <CollectionsAiPanel key={aiKey}`, which broke when the panel gained a
-  // `shrink-0` flex wrapper for the grid-scrollport work — a layout change that did not touch the
-  // ordering this test exists to protect. The gate and the key are asserted separately below, so
-  // the anchor got looser without the test getting weaker.
-  const ai = explorerSrc.indexOf('<CollectionsAiPanel');
+  // ANCHORED ON THE MOUNT THAT HOSTS THE AI PANEL, not on the panel tag itself. This used to look for
+  // the literal `{hasAnySearch && <CollectionsAiPanel key={aiKey}`, which broke when the panel gained
+  // a `shrink-0` wrapper (#314), and then anchored on `<CollectionsAiPanel`, which broke again when
+  // the split (2026-09-03) moved the panel INSIDE SearchResultPanels — a component declared below the
+  // main JSX, so its tag's source index no longer says anything about render order. The thing this
+  // test protects is unchanged: the search-result group (yield card, AI output, drill panel) renders
+  // above the prefix-wide cohort panel. So anchor on the group's mount.
+  const group = explorerSrc.indexOf('<SearchResultPanels');
   const cohort = explorerSrc.indexOf('{cohortPresence.rendered && (');
-  assert.ok(ai > 0 && cohort > 0, 'both panels render');
-  assert.ok(ai < cohort, 'AI panel must precede the cohort panel in the JSX');
+  assert.ok(group > 0 && cohort > 0, 'both render');
+  assert.ok(group < cohort, 'the search-result group must precede the cohort panel in the JSX');
   assert.match(
     explorerSrc,
-    /hasAnySearch && \([\s\S]{0,80}<CollectionsAiPanel key=\{aiKey\}/,
-    'AI panel still gated on hasAnySearch and keyed on aiKey',
+    /hasAnySearch && \([\s\S]{0,80}<SearchResultPanels\s+key=\{aiKey\}/,
+    'the group is still gated on hasAnySearch and keyed on aiKey',
   );
-  // Exactly one AI panel — the reorder is a MOVE, not a second mount.
+  // Exactly one AI output panel, and it is mounted inside the group — a MOVE, not a second mount.
   assert.equal(explorerSrc.split('<CollectionsAiPanel').length - 1, 1, 'AI panel mounted exactly once');
+  const groupSrc = explorerSrc.slice(
+    explorerSrc.indexOf('function SearchResultPanels({'),
+    explorerSrc.indexOf('function SelectionYieldPanel({'),
+  );
+  assert.match(groupSrc, /<CollectionsAiPanel ai=\{ai\} \/>/, 'the AI panel is mounted by the group');
 });

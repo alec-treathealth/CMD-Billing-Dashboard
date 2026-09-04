@@ -49,8 +49,17 @@ test('AI panel is server-action-only, streamed, and invalidated on filter/search
   assert.doesNotMatch(explorerSrc, /ANTHROPIC_API_KEY/, 'no API key referenced in the client component');
   // Streaming: the panel reads a ReadableStream reader.
   assert.match(explorerSrc, /\.getReader\(\)/, 'consumes the streamed response');
-  // Invalidation: the panel is KEYED on the search signature so a filter/search change remounts it.
-  assert.match(explorerSrc, /<CollectionsAiPanel key=\{aiKey\}/, 'AI panel keyed on the search signature');
+  // Invalidation: the AI state is KEYED on the search signature so a filter/search change remounts
+  // it to idle. Since 2026-09-03 the state lives in `useCollectionsAi`, owned by SearchResultPanels
+  // (the trigger is in the yield card's header, the output is its own card) — so the key sits on
+  // THAT mount, and the hook must be called inside it and nowhere else.
+  assert.match(explorerSrc, /<SearchResultPanels\s+key=\{aiKey\}/, 'AI state keyed on the search signature');
+  const resultPanels = explorerSrc.slice(
+    explorerSrc.indexOf('function SearchResultPanels({'),
+    explorerSrc.indexOf('function SelectionYieldPanel({'),
+  );
+  assert.match(resultPanels, /const ai = useCollectionsAi\(aiInput, view\);/, 'the keyed mount owns the AI state');
+  assert.equal(explorerSrc.split('useCollectionsAi(').length - 1, 2, 'the hook is defined once and called once');
   assert.match(explorerSrc, /const aiKey = \[/, 'aiKey derived from the filter/search tuple');
 });
 
