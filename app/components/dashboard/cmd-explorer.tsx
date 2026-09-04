@@ -18,7 +18,7 @@
  * The "Columns" menu controls which columns are shown (+ their order) and persists that as a named
  * per-user saved view; shown columns are also what search matches. Rows order by the sort key.
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState, useTransition } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useTransition, type RefObject } from 'react';
 import {
   Activity,
   ArrowDown,
@@ -416,6 +416,18 @@ const REFINE_LABEL: Record<RefineKind, string> = {
   cpt_code: 'CPT',
 };
 /** Human label for the active-refinement pill (the combo case shows both codes). */
+/**
+ * A control the user TYPES into — the one kind of focus the post-search scroll must not carry off the
+ * top of the viewport. Text/search/email/… inputs, textareas and contentEditable count; buttons,
+ * checkboxes, radios and the picker's chips/listbox do NOT, so a search fired from any of those still
+ * scrolls to its results (see the scroll-to-results block in CollectionsView).
+ */
+function isTextEntry(el: HTMLElement): boolean {
+  if (el instanceof HTMLTextAreaElement || el.isContentEditable) return true;
+  if (!(el instanceof HTMLInputElement)) return false;
+  return !['button', 'checkbox', 'radio', 'submit', 'reset', 'range', 'file', 'color', 'image'].includes(el.type);
+}
+
 function refinementLabel(r: Refinement): string {
   return r.kind === 'combo' ? `CPT×Rev: ${r.cpt} / ${r.revenue}` : `${REFINE_LABEL[r.kind]}: ${r.value}`;
 }
@@ -823,10 +835,17 @@ export function CmdCollectionsExplorer({
 
   // A "search" is now any active guided selection: facility tags, payer tags, or a PHI lookup.
   // (The free-text term + column-scoped substring search were removed with the search bar.)
-  const hasAnySearch =
-    facilitySelection.length > 0 ||
-    payerSelection.length > 0 ||
-    hasPhiSearch;
+  // ⚠ WIDENED (Qodo #320, 2026-09-04). This was facility ‖ payer ‖ PHI fields only, so an
+  // employer-only filter or a patient-name search — both added 2026-08-18 — rendered NO result
+  // cards, kept the 20rem landing floor, and (PR2) had nothing to scroll to: the summary effect
+  // sets `idle` whenever this is false. A name search that matched NOBODY is still a search —
+  // `nameMatchTokens` is `[]` then, not null, and the grid shows empty rather than every row — so
+  // the yield card correctly reads "No charge lines match". `hasOtherFilters` is kept apart because
+  // the name-search notice needs "filters BESIDES the name" (a second name search must not claim
+  // "the grid also applies your other filters" when there are none).
+  const hasOtherFilters =
+    facilitySelection.length > 0 || payerSelection.length > 0 || employerSelection.length > 0 || hasPhiSearch;
+  const hasAnySearch = hasOtherFilters || nameMatchTokens !== null;
 
   // Patient-name search needs nothing but the PHI entitlement now.
   //
@@ -901,7 +920,7 @@ export function CmdCollectionsExplorer({
         r.matchedPatients === 0
           ? `No patient name matched across all ${r.patientsInScope.toLocaleString()} patients.`
           : `${r.matchedPatients.toLocaleString()} of ${r.patientsInScope.toLocaleString()} patients matched` +
-            `${hasAnySearch ? ' — the grid also applies your other filters.' : '.'}`,
+            `${hasOtherFilters ? ' — the grid also applies your other filters.' : '.'}`,
       );
       // ⚠ IT TAKES BOTH NUMBERS, AND EACH ALONE WAS WRONG ONCE — this condition has been broken in
       // both directions and the two failures are worth keeping side by side:
@@ -927,7 +946,7 @@ export function CmdCollectionsExplorer({
     } finally {
       setNameSearching(false);
     }
-  }, [nameQuery, nameSearchAllowed, view, hasAnySearch]);
+  }, [nameQuery, nameSearchAllowed, view, hasOtherFilters]);
 
   /**
    * Stable dep key for the name-search result, mirroring payerKey/facilityKey.
@@ -1031,6 +1050,70 @@ export function CmdCollectionsExplorer({
   const aiKey = [
     view, recencyDays, customFrom, customTo, includeScheduled, facilityKey, payerKey, employerKey, nameMatchKey, dMember, dAlpha, dGroup,
   ].join('|');
+
+  // ── SCROLL TO RESULTS (item 5, reading iii — ruled 2026-09-03) ────────────────────────────────
+  //
+  // When a search SETTLES, bring the results into view. With a search active this column overflows
+  // the viewport at every common size (hero + result cards + the 31rem grid floor), so on a short
+  // viewport the grid sat below the fold after every search and nothing took the reader to it.
+  //
+  // TARGET: the yield card, NOT the grid. Measured (harness, 2026-09-03): at 1440×900 scrolling the
+  // yield card to the top lands yield → drill → the whole grid → pager on one screen; scrolling the
+  // grid to the top would push the answer the user searched for off the top.
+  //
+  // MECHANISM: `scrollIntoView` on the results wrapper — the ONE document-level scroll in this file.
+  // The grid's own reset (`resetGridScroll`) still targets the scrollport and nothing else; the
+  // scrollport pin that banned scrollIntoView file-wide is now scoped to that reset.
+  //
+  // WHEN — every rule below is a ruling (2026-09-03), not a heuristic:
+  //   · on the SETTLE only: the transition loading|refreshing → ready. Not on every keystroke — the
+  //     filters are debounced at 350ms and the summary refetches on each burst; scrolling on each
+  //     would be motion sickness. `summary.kind === 'ready'` alone is NOT enough: on the render where
+  //     aiKey changes, `summary` still holds the PREVIOUS search's ready data, so a prev-kind ref
+  //     tells "just landed" from "still showing the old answer".
+  //   · ONCE per search identity — `aiKey`, the signature the result group is keyed on. A skipped
+  //     settle consumes the identity too: a later refetch of the same search never fires it.
+  //   · never for the identity present at MOUNT — a server-rendered load, or a saved view restoring
+  //     filters, is not a user-initiated search.
+  //   · never against the user: if `window.scrollY` moved since this search FIRED (aiKey changed),
+  //     they went somewhere on purpose — leave them there. A still-animating previous smooth scroll
+  //     reads as drift too and skips; that fails in the conservative direction.
+  //   · never while the user is TYPING: skip when `document.activeElement` is a text-entry control
+  //     inside the search hero, because the hero sits ABOVE the target and the scroll would carry the
+  //     field they are typing in off the top. Deliberately NOT "any focus in the hero": clicking a
+  //     facility tag leaves focus on the picker's chip/listbox — the PRIMARY flow — and a blanket
+  //     skip would mean the feature never fired for it. Buttons, chips, listbox, checkbox → fires.
+  //     And NO focusout deferral (ruled): a scroll that fires as you leave a field is one the user
+  //     cannot attribute to anything.
+  //   · `behavior: 'auto'` under prefers-reduced-motion. `scrollIntoView` never moves focus.
+  const heroRef = useRef<HTMLDivElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const mountSearchKeyRef = useRef(aiKey);
+  const lastSettledKeyRef = useRef<string | null>(null);
+  const scrollYAtFireRef = useRef(0);
+  const prevSummaryKindRef = useRef(summary.kind);
+
+  // The search FIRED: remember where the viewport was, so drift by settle time means "user scrolled".
+  useEffect(() => {
+    scrollYAtFireRef.current = window.scrollY;
+  }, [aiKey]);
+
+  useEffect(() => {
+    const prev = prevSummaryKindRef.current;
+    prevSummaryKindRef.current = summary.kind;
+    if (summary.kind !== 'ready' || (prev !== 'loading' && prev !== 'refreshing')) return;
+    if (!hasAnySearch) return;
+    if (aiKey === mountSearchKeyRef.current) return;
+    if (lastSettledKeyRef.current === aiKey) return;
+    lastSettledKeyRef.current = aiKey; // consumed — fire or skip, this identity is done
+    if (Math.abs(window.scrollY - scrollYAtFireRef.current) > 1) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && heroRef.current?.contains(active) && isTextEntry(active)) return;
+    const el = resultsRef.current;
+    if (!el) return;
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+    el.scrollIntoView({ block: 'start', behavior: reduced ? 'auto' : 'smooth' });
+  }, [summary.kind, aiKey, hasAnySearch]);
 
   // Raw CMD facility text → curated friendly name from the already-loaded dimension options, for
   // DISPLAY only (the Top facilities summary card). Drill/filter values stay the raw facility text
@@ -2053,7 +2136,7 @@ export function CmdCollectionsExplorer({
       {/* `shrink-0`: the filter panel must stay whole and always visible — it is the control
           surface for the grid below it. Allowed to shrink, it squashes and its content overlaps
           the panel beneath. */}
-      <div className="shrink-0 rounded-xl border border-line bg-card px-4 py-3 shadow-ths">
+      <div ref={heroRef} className="shrink-0 rounded-xl border border-line bg-card px-4 py-3 shadow-ths">
         {/* `items-start`, NOT `items-end`. Every cell here is label-over-control, so bottom-aligning
             them only lines up the CONTROLS — and because the Window cell used to carry a third row
             (the Include-scheduled checkbox), its label floated ~26px above the other three. Four
@@ -2431,6 +2514,7 @@ export function CmdCollectionsExplorer({
       {hasAnySearch && (
         <SearchResultPanels
           key={aiKey}
+          resultsRef={resultsRef}
           summary={summary}
           label="your selection"
           aiInput={aiInput}
@@ -3733,6 +3817,7 @@ function PhiField({
  * panel's fold on every search (see the render site).
  */
 function SearchResultPanels({
+  resultsRef,
   summary,
   label,
   aiInput,
@@ -3742,6 +3827,8 @@ function SearchResultPanels({
   onDrillCombo,
   facilityDisplayName,
 }: {
+  /** The post-search scroll target (the yield card's wrapper) — see the scroll-to-results block. */
+  resultsRef: RefObject<HTMLDivElement>;
   summary: SummaryState;
   label: string;
   aiInput: CollectionsAiInput | null;
@@ -3754,7 +3841,9 @@ function SearchResultPanels({
   const ai = useCollectionsAi(aiInput, view);
   return (
     <>
-      <div className="shrink-0">
+      {/* `scroll-mt-4`: the post-search scroll lands this card 16px below the viewport top rather than
+          flush against it. The top bar is in normal flow (it scrolls away), so no header offset. */}
+      <div ref={resultsRef} className="scroll-mt-4 shrink-0">
         <SelectionYieldPanel state={summary} label={label} ai={ai} />
       </div>
       {ai.state.kind !== 'idle' && (

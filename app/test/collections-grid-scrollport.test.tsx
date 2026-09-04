@@ -221,9 +221,22 @@ test('pagination sits outside the scrollport so it stays on screen', () => {
 });
 
 test('the scroll reset targets the scrollport, not the document', () => {
-  // It used to be gridRef.scrollIntoView() — a DOCUMENT scroll, which is meaningless now that the
-  // grid is always on screen, and which would fight overscroll-contain.
-  assert.doesNotMatch(explorerCode, /scrollIntoView/, 'no document-level scroll remains');
+  // It used to be gridRef.scrollIntoView() — a DOCUMENT scroll that fought overscroll-contain and was
+  // meaningless while the grid was always on screen. The RESET must never do that again.
+  //
+  // ⚠ THIS PIN WAS FILE-WIDE UNTIL 2026-09-04 AND IS NOW SCOPED. With a search active the column
+  // overflows the viewport at every common size (the searched grid floor is 31rem), so ONE deliberate
+  // document scroll now exists: the post-search settle that brings the yield card into view
+  // (collections-scroll-to-results.test.tsx pins its rules). That scroll is not the reset, does not
+  // touch the scrollport, and is the only `scrollIntoView` allowed in this file.
+  const resetSrc = explorerCode.slice(
+    explorerCode.indexOf('const resetGridScroll = useCallback('),
+    explorerCode.indexOf('const measureScrollEdges = useCallback('),
+  );
+  assert.ok(resetSrc.length > 0, 'resetGridScroll located');
+  assert.doesNotMatch(resetSrc, /scrollIntoView/, 'the reset must not scroll the document');
+  assert.equal((explorerCode.match(/\.scrollIntoView\(/g) ?? []).length, 1, 'exactly one document scroll: the post-search settle');
+  assert.match(explorerCode, /resultsRef\.current;[\s\S]{0,200}\.scrollIntoView\(/, 'and it targets the results wrapper, not the grid');
   assert.match(explorerCode, /scrollportRef\.current[\s\S]{0,200}scrollTo/, 'reset targets the scrollport');
   // Both axes: a column offset is as stale as a vertical one once the row set changes.
   assert.match(explorerCode, /scrollTo\(\{ top: 0, left: 0/, 'both axes reset');
