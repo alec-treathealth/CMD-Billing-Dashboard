@@ -18,7 +18,17 @@
  * The "Columns" menu controls which columns are shown (+ their order) and persists that as a named
  * per-user saved view; shown columns are also what search matches. Rows order by the sort key.
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState, useTransition, type RefObject } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+  type MouseEvent as ReactMouseEvent,
+  type RefObject,
+} from 'react';
 import {
   Activity,
   ArrowDown,
@@ -561,6 +571,14 @@ export function CmdCollectionsExplorer({
   // combo drill from the summary combo table — facility/payer summary clicks add tags instead of
   // setting a single refinement (see applyRefinement).
   const [refinement, setRefinement] = useState<Refinement | null>(null);
+  /*
+   * Did the reader just clear a search? Drives ONE sr-only live region, because the visible result
+   * of pressing "Clear search" — a different, larger row set below the fold — is not something a
+   * screen-reader user perceives, and the focus move alone announces where they landed ("Collections
+   * results, region") rather than what happened. Reset the moment a search is active again so a
+   * second clear announces afresh; a live region only speaks when its content CHANGES.
+   */
+  const [searchCleared, setSearchCleared] = useState(false);
   // Trailing-window preset, in days: one of WINDOW_PRESETS (7/14/30/90/180/365), or 0 meaning "a
   // CUSTOM RANGE is active instead" — the two are mutually exclusive and customActive is the other
   // half of that pair. DEFAULT 90: the default nav carries a payment_received window so the summary
@@ -847,6 +865,13 @@ export function CmdCollectionsExplorer({
   const hasOtherFilters =
     facilitySelection.length > 0 || payerSelection.length > 0 || employerSelection.length > 0 || hasPhiSearch;
   const hasAnySearch = hasOtherFilters || nameMatchTokens !== null;
+  /** Something to clear = an active search OR a drill refinement. Both are cleared by one press. */
+  const canClearSearch = hasAnySearch || refinement !== null;
+  // Retire the "Search cleared" announcement as soon as there is a search again, so the next clear
+  // is a genuine content CHANGE in the live region rather than a no-op re-render of the same text.
+  useEffect(() => {
+    if (hasAnySearch) setSearchCleared(false);
+  }, [hasAnySearch]);
 
   // Patient-name search needs nothing but the PHI entitlement now.
   //
@@ -1905,6 +1930,62 @@ export function CmdCollectionsExplorer({
     setPayerSelection([]);
   }
 
+  /*
+   * ── CLEAR SEARCH — one gesture back to the whole book (Alec, 2026-09-04) ──────────────────────
+   *
+   * *"There should also be a big accessible and visible 'new search' or 'clear search' button that
+   * allows the user to clear the search and the previous AI response"*. Until now unwinding a
+   * search meant emptying up to seven controls by hand — three tag pickers, three PHI fields and
+   * the name box — and the per-picker "Clear N" links only ever cleared their own facet.
+   *
+   * ⚠ IT DOES NOT TOUCH THE AI PANEL, AND THAT IS NOT AN OVERSIGHT — it is why this is a small
+   * function instead of a big one. The result group renders under `hasAnySearch` and is keyed on
+   * `aiKey` (see its render site below), so emptying these facets flips `hasAnySearch` false,
+   * UNMOUNTS the yield card / AI output / drill panel together, and the AI panel's own unmount
+   * cleanup aborts an in-flight stream.
+   *   (Described rather than quoted as JSX on purpose. A comment containing that opening tag
+   *   verbatim, ABOVE the real render site, is found first by the source-order pin in
+   *   cmd-explorer-summary-split.test.tsx — which is how the first draft of this comment broke it.) Reaching in to reset AI state as well
+   * would be a second, weaker copy of an invalidation that already holds — and the one that already
+   * holds is the one that also covers a filter change, a view switch and a new prefix. A test pins
+   * the render gate so this reasoning cannot rot silently.
+   *
+   * ⚠ WHAT IT DELIBERATELY LEAVES ALONE: the time window, "Include scheduled payments", the sort,
+   * the column layout and the saved view. Those are how the reader BROWSES, not what they searched
+   * for — they survive a search and should survive clearing one. Resetting the window here would
+   * silently change the row set the reader is left looking at, which is the opposite of "clear".
+   *
+   * The PHI fields are debounced (350ms), so with a PHI search active the panels unmount one
+   * debounce after the click rather than in the same frame. Visible as a brief lag, not a bug: the
+   * debounced value is what `hasAnySearch` reads, and short-circuiting it here would mean a second
+   * source of truth for "what is being searched".
+   */
+  function clearSearch() {
+    setFacilitySelection([]);
+    setPayerSelection([]);
+    setEmployerSelection([]);
+    setPhiMemberId('');
+    setPhiAlphaPrefix('');
+    setPhiGroup('');
+    setNameQuery('');
+    setNameMatch(null);
+    setNameNotice(null);
+    // The drill refinement is part of the search from the reader's point of view — it is the pill
+    // sitting in this very row — so a clear that left it applied would not have cleared the search.
+    setRefinement(null);
+    setSearchCleared(true);
+    /*
+     * FOCUS MUST GO SOMEWHERE, because this button is about to unmount (it renders only when there
+     * IS something to clear). Leaving focus on a removed element drops it to <body>, which loses a
+     * keyboard user's place entirely — WCAG 2.4.3. The results scrollport is the right landing
+     * spot: it already exists, it is already focusable (tabIndex={0}) and already named
+     * (role="region" aria-label="Collections results"), and it is where the reader's attention goes
+     * — the full, unfiltered result set. Programmatic focus does not match :focus-visible after a
+     * pointer click, so a mouse user sees no stray focus ring.
+     */
+    scrollportRef.current?.focus();
+  }
+
   /** Pick a rolling recency window (toggle off if re-clicked); clears any Month/Year selection. */
   /**
    * Validate and apply a custom range.
@@ -2491,7 +2572,47 @@ export function CmdCollectionsExplorer({
               <X className="h-3 w-3" aria-hidden />
             </button>
           )}
+          {/* ── CLEAR SEARCH ────────────────────────────────────────────────────────────────────
+              Sits at the END of the scope line, which is the row that states the active scope in
+              words — so the control that undoes that scope is next to the sentence describing it.
+
+              ⚠ RENDERED ONLY WHEN THERE IS SOMETHING TO CLEAR, and that is a HEIGHT decision, not
+              a taste one. This row is 18px of text-xs today; an `h-9` button makes it 36px, which
+              grows the hero by 18px and costs the LANDING grid a row (12 -> 11 at 1440x900) — the
+              exact thing the chrome reclaim was for. A permanently-mounted `aria-disabled` twin
+              would have solved the focus-on-unmount problem more cheaply, but it would charge every
+              page load for a control that can do nothing. So it is conditional, and `clearSearch`
+              hands focus to the results region on the way out instead.
+
+              `text-sm` + `h-9` + `px-4` deliberately matches the grid toolbar's buttons rather than
+              this row's `text-xs`: the ask was for a BIG, visible control, and this is the one
+              action in the row that changes the whole result set. `font-medium normal-case` because
+              the row is styled as prose and would otherwise inherit its muted, small treatment.
+              Target size is 36px, comfortably over the 24x24 WCAG 2.5.8 floor. */}
+          {canClearSearch && (
+            <button
+              type="button"
+              onClick={clearSearch}
+              title="Clear every facility, payer, employer, patient and drill filter"
+              /* Alpha-free tokens ONLY — `hover:bg-[var(--brand-accent)]/20` and
+                 `focus-visible:ring-[var(--brand-accent)]/50` were this button's first draft and
+                 BOTH emit no CSS (see foldCardClass). The resting look is the active tenant tab's
+                 (2px brand-ink border on the soft tint); hover inverts to solid ink so the state
+                 change is carried by more than a tint. */
+              className="ml-auto inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border-2 border-[var(--brand-ink)] bg-[var(--brand-soft)] px-4 text-sm font-semibold normal-case text-[var(--brand-ink)] transition-colors hover:bg-[var(--brand-ink)] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)] focus-visible:ring-offset-2"
+            >
+              <X className="h-4 w-4" aria-hidden />
+              Clear search
+            </button>
+          )}
         </div>
+        {/* The announcement for the press above. `role="status"` (polite) rather than an alert: it
+            reports a change the reader asked for, and must not interrupt them. Rendered
+            unconditionally so the region exists in the a11y tree BEFORE its text appears — a live
+            region that mounts together with its message is frequently not announced at all. */}
+        <p role="status" className="sr-only">
+          {searchCleared && !hasAnySearch ? 'Search cleared. Showing all charge lines in this view.' : ''}
+        </p>
       </div>
 
       {/* ---- Search result: yield card → AI output → drill panel ----------------- */}
@@ -3976,6 +4097,75 @@ function SelectionYieldPanel({ state, label, ai }: { state: SummaryState; label:
   );
 }
 
+/*
+ * ── COLLAPSIBLE RESULT PANELS: THE WHOLE HEADER IS THE TRIGGER ──────────────────────────────────
+ *
+ * Alec, 2026-09-04: *"i want them to be highlighted/glowing with motion and the user can click
+ * anywhere on them for the dropdown"*. Both folded panels (Drill in, Cohort payer behavior) shipped
+ * collapsed-by-default with a 16x16 chevron as their only affordance and no visual cue that there
+ * was anything behind it.
+ *
+ * Three parts, and the split matters:
+ *   · the REAL <button> keeps every disclosure semantic it already had — aria-expanded,
+ *     aria-controls, the tab order, the accessible name. Untouched. It is still the only thing a
+ *     keyboard or screen-reader user needs, which is why the header row below can stay a plain div.
+ *   · this handler makes the header row a mouse click target as well. It is PURELY ADDITIVE: it
+ *     duplicates the button's action for pointer users and contributes no semantics, so the "a real
+ *     <button>, never a div+onClick" rule those panels state is not being bent — that rule is about
+ *     a div being the ONLY control, which would be unreachable by keyboard. Here one is not.
+ *   · `.ths-fold` paints the affordance — a static accent ring plus a three-pulse glow, both on an
+ *     `::after` (app/globals.css owns it; see the note there for why it is neither a Tailwind
+ *     arbitrary-alpha class nor a box-shadow on the card, and why it pulses three times not forever).
+ *
+ * TWO GUARDS, both of which are the difference between a convenience and a trap:
+ *   · a click that lands on anything interactive is left alone. Today that is only the disclosure
+ *     button itself — without this it would toggle twice and land back where it started — but the
+ *     selector is deliberately broad so a future control added to either header (a link, a filter
+ *     chip) does not silently start folding the panel when pressed.
+ *   · a click that ENDS a text selection is not a click, it is a drag. The header carries the
+ *     numbers a reader is most likely to want to copy ("17 patients", the prefix), and collapsing
+ *     the panel out from under a selection would be infuriating and would look like a bug.
+ */
+const FOLD_ROW_INTERACTIVE = 'button,a,input,select,textarea,label,[role="button"],[role="tab"],[role="checkbox"]';
+
+function foldRowClickHandler(toggle: () => void) {
+  return (e: ReactMouseEvent<HTMLElement>) => {
+    if ((e.target as HTMLElement | null)?.closest(FOLD_ROW_INTERACTIVE)) return;
+    const selection = typeof window === 'undefined' ? null : window.getSelection();
+    if (selection && !selection.isCollapsed && selection.toString().trim() !== '') return;
+    toggle();
+  };
+}
+
+/** The header row's own classes. Identical on both panels so the two affordances cannot drift. */
+const FOLD_ROW_CLASS =
+  // `-m-1 p-1` is LAYOUT-NEUTRAL on purpose: the padding lets the hover tint breathe past the text
+  // and the negative margin gives the space straight back, so neither panel grows by a pixel. These
+  // are fixed blocks in a viewport-bounded column whose budget is measured to the pixel (see the
+  // grid's floor note) — a "harmless" 8px here costs a grid row.
+  'flex cursor-pointer flex-wrap items-baseline justify-between gap-2 -m-1 rounded-lg p-1 transition-colors hover:bg-[var(--brand-soft)]';
+
+/**
+ * Card classes for the two panels: the collapsed state is the one that advertises itself.
+ *
+ * `ths-fold` (app/globals.css) carries BOTH the static accent ring and the three-pulse glow, as an
+ * `::after` pseudo-element. It is not expressed in Tailwind on purpose: the translucent accent needs
+ * `color-mix`, because Tailwind SILENTLY EMITS NOTHING for an `/<alpha>` modifier on an arbitrary
+ * `var()` colour — this helper's first draft said
+ * `border-[var(--brand-accent)]/55 ring-1 ring-[var(--brand-accent)]/35` and painted nothing at all.
+ * See the note in globals.css, including the 17 other dead instances already in this repo.
+ *
+ * `relative` is what the ::after positions against, and it was already there for the refetch bar.
+ */
+const foldCardClass = (collapsed: boolean, refreshing: boolean): string =>
+  [
+    'relative rounded-xl border border-line bg-card p-4 shadow-ths transition-opacity duration-150',
+    refreshing ? 'opacity-60' : '',
+    collapsed ? 'ths-fold' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
 /**
  * The collapsible half: the two single-dimension drill lists (payers, facilities) and the
  * (CPT × Revenue-code) combination list full-width below them (it carries more numbers per row —
@@ -4021,14 +4211,13 @@ function SearchDrillPanel({
   const s = state.data;
   if (s.total_count === 0) return null;
 
+  const toggle = () => setCollapsed((c) => !c);
+
   return (
-    <div
-      aria-busy={refreshing}
-      className={`relative rounded-xl border border-line bg-card p-4 shadow-ths transition-opacity duration-150 ${
-        refreshing ? 'opacity-60' : ''
-      }`}
-    >
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
+    <div aria-busy={refreshing} className={foldCardClass(collapsed, refreshing)}>
+      {/* WHOLE ROW IS THE TRIGGER — see foldRowClickHandler above for the two guards and for why a
+          plain div may carry this click when a real <button> is still present inside it. */}
+      <div className={FOLD_ROW_CLASS} onClick={foldRowClickHandler(toggle)}>
         <h3 className="text-sm font-semibold text-ink900">Drill in</h3>
         <div className="flex items-center gap-2">
           <span className="text-xs text-muted-foreground">Click a payer, CPT, or CPT×Rev combo to drill in.</span>
@@ -4038,7 +4227,7 @@ function SearchDrillPanel({
             aria-controls={bodyId}
             aria-label={collapsed ? 'Expand drill-in lists' : 'Collapse drill-in lists'}
             title={collapsed ? 'Expand' : 'Collapse'}
-            onClick={() => setCollapsed((c) => !c)}
+            onClick={toggle}
             className="shrink-0 rounded-md p-1 text-ink400 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)]"
           >
             <ChevronDown className={`h-4 w-4 transition-transform ${collapsed ? '-rotate-90' : ''}`} aria-hidden />
@@ -4470,17 +4659,17 @@ function CohortCurvePanel({
       ? `${daysCum !== null ? `~${usd(daysCum)} collected per starting patient through day ${daysDollars[daysDollars.length - 1]!.bucket + dayBucketWidth - 1}; ` : ''}~${round(days[0]!.pct_allowed!)}% allowed in the first ${dayBucketWidth} days, ~${round(lastDay.pct_allowed!)}% by days ${lastDay.bucket}–${lastDay.bucket + dayBucketWidth - 1}.` + SURVIVORSHIP
       : 'Not enough elapsed time to read a trend yet.';
 
+  const toggle = () => setCollapsed((v) => !v);
+
   return (
-    <div
-      aria-busy={refreshing}
-      className={`relative rounded-xl border border-line bg-card p-4 shadow-ths transition-opacity duration-150 ${
-        refreshing ? 'opacity-60' : ''
-      }`}
-    >
+    <div aria-busy={refreshing} className={foldCardClass(collapsed, refreshing)}>
       {refreshing && (
         <div className="absolute inset-x-0 top-0 h-0.5 animate-pulse rounded-t-xl bg-[var(--brand-accent)]" aria-hidden />
       )}
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
+      {/* WHOLE ROW IS THE TRIGGER — see foldRowClickHandler above. The selection guard earns its
+          keep on this header in particular: the patient count and the prefix are both here and are
+          exactly what a reader copies. */}
+      <div className={FOLD_ROW_CLASS} onClick={foldRowClickHandler(toggle)}>
         <h3 className="flex flex-wrap items-center gap-1.5 text-sm font-semibold text-ink900">
           <Activity className="h-4 w-4 text-[var(--brand-ink)]" aria-hidden />
           Cohort payer behavior — “{prefix}”
@@ -4518,7 +4707,7 @@ function CohortCurvePanel({
             aria-controls={bodyId}
             aria-label={collapsed ? 'Expand cohort payer behavior' : 'Collapse cohort payer behavior'}
             title={collapsed ? 'Expand' : 'Collapse'}
-            onClick={() => setCollapsed((v) => !v)}
+            onClick={toggle}
             className="shrink-0 rounded-md p-1 text-ink400 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)]"
           >
             <ChevronDown className={`h-4 w-4 transition-transform ${collapsed ? '-rotate-90' : ''}`} aria-hidden />

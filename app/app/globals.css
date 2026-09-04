@@ -155,6 +155,74 @@
 }
 
 /*
+ * ── COLLAPSED-PANEL DISCLOSURE AFFORDANCE (Alec, 2026-09-04) ────────────────────────────────────
+ *
+ * The ask: *"i want them to be highlighted/glowing with motion and the user can click anywhere on
+ * them for the dropdown"* — about the two folded result panels on Collections (Drill in, Cohort
+ * payer behavior). Both shipped collapsed-by-default with a 16x16 chevron as their only affordance,
+ * so a reader could not tell there was anything to open. `.ths-fold` paints the highlight AND the
+ * motion; the whole-header click target is at the call site (see foldRowClickHandler).
+ *
+ * ⚠ ALL OF THE COLOUR LIVES HERE RATHER THAN IN TAILWIND ARBITRARY VALUES, AND THAT IS NOT A STYLE
+ * PREFERENCE — IT IS THE ONLY WAY IT RENDERS. Tailwind SILENTLY DROPS the `/<alpha>` modifier on an
+ * arbitrary `var()` colour: `border-[var(--brand-accent)]/55` emits NO RULE AT ALL, because Tailwind
+ * cannot compute an alpha channel for an opaque `var()` (the technique needs a var holding bare
+ * channels, e.g. `--x: 28 139 130`, which none of the --brand-* tokens do). Verified against the
+ * shipped stylesheet: `.next/static/css/*.css` contains 31 `brand-accent` rules and ZERO of them
+ * carry an alpha modifier. This first draft used two such classes and painted nothing.
+ * `color-mix(in srgb, var(--brand-accent) N%, transparent)` is the working equivalent and is
+ * already the house pattern — see `--m3-rail-indicator` above.
+ * ⚠ 17 OTHER OCCURRENCES OF THAT DEAD PATTERN EXIST IN THIS REPO (5 files, mostly hover/focus tints
+ * in cmd-explorer.tsx). They are a separate, pre-existing bug: each one is a hover or focus effect
+ * that has never rendered. Do not copy the pattern; fixing the others is its own change with its own
+ * browser pass.
+ *
+ * ⚠ THE RING IS AN ::after, NOT A box-shadow OR AN outline. Those cards already carry `shadow-ths`,
+ * which compiles to `box-shadow` through --tw-shadow, so a rule or keyframe setting `box-shadow` on
+ * the card itself would take the elevation away for the animation's whole duration and hand it back
+ * at the end. A pseudo-element has its own box-shadow to spend. It is `pointer-events: none` so it
+ * cannot eat the header click, and it is absolutely positioned, so — like a ring — it costs NO
+ * LAYOUT. That matters more than usual here: both panels are fixed blocks in a viewport-bounded
+ * column whose height budget is measured to the pixel (see the floor note in cmd-explorer.tsx).
+ * Measured: the collapsed Drill in card is 58px with this class and 58px without it.
+ *
+ * ⚠ THREE ITERATIONS, NOT `infinite`. A permanent pulse on two cards is a distraction the reader
+ * cannot dismiss, and WCAG 2.2.2 exists because of exactly that; a finite pulse settles into the
+ * static ring the base rule leaves behind. It re-fires on its own for every new search WITHOUT any
+ * state of its own, because SearchResultPanels is keyed on the search signature — a new search
+ * remounts both panels and a CSS animation restarts on mount. Do not add a timer or an effect.
+ *
+ * Reduced motion needs no opt-out: the universal reset above sets animation-iteration-count: 1 and
+ * duration 0.01ms, so this collapses to the static ring — the correct non-animated equivalent of
+ * the same message.
+ */
+@keyframes ths-fold-glow {
+  0%,
+  100% {
+    border-color: color-mix(in srgb, var(--brand-accent) 18%, transparent);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand-accent) 0%, transparent);
+  }
+  50% {
+    border-color: color-mix(in srgb, var(--brand-accent) 78%, transparent);
+    box-shadow: 0 0 10px 2px color-mix(in srgb, var(--brand-accent) 34%, transparent);
+  }
+}
+
+.ths-fold::after {
+  content: '';
+  position: absolute;
+  /* Just outside the card's own border, and 2px more radius to stay concentric with `rounded-xl`
+     (0.75rem) at a 3px offset. */
+  inset: -3px;
+  border-radius: 0.875rem;
+  border: 2px solid color-mix(in srgb, var(--brand-accent) 26%, transparent);
+  /* The click target is the header row underneath; this ring must never intercept a press. */
+  pointer-events: none;
+  animation: ths-fold-glow 1.6s ease-in-out 3;
+}
+
+
+/*
  * ── Qualify tab (Prompt 3) — rating-bucket status colors + heat washes ──────────────────
  * The 50/30 RATING cutoffs live in app/lib/qualify/rating.ts (ratingBucket) — the ONE shared
  * source of truth; this block only PAINTS them. A `.q-<bucket>` class sets --q-c (border / bar /
