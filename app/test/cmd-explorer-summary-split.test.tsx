@@ -67,7 +67,10 @@ test('render order: hero → result group (yield, AI output, drill) → cohort �
   const d = groupSrc.indexOf('<SearchDrillPanel');
   assert.ok(y > 0 && ai > y && d > ai, 'yield → AI output → drill');
   assert.match(groupSrc, /ai\.state\.kind !== 'idle' && \(\s*<div className="shrink-0">\s*<CollectionsAiPanel/, 'AI output renders only once triggered');
-  assert.equal((groupSrc.match(/<div className="shrink-0">/g) ?? []).length, 3, 'three shrink-0 siblings');
+  // Three `shrink-0` siblings; the first also carries the post-search scroll target (PR2, 2026-09-04)
+  // and a `scroll-mt-4` so the settle lands it 16px below the viewport top.
+  assert.match(groupSrc, /<div ref=\{resultsRef\} className="scroll-mt-4 shrink-0">\s*<SelectionYieldPanel/, 'yield wrapper is the scroll target');
+  assert.equal((groupSrc.match(/className="(scroll-mt-4 )?shrink-0">/g) ?? []).length, 3, 'three shrink-0 siblings');
   assert.match(groupSrc, /return \(\s*<>/, 'a fragment — no wrapper DOM between the column and the cards');
 });
 
