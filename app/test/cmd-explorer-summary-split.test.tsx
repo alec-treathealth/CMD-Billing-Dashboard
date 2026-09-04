@@ -152,6 +152,31 @@ test('EVERY search opens folded — the fold reinitialises because the group is 
   assert.equal(src.split('<SearchDrillPanel').length - 1, 1, 'one drill panel');
 });
 
+test('aiKey carries EVERY input the summary-fetch effect refetches on (Qodo #318)', () => {
+  // THE REGRESSION THIS PINS. aiKey's comment said it "mirrors the summary-fetch dep tuple", and it did
+  // not: `employerKey` and `nameMatchKey` joined the fetch tuple on 2026-08-18 (#249) and never joined
+  // the key. Everything keyed on aiKey — the AI state since 2026-08-09, the drill fold since this PR —
+  // therefore survived an employer-filter or patient-name change and described the PREVIOUS selection.
+  // A hand-maintained mirror rots; this parses BOTH tuples so the next new fetch input fails here.
+  const ai = code.match(/const aiKey = \[([\s\S]*?)\]\.join\('\|'\)/);
+  assert.ok(ai, 'aiKey tuple located');
+  const aiInputs = new Set(ai[1].split(',').map((t) => t.trim()).filter(Boolean));
+  const fetchAt = code.indexOf('loadCmdSearchSummary(f, view)');
+  assert.ok(fetchAt > 0, 'summary fetch located');
+  const deps = code.slice(fetchAt).match(/\}, \[([^\]]*)\]\);/);
+  assert.ok(deps, 'summary-fetch dep tuple located');
+  const fetchInputs = deps[1].split(',').map((t) => t.trim()).filter(Boolean);
+  assert.ok(fetchInputs.length >= 12, `fetch tuple looks truncated: ${fetchInputs.length} entries`);
+  // The ONE fetch input allowed to be absent: derived from canRevealPhi (constant for a session) and
+  // the three PHI fields, which are in the key themselves.
+  const derived = new Set(['hasPhiSearch']);
+  for (const dep of fetchInputs) {
+    if (derived.has(dep)) continue;
+    assert.ok(aiInputs.has(dep), `aiKey is missing summary-fetch input "${dep}" — a stale AI answer / drill fold would survive it`);
+  }
+  for (const k of ['employerKey', 'nameMatchKey']) assert.ok(aiInputs.has(k), `${k} must key the result group`);
+});
+
 test('the lists are BELOW the fold; header + hint ABOVE it', () => {
   const fold = drillSrc.indexOf('<div id={bodyId} hidden={collapsed}>');
   assert.ok(fold > 0, 'the fold exists');

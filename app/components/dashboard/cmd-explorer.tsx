@@ -1014,12 +1014,22 @@ export function CmdCollectionsExplorer({
     return { mode: 'selection', yield_pct: s.yield_pct, scope, top_payers, top_facilities, top_cpt_rev };
   }, [summaryData, cohortResolved, cohortData]);
 
-  // Invalidation key: any filter / search / prefix / view change remounts the AI panel (→ idle, and
-  // its unmount cleanup aborts an in-flight stream), so a stale summary can never describe a new
-  // selection. Mirrors the summary-fetch dep tuple.
+  // Invalidation key: any filter / search / prefix / view change remounts the search-result group
+  // (AI state → idle with its in-flight stream aborted; drill panel → folded), so a stale answer can
+  // never describe a new selection. It MUST carry every input the summary-fetch effect refetches on.
   // The window is now (preset | custom range) + the scheduled override — all four dimensions must
   // key the AI panel, or a re-analysis after changing the window would return the previous answer.
-  const aiKey = [view, recencyDays, customFrom, customTo, includeScheduled, facilityKey, payerKey, dMember, dAlpha, dGroup].join('|');
+  //
+  // ⚠ THIS SAID "mirrors the summary-fetch dep tuple" AND DID NOT (Qodo #318, 2026-09-04). The
+  // employer filter and the patient-name match joined the fetch tuple on 2026-08-18 (#249) and never
+  // joined this key, so for two weeks an AI answer generated before an employer or name change stayed
+  // on screen describing the previous selection — the exact failure the key exists to prevent — and
+  // the drill fold would have survived those searches too. `hasPhiSearch` is the one fetch input NOT
+  // repeated here: it is derived from `canRevealPhi` (constant for a session) and the three PHI
+  // fields, which ARE here. A source pin now parses both tuples and fails if they diverge again.
+  const aiKey = [
+    view, recencyDays, customFrom, customTo, includeScheduled, facilityKey, payerKey, employerKey, nameMatchKey, dMember, dAlpha, dGroup,
+  ].join('|');
 
   // Raw CMD facility text → curated friendly name from the already-loaded dimension options, for
   // DISPLAY only (the Top facilities summary card). Drill/filter values stay the raw facility text
