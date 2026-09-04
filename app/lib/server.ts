@@ -3217,7 +3217,10 @@ export async function streamCollectionsAiAnalysis(
         });
         for await (const event of ms) {
           if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-            controller.enqueue(event.delta.text);
+            // A model-emitted U+E000 (possible: labels admit arbitrary Unicode and the prompt asks the
+            // model to repeat them) becomes U+FFFD here, so on the wire U+E000 is ONLY ever the
+            // terminal truncation mark below. See AI_TRUNCATED_MARK.
+            controller.enqueue(event.delta.text.split(AI_TRUNCATED_MARK).join('\uFFFD'));
           }
         }
         const final = await ms.finalMessage();

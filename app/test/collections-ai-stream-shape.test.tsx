@@ -48,9 +48,13 @@ test('a clip is marked in-band: AI_TRUNCATED_MARK after finalMessage(), before c
   const close = code.indexOf('controller.close();', final);
   assert.ok(final > 0 && mark > final && close > mark, 'finalMessage → mark → close, in that order');
   assert.match(serverSrc, /^\s*AI_TRUNCATED_MARK,\s*$/m, 'the mark is imported from the shared module, not redeclared');
-  // The mark is the ONLY non-text thing ever enqueued.
-  const enqueues = code.match(/controller\.enqueue\(([^)]*)\)/g) ?? [];
-  assert.deepEqual(enqueues, ['controller.enqueue(event.delta.text)', 'controller.enqueue(AI_TRUNCATED_MARK)']);
+  // The mark is the ONLY non-text thing ever enqueued — and model text is sanitised first, so a
+  // model-emitted U+E000 can never impersonate it (Qodo #319).
+  const enqueues = code.match(/controller\.enqueue\((.*)\);/g) ?? [];
+  assert.deepEqual(enqueues, [
+    "controller.enqueue(event.delta.text.split(AI_TRUNCATED_MARK).join('\\uFFFD'));",
+    'controller.enqueue(AI_TRUNCATED_MARK);',
+  ]);
 });
 
 test('the cost-governance line reports stop_reason so truncation is visible in ops', () => {

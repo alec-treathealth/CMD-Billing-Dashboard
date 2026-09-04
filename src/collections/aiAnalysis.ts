@@ -151,20 +151,29 @@ export const AI_MAX_TOKENS = 1536;
  * THE ONE-CODE-POINT WIRE CONVENTION on the AI stream. The Server Action returns
  * `ReadableStream<string>` of text deltas; when the model stopped at `max_tokens` the server enqueues
  * exactly this code point AFTER the last delta and before close, so the client can say the read was
- * cut short instead of presenting a clipped answer as complete. U+E000 is Unicode private-use: no
- * model output contains it, it is a single UTF-16 code unit (a chunk boundary cannot split it), and
- * `splitAiStream` strips it before anything renders or reaches `parseAiSections`.
+ * cut short instead of presenting a clipped answer as complete. U+E000 is Unicode private-use, a
+ * single UTF-16 code unit (a chunk boundary cannot split it), and `splitAiStream` strips it before
+ * anything renders or reaches `parseAiSections`.
+ *
+ * COLLISION-SAFE BY CONSTRUCTION (Qodo #319): the input labels admit arbitrary Unicode and the prompt
+ * asks the model to repeat them, so "no model output contains it" is a probability, not a guarantee.
+ * The server therefore replaces any U+E000 INSIDE a model text delta with U+FFFD before enqueueing,
+ * which makes U+E000 on the wire mean exactly one thing — the server's own terminal mark — and the
+ * client sets `truncated` only when the mark is the LAST code unit of the accumulation.
  */
 export const AI_TRUNCATED_MARK = '\uE000';
 
 /**
  * Split the accumulated stream into renderable text + the truncation flag. Pure; run it on EVERY
  * render path (mid-stream and final) so the mark can never paint and never reaches the section
- * parser. Detection is on the ACCUMULATED string, so it does not matter which chunk carried the mark.
+ * parser. `truncated` is true only for a TERMINAL mark — the server appends it after the last delta
+ * and closes, so once it arrives nothing follows it, and detection on the accumulated string works
+ * regardless of how the transport chunked the text. A mark anywhere else cannot come from the server
+ * (it sanitises deltas) and is stripped defensively without flagging.
  */
 export function splitAiStream(acc: string): { text: string; truncated: boolean } {
-  const truncated = acc.includes(AI_TRUNCATED_MARK);
-  return { text: truncated ? acc.split(AI_TRUNCATED_MARK).join('') : acc, truncated };
+  const truncated = acc.endsWith(AI_TRUNCATED_MARK);
+  return { text: acc.includes(AI_TRUNCATED_MARK) ? acc.split(AI_TRUNCATED_MARK).join('') : acc, truncated };
 }
 
 const SYSTEM_PROMPT = [

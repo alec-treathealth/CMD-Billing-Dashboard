@@ -156,6 +156,16 @@ test('splitAiStream: trailing mark → truncated, and the mark never reaches the
   assert.ok(!out.text.includes(AI_TRUNCATED_MARK));
 });
 
+test('splitAiStream: only a TERMINAL mark means truncated — a mark inside the text never does (Qodo #319)', () => {
+  // The server replaces model-emitted U+E000 with U+FFFD before enqueueing, so a mid-text mark cannot
+  // come from the server; the client strips it defensively but does NOT call the read cut short.
+  assert.deepEqual(splitAiStream(`pay${AI_TRUNCATED_MARK}er`), { text: 'payer', truncated: false });
+  assert.deepEqual(splitAiStream(`pay${AI_TRUNCATED_MARK}er${AI_TRUNCATED_MARK}`), { text: 'payer', truncated: true });
+  // A normally completed answer that mentions U+FFFD (the server's substitution) is untouched.
+  const withSub = '## TL;DR\nPAYER \uFFFD LLC pays 90%.\n## Signals\n- a\n## Risks\n- b';
+  assert.deepEqual(splitAiStream(withSub), { text: withSub, truncated: false });
+});
+
 test('splitAiStream: detection is on the ACCUMULATED string — chunking cannot hide the mark', () => {
   // The client re-splits the whole accumulation on every chunk; wherever the transport puts the mark,
   // the result is the same, and a stray duplicate is stripped too.
