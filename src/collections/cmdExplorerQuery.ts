@@ -1422,16 +1422,32 @@ export function buildCmdExplorerQuery(
    * most `limit` rows PER BRANCH (a hundred-ish), so this sort costs microseconds — the point of
    * the rewrite is bounding what the branches READ, not avoiding this sort.
    *
+   * ⚠ DELIBERATE CROSS-TENANT READ — A REVIEWED EXCEPTION, NOT AN ACCIDENT. A multi-id scope here
+   * IS the Consolidated view: `entityIds` arrives from viewEntityScope after the RBAC clamp, and
+   * only a role entitled to EVERY listed entity (super_admin — cross-tenant BY DESIGN, ruled in the
+   * 2026-07 QA pass) is ever handed more than one id. Each branch still pins its rows to exactly
+   * one entitled business_entity_id — the union widens the PAGE to the entitled set, never a row's
+   * tenant scope — so this is the same read the `= any(...)` form always performed, restated
+   * per-entity for the planner.
+   *
    * A 0/1-entity scope emits the single scan with the SAME SHAPE as before this change — the one
    * diff is parameter ORDER: `limit` now binds inside the scan, so it takes the slot ahead of
    * `businessToday` instead of after it. Positional params make that invisible to the database
    * (each placeholder still names its own value; the plan is unchanged) — it is called out because
    * a test pinning the old $-numbering would otherwise read as a semantic change. The BXR/Indigo
    * tabs and Payer Intel's callers keep the plan they already have.
+   *
+   * The merge layer's projection is the scan's OWN column list, repeated explicitly — never `*`
+   * (the standing never-SELECT-* rule applies to a derived table as much as to a base table: `*`
+   * here would silently widen the page's shape the day a scan gains a column).
    */
+  const MERGE_COLS =
+    'id, charge_date, payment_received, cpt_code, revenue_code, facility, charge_amount, ' +
+    'allowed_amount, insurance_payments, adjustments, patient_balance_due, primary_payer, ' +
+    'pct_allowed, pct_paid, ingested_at';
   const paged =
     entityIds.length > 1
-      ? `select * from (${entityIds.map((id) => `(${scanFor([id])})`).join(' union all ')}) u ` +
+      ? `select ${MERGE_COLS} from (${entityIds.map((id) => `(${scanFor([id])})`).join(' union all ')}) u ` +
         `order by u.${outCol} ${dir} nulls last, u.id ${dir} limit ${add(limit)}`
       : scanFor(entityIds);
 

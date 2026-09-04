@@ -133,6 +133,15 @@ test('consolidated merge: every branch is ordered, LIMITed, windowed, and keyset
   assert.equal(branchOrder.length, 2, 'both branches ordered + limited');
   assert.match(sql, /\) u order by u\.payment_received desc nulls last, u\.id desc limit \$\d+\) p/, 'one merge layer, itself limited');
 
+  // The merge projects the scans' EXPLICIT column list — never `*` (standing rule; Qodo #326). A
+  // wildcard here would silently widen the page's shape the day a scan gains a column.
+  assert.doesNotMatch(sql, /select \* from/, 'no wildcard projection anywhere in the statement');
+  assert.match(
+    sql,
+    /select id, charge_date, payment_received, cpt_code, revenue_code, facility, charge_amount, allowed_amount, insurance_payments, adjustments, patient_balance_due, primary_payer, pct_allowed, pct_paid, ingested_at from \(\(select/,
+    'the merge layer names all 15 output columns',
+  );
+
   // The keyset cursor must appear in EVERY branch: a branch without it would restart at page 1 and
   // the merge would re-serve rows the reader already paged past.
   const keysets = sql.match(/payment_received < \$\d+ or \(payment_received = \$\d+ and id < \$\d+\)/g) ?? [];
