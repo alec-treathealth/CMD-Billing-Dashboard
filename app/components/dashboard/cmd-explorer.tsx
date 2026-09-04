@@ -2489,7 +2489,7 @@ export function CmdCollectionsExplorer({
                   placeholder="full or partial name"
                   // autoComplete off: this value is PHI and must not be stored by the browser.
                   autoComplete="off"
-                  className="h-8 w-56 rounded-md border border-line bg-canvas px-2 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent)]/25 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="h-8 w-56 rounded-md border border-line bg-canvas px-2 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent-a25)] disabled:cursor-not-allowed disabled:opacity-50"
                   // Conditional, because the element it names now renders only when there IS a
                   // notice. A dangling aria-describedby is worse than none: a screen reader
                   // announces nothing and the author believes the field is described.
@@ -2566,7 +2566,7 @@ export function CmdCollectionsExplorer({
             <button
               type="button"
               onClick={() => setRefinement(null)}
-              className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] px-2 py-0.5 font-medium text-[var(--brand-ink)] transition-colors hover:bg-[var(--brand-accent)]/20"
+              className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] px-2 py-0.5 font-medium text-[var(--brand-ink)] transition-colors hover:bg-[var(--brand-accent-a20)]"
             >
               {refinementLabel(refinement)}
               <X className="h-3 w-3" aria-hidden />
@@ -2594,11 +2594,12 @@ export function CmdCollectionsExplorer({
               type="button"
               onClick={clearSearch}
               title="Clear every facility, payer, employer, patient and drill filter"
-              /* Alpha-free tokens ONLY — `hover:bg-[var(--brand-accent)]/20` and
-                 `focus-visible:ring-[var(--brand-accent)]/50` were this button's first draft and
-                 BOTH emit no CSS (see foldCardClass). The resting look is the active tenant tab's
-                 (2px brand-ink border on the soft tint); hover inverts to solid ink so the state
-                 change is carried by more than a tint. */
+              /* NO `/<alpha>` ON A `var()` COLOUR — this button's first draft said
+                 `hover:bg-[var(--brand-accent)]` with a `/20` suffix and `focus-visible:ring-`
+                 the same with `/50`, and BOTH emitted no CSS at all (see the alpha-step block in
+                 globals.css). The resting look is the active tenant tab's (2px brand-ink border on
+                 the soft tint); hover inverts to solid ink so the state change is carried by more
+                 than a tint, and the focus ring uses a solid token. */
               className="ml-auto inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border-2 border-[var(--brand-ink)] bg-[var(--brand-soft)] px-4 text-sm font-semibold normal-case text-[var(--brand-ink)] transition-colors hover:bg-[var(--brand-ink)] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)] focus-visible:ring-offset-2"
             >
               <X className="h-4 w-4" aria-hidden />
@@ -2732,7 +2733,7 @@ export function CmdCollectionsExplorer({
                 }
                 className={[
                   'gap-1.5',
-                  grouped ? 'bg-[var(--brand-soft)] ring-1 ring-[var(--brand-accent)]/40' : '',
+                  grouped ? 'bg-[var(--brand-soft)] ring-1 ring-[var(--brand-accent-a40)]' : '',
                 ].join(' ')}
               >
                 <Layers className="h-4 w-4" aria-hidden />
@@ -2746,8 +2747,8 @@ export function CmdCollectionsExplorer({
                 aria-haspopup="true"
                 onClick={() => setColumnsMenuOpen((o) => !o)}
                 className={[
-                  'border-line bg-[var(--brand-soft)]/50 text-ink900 hover:bg-[var(--brand-soft)]',
-                  columnsMenuOpen ? 'bg-[var(--brand-soft)] ring-1 ring-[var(--brand-accent)]/40' : '',
+                  'border-line bg-[var(--brand-soft-a50)] text-ink900 hover:bg-[var(--brand-soft)]',
+                  columnsMenuOpen ? 'bg-[var(--brand-soft)] ring-1 ring-[var(--brand-accent-a40)]' : '',
                 ].join(' ')}
               >
                 <Columns3 className="h-4 w-4" aria-hidden />
@@ -2794,7 +2795,7 @@ export function CmdCollectionsExplorer({
                 aria-pressed={revealAll}
                 onClick={() => setRevealAll((v) => !v)}
                 className={[
-                  'border-line bg-[var(--brand-soft)]/50 text-ink900 hover:bg-[var(--brand-soft)]',
+                  'border-line bg-[var(--brand-soft-a50)] text-ink900 hover:bg-[var(--brand-soft)]',
                   revealAll ? 'border-[var(--brand-accent)] bg-[var(--brand-soft)] text-[var(--brand-ink)]' : '',
                 ].join(' ')}
               >
@@ -3531,7 +3532,7 @@ function ColumnViewManager({
               placeholder="Save current layout as…"
               aria-label="New view name"
               maxLength={80}
-              className="h-8 w-full rounded-md border border-line bg-card px-2 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent)]/25"
+              className="h-8 w-full rounded-md border border-line bg-card px-2 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent-a25)]"
             />
             <div className="flex items-center justify-between gap-2">
               <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
@@ -3783,7 +3784,7 @@ function AiTrigger({ ai }: { ai: CollectionsAi }) {
         disabled={!sufficient || busy}
         aria-busy={busy}
         onClick={ai.generate}
-        className="border-line bg-[var(--brand-soft)]/50 text-ink900 hover:bg-[var(--brand-soft)]"
+        className="border-line bg-[var(--brand-soft-a50)] text-ink900 hover:bg-[var(--brand-soft)]"
       >
         <Sparkles className="h-4 w-4" aria-hidden />
         {state.kind === 'ready' ? 'Regenerate' : busy ? 'Generating…' : 'Generate AI Analysis'}
@@ -3903,7 +3904,7 @@ function DrillList({
           const bar = (
             <span
               aria-hidden
-              className="absolute inset-y-0 left-0 bg-[var(--brand-accent)]/10"
+              className="absolute inset-y-0 left-0 bg-[var(--brand-accent-a10)]"
               style={{ width: `${pct}%` }}
             />
           );
@@ -3964,7 +3965,7 @@ function PhiField({
         maxLength={maxLength}
         autoComplete="off"
         spellCheck={false}
-        className={`${width} h-8 rounded-md border border-line bg-card px-2 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent)]/25`}
+        className={`${width} h-8 rounded-md border border-line bg-card px-2 text-sm text-ink900 outline-none transition-colors placeholder:text-ink400 focus:border-[var(--brand-accent)] focus:ring-2 focus:ring-[var(--brand-accent-a25)]`}
       />
     </label>
   );
@@ -4153,7 +4154,8 @@ const FOLD_ROW_CLASS =
  * `color-mix`, because Tailwind SILENTLY EMITS NOTHING for an `/<alpha>` modifier on an arbitrary
  * `var()` colour — this helper's first draft said
  * `border-[var(--brand-accent)]/55 ring-1 ring-[var(--brand-accent)]/35` and painted nothing at all.
- * See the note in globals.css, including the 17 other dead instances already in this repo.
+ * See the alpha-step block in globals.css; the shape is banned repo-wide by
+ * test/brand-token-alpha.test.tsx.
  *
  * `relative` is what the ::after positions against, and it was already there for the refetch bar.
  */
@@ -4847,7 +4849,7 @@ function DrilldownPayerRow({ group, max }: { group: CmdSearchGroup; max: number 
   const pct = Math.max(2, Math.round((group.charge / max) * 100));
   return (
     <div className="relative overflow-hidden rounded-md px-2 py-1 text-sm">
-      <span aria-hidden className="absolute inset-y-0 left-0 bg-[var(--brand-accent)]/10" style={{ width: `${pct}%` }} />
+      <span aria-hidden className="absolute inset-y-0 left-0 bg-[var(--brand-accent-a10)]" style={{ width: `${pct}%` }} />
       <span className="relative flex items-center justify-between gap-2">
         <span className="truncate text-ink900">{group.label ?? '(blank)'}</span>
         <span className="shrink-0 tabular-nums text-xs text-muted-foreground">

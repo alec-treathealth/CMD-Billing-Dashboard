@@ -113,19 +113,18 @@ test('the glow is COLLAPSED-ONLY and layout-neutral', () => {
  * and painted absolutely nothing. Verified against the SHIPPED stylesheet: `.next/static/css/*.css`
  * carries 31 `brand-accent` rules and not one of them has an alpha modifier.
  *
- * Scoped to the code this change owns. 17 other occurrences already exist in the repo (5 files) and
- * are the same latent bug — hover and focus tints that have never rendered — but sweeping them is a
- * separate change with its own browser pass, and a repo-wide assertion here would just fail on them.
+ * ⚠ THE BAN ITSELF IS NOT HERE. The 17 pre-existing instances found alongside this change were
+ * fixed rather than deferred, so the rule is enforced repo-wide in test/brand-token-alpha.test.tsx
+ * — one copy, every file, no allowlist. What this test keeps is the part specific to the fold: that
+ * the ring's colour comes from CSS rather than from a Tailwind class at all.
  */
-test('the new styling uses NO alpha-on-var utility — Tailwind emits nothing for those', () => {
-  const deadAlphaOnVar = /(?:bg|border|ring|text|fill|shadow|outline|from|to|via)-\[var\(--[a-z-]+\)\]\/\d+/;
-  const card = explorerCode.slice(explorerCode.indexOf('const foldCardClass'), explorerCode.indexOf('function SearchDrillPanel'));
-  assert.doesNotMatch(card, deadAlphaOnVar, 'the fold card class must not use one');
-  assert.doesNotMatch(explorerCode.slice(explorerCode.indexOf('FOLD_ROW_CLASS ='), explorerCode.indexOf('const foldCardClass')), deadAlphaOnVar, 'nor the header row');
-  const btn = explorerCode.slice(explorerCode.indexOf('{canClearSearch && ('), explorerCode.indexOf('Clear search'));
-  assert.doesNotMatch(btn, deadAlphaOnVar, 'nor the Clear search button');
-  // color-mix IS the working equivalent and is already the house pattern (--m3-rail-indicator).
+test('the fold ring gets its translucent accent from color-mix, not from a Tailwind class', () => {
+  // color-mix IS the working equivalent and was already the house pattern (--m3-rail-indicator).
   assert.match(globalsCss, /color-mix\(in srgb, var\(--brand-accent\)/, 'the translucent accent comes from color-mix');
+  const card = explorerCode.slice(explorerCode.indexOf('const foldCardClass'), explorerCode.indexOf('function SearchDrillPanel'));
+  // The card class list must carry no colour of its own for the collapsed state — `ths-fold` owns
+  // it, so there is one place to change the highlight and one place that can get it wrong.
+  assert.doesNotMatch(card, /\[var\(--brand-accent[^\]]*\)\]/, 'the collapsed styling is a class name, not inline colour');
 });
 
 test('the glow ring is a pseudo-element, and the pulse stops on its own', () => {

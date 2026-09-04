@@ -60,6 +60,41 @@
     --brand-accent: #1c8b82; /* highlight: KPI top border, active underline, fills */
     --brand-soft: #eaf4f2; /* soft tint: tracks / subtle backgrounds */
 
+    /* ---- Brand ALPHA STEPS, and they exist because Tailwind cannot express them -------------
+       ⚠ `bg-[var(--brand-accent)]/10` AND EVERY CLASS OF THAT SHAPE EMITS NO RULE AT ALL.
+       Tailwind's `/<alpha>` modifier has to rewrite the colour into a channel form to insert an
+       alpha, which it can only do for a value it can parse — an opaque `var()` is not one (the
+       technique needs a var holding bare channels, e.g. `--x: 28 139 130`, which the --brand-*
+       tokens are not). It does not warn, `tsc` is happy, `next build` is happy, and the element
+       simply has no such style. 17 classes in this repo were written that way and NONE of them had
+       ever painted — hover tints, focus halos, active-state fills and, twice, a DATA BAR that was
+       silently invisible. ALL 17 were repointed here on 2026-09-04 and the shape is now banned
+       repo-wide by test/brand-token-alpha.test.tsx, which also rejects a reference to an alpha step
+       that does not exist (an undeclared var emits a rule and is transparent — same symptom, and
+       the obvious next mistake now that the steps are named by percentage).
+
+       Each step is the exact percentage its call site originally asked for, so intent is preserved
+       one-for-one rather than re-designed. `color-mix` is the working equivalent and was already
+       the house pattern a few lines below (--m3-rail-indicator).
+
+       Declared on :root === <html> for the same reason the --m3-* tokens are: `var(--brand-accent)`
+       inside a custom property is substituted at computed-value time on the element, so these pick
+       up whatever the active [data-view] rule set on that same element. One scale, three tenant
+       palettes, no second copy.
+
+       ⚠ VERIFY, DO NOT ASSUME. A class using one of these must be findable as a real rule in
+       app/.next/static/css/*.css after a build. That grep is the only proof that matters here —
+       reading the JSX is exactly what let 17 dead classes survive for months. */
+    --brand-accent-a8: color-mix(in srgb, var(--brand-accent) 8%, transparent);
+    --brand-accent-a10: color-mix(in srgb, var(--brand-accent) 10%, transparent);
+    --brand-accent-a12: color-mix(in srgb, var(--brand-accent) 12%, transparent);
+    --brand-accent-a20: color-mix(in srgb, var(--brand-accent) 20%, transparent);
+    --brand-accent-a25: color-mix(in srgb, var(--brand-accent) 25%, transparent);
+    --brand-accent-a40: color-mix(in srgb, var(--brand-accent) 40%, transparent);
+    --brand-accent-a50: color-mix(in srgb, var(--brand-accent) 50%, transparent);
+    --brand-soft-a50: color-mix(in srgb, var(--brand-soft) 50%, transparent);
+    --brand-soft-a60: color-mix(in srgb, var(--brand-soft) 60%, transparent);
+
     /* ---- Material-3 navigation-rail tokens ----------------------------------
        STRUCTURE from Material 3, COLOR from the brand vars above. Declared here
        (on :root === <html>) so they substitute against whatever --brand-* the
@@ -172,10 +207,10 @@
  * carry an alpha modifier. This first draft used two such classes and painted nothing.
  * `color-mix(in srgb, var(--brand-accent) N%, transparent)` is the working equivalent and is
  * already the house pattern — see `--m3-rail-indicator` above.
- * ⚠ 17 OTHER OCCURRENCES OF THAT DEAD PATTERN EXIST IN THIS REPO (5 files, mostly hover/focus tints
- * in cmd-explorer.tsx). They are a separate, pre-existing bug: each one is a hover or focus effect
- * that has never rendered. Do not copy the pattern; fixing the others is its own change with its own
- * browser pass.
+ * The 17 pre-existing occurrences of that dead pattern found alongside this change are FIXED, not
+ * deferred — see the alpha-step scale near the top of this file, and the repo-wide ban in
+ * test/brand-token-alpha.test.tsx. This block keeps the explanation because the mistake is
+ * invisible and inviting, not because any instance survives.
  *
  * ⚠ THE RING IS AN ::after, NOT A box-shadow OR AN outline. Those cards already carry `shadow-ths`,
  * which compiles to `box-shadow` through --tw-shadow, so a rule or keyframe setting `box-shadow` on

@@ -121,12 +121,12 @@ export function TenantTabs({ allowedViews }: { allowedViews?: DashboardView[] })
               // The container gap went 1 -> 2 at the same time: at gap-1 two adjacent 2px strokes
               // sit 4px apart and read as one divided box rather than two tabs.
               'relative inline-flex items-center gap-2 rounded-lg border-2 px-4 py-2 text-[15px] transition-colors',
-              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)]/50',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent-a50)]',
               active
                 ? 'border-[var(--brand-ink)] bg-[var(--brand-soft)] font-semibold text-[var(--brand-ink)]'
                 // Hover must not REDUCE contrast: the old `--brand-accent/50` was fainter than the
                 // resting border, so moving the pointer onto a tab made its outline weaker.
-                : 'border-ink400 font-medium text-muted-foreground hover:border-[var(--brand-ink)] hover:bg-[var(--brand-soft)]/60 hover:text-ink900',
+                : 'border-ink400 font-medium text-muted-foreground hover:border-[var(--brand-ink)] hover:bg-[var(--brand-soft-a60)] hover:text-ink900',
             ].join(' ')}
           >
             {/* Per-tenant swatch: `data-view` makes globals.css resolve THIS element's
