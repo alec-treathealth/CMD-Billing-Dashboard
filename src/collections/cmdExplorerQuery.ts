@@ -1339,12 +1339,6 @@ export function buildCmdExplorerQuery(
     params.push(v);
     return `$${params.length}`;
   };
-  // Tenant scope + the exact/window/substring filters (shared with the search summary). Every column
-  // referenced here exists on the rollup, so the same conds apply unchanged.
-  const conds = cmdExplorerBaseConds(filter, entityIds, add, {
-    resolveFacility: true,
-    requireWindow: opts?.requireWindow === true,
-  });
 
   // Physical sort column (fixed literal from the map — allowed_amount → allowed_reliable).
   const col = CMD_EXPLORER_SORT_SQL[sort.column];
@@ -1360,23 +1354,86 @@ export function buildCmdExplorerQuery(
   // column falls back to the default instead of reaching the SQL text.
   const outCol = CMD_EXPLORER_SORTABLE.has(sort.column) ? sort.column : CMD_EXPLORER_DEFAULT_SORT.column;
   const cmp = sort.direction === 'asc' ? '>' : '<';
-  if (cursor !== null) {
-    if (cursor.value === null) {
-      // Cursor row sat in the trailing NULL block: only later NULL rows remain.
-      conds.push(`(${col} is null and id ${cmp} ${add(cursor.id)})`);
-    } else {
-      // Rows past the cursor on the sort key, ties broken by id, plus the whole NULL block
-      // (which sorts after any non-null value under NULLS LAST).
-      const valueParam = add(cursor.value);
-      const idParam = add(cursor.id);
-      conds.push(
-        `(${col} ${cmp} ${valueParam} or (${col} = ${valueParam} and id ${cmp} ${idParam}) or ${col} is null)`,
-      );
-    }
-  }
-
-  const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
   const dir = sort.direction === 'asc' ? 'asc' : 'desc';
+
+  /*
+   * ONE ordered, LIMITed scan of the rollup for ONE entity scope — the paged subquery this builder
+   * has always emitted, extracted into a function so the consolidated view can emit it once per
+   * entity (see `paged` below). Everything inside is per-scope on purpose: cmdExplorerBaseConds is
+   * re-run so the tenant cond takes its EQUALITY form (scope.length === 1 — see its docblock: a
+   * ScalarArrayOp on the leading btree column is what stops the ordered index walk), and the keyset
+   * cursor predicate is re-emitted so each branch resumes from the same page boundary. Params
+   * repeat per branch; a $n placeholder is cheap and values-only params are the rule here.
+   */
+  const scanFor = (scope: string[]): string => {
+    // Tenant scope + the exact/window/substring filters (shared with the search summary). Every
+    // column referenced here exists on the rollup, so the same conds apply unchanged.
+    const conds = cmdExplorerBaseConds(filter, scope, add, {
+      resolveFacility: true,
+      requireWindow: opts?.requireWindow === true,
+    });
+    if (cursor !== null) {
+      if (cursor.value === null) {
+        // Cursor row sat in the trailing NULL block: only later NULL rows remain.
+        conds.push(`(${col} is null and id ${cmp} ${add(cursor.id)})`);
+      } else {
+        // Rows past the cursor on the sort key, ties broken by id, plus the whole NULL block
+        // (which sorts after any non-null value under NULLS LAST).
+        const valueParam = add(cursor.value);
+        const idParam = add(cursor.id);
+        conds.push(
+          `(${col} ${cmp} ${valueParam} or (${col} = ${valueParam} and id ${cmp} ${idParam}) or ${col} is null)`,
+        );
+      }
+    }
+    const where = conds.length > 0 ? ` where ${conds.join(' and ')}` : '';
+    return (
+      `select t.id, to_char(t.charge_date, 'YYYY-MM-DD') as charge_date, ` +
+      `to_char(t.payment_received, 'YYYY-MM-DD') as payment_received, t.cpt_code, t.revenue_code, ` +
+      `t.facility, t.charge_amount, t.allowed_reliable as allowed_amount, t.insurance_payments, ` +
+      `t.adjustments, t.patient_balance_due, t.primary_payer, t.pct_allowed, t.pct_paid, ` +
+      `to_char(t.ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
+      `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} ` +
+      `order by t.${col} ${dir} nulls last, t.id ${dir} limit ${add(limit)}`
+    );
+  };
+
+  /*
+   * ── THE CONSOLIDATED SCOPE PAGES PER ENTITY AND MERGES (2026-09-04) ─────────────────────────
+   *
+   * This is the "per-entity UNION ALL rewrite" cmdExplorerBaseConds' tenant-cond docblock deferred
+   * when it fixed the single-entity shape. With 2+ ids the tenant cond is `= any($n)`, a
+   * ScalarArrayOp on the leading btree column — so the ordered walk is unavailable BY SHAPE and the
+   * old single scan read the ENTIRE window and top-N sorted it for 51 rows out. Measured live
+   * (consolidated, 90d, page 1): 46,712 rows / 31,477 buffers / 187 ms WARM — and
+   * pg_stat_statements put the production MEAN at 3,475 ms (max 11,379) because the buffer cache is
+   * usually cold by the time the 15-min unstable_cache entry has expired or the hourly cron has
+   * busted the tag. That number was the Collections tab's time-to-first-byte on every cache miss.
+   *
+   * Per-entity branches restore the ordered walk (each branch is a single-id scope, so baseConds
+   * emits EQUALITY and the branch descends cmd_charge_rollup_entity_payment_id_desc, reading at
+   * most `limit` rows), and the merge layer takes the global top-`limit` across branches. Measured
+   * live, same page: 1.9 ms / 347 buffers — and the cold story is the real fix: ~2.7 MB of pages
+   * touched instead of ~246 MB.
+   *
+   * ⚠ THE MERGE ORDERS BY THE OUTPUT COLUMN (`outCol`), exactly like the outer re-sort below, and
+   * for the same reason it is sound there: the two date keys are ISO-8601 text, which sorts
+   * identically to the dates, and every other sortable key is projected raw. The merge input is at
+   * most `limit` rows PER BRANCH (a hundred-ish), so this sort costs microseconds — the point of
+   * the rewrite is bounding what the branches READ, not avoiding this sort.
+   *
+   * A 0/1-entity scope emits the single scan with the SAME SHAPE as before this change — the one
+   * diff is parameter ORDER: `limit` now binds inside the scan, so it takes the slot ahead of
+   * `businessToday` instead of after it. Positional params make that invisible to the database
+   * (each placeholder still names its own value; the plan is unchanged) — it is called out because
+   * a test pinning the old $-numbering would otherwise read as a semantic change. The BXR/Indigo
+   * tabs and Payer Intel's callers keep the plan they already have.
+   */
+  const paged =
+    entityIds.length > 1
+      ? `select * from (${entityIds.map((id) => `(${scanFor([id])})`).join(' union all ')}) u ` +
+        `order by u.${outCol} ${dir} nulls last, u.id ${dir} limit ${add(limit)}`
+      : scanFor(entityIds);
 
   // The CmdExplorerRow shape (same output names/casts the grid has always returned). Dates and
   // ingested_at to_char'd to stable strings. `t.<col>` / `t.id` bind the RAW columns so the sort is
@@ -1467,13 +1524,7 @@ export function buildCmdExplorerQuery(
   const sql =
     `select p.*, e.employer_name, fr.facility_alias as facility_resolved, ` +
     `fr.method as facility_method, ${scheduled} from (` +
-    `select t.id, to_char(t.charge_date, 'YYYY-MM-DD') as charge_date, ` +
-    `to_char(t.payment_received, 'YYYY-MM-DD') as payment_received, t.cpt_code, t.revenue_code, ` +
-    `t.facility, t.charge_amount, t.allowed_reliable as allowed_amount, t.insurance_payments, ` +
-    `t.adjustments, t.patient_balance_due, t.primary_payer, t.pct_allowed, t.pct_paid, ` +
-    `to_char(t.ingested_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as ingested_at ` +
-    `from ${CMD_EXPLORER_CHARGE_ROLLUP} t${where} ` +
-    `order by t.${col} ${dir} nulls last, t.id ${dir} limit ${add(limit)}` +
+    paged +
     `) p left join collections.cmd_explorer_rows e on e.id = p.id ` +
     `left join ${CMD_FACILITY_RESOLUTION} fr on fr.id = p.id ` +
     // Re-stated on the OUTER query: a LEFT JOIN does not preserve the subquery's ordering, and the

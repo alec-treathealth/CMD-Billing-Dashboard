@@ -77,17 +77,31 @@ test('page query: tenant scope is always the first bound param, no filters', () 
 // load sorted the whole tenant slice (measured 479 MB of buffers for 51 rows). Plain equality
 // restores the ordered Index Scan on cmd_charge_rollup_entity_payment_id_desc. If this assertion
 // ever flips back to `any(...)` for a single id, that index goes cold and nothing else fails.
-test('tenant predicate arity: 1 id emits plain equality, 2+ keeps the array, 0 stays fail-closed', () => {
+test('tenant predicate arity: 1 id emits plain equality, 2+ pages per entity, 0 stays fail-closed', () => {
   // ONE id → `= $n::uuid`, and the bound value is the SCALAR, not a one-element array.
   const one = buildCmdExplorerQuery(null, {}, SORT, 51, ENTITY);
   assert.match(one.sql, /where business_entity_id = \$1::uuid/);
   assert.doesNotMatch(one.sql, /business_entity_id = any/);
   assert.equal(one.params[0], ENTITY[0]);
 
-  // TWO ids (the consolidated view) → unchanged array form, array value.
+  /*
+   * TWO ids (the consolidated view) → PER-ENTITY BRANCHES, not the array form (2026-09-04).
+   * This assertion used to pin `= any($1::uuid[])` as "deliberately unchanged", with the builder's
+   * own docblock deferring the fix — and production paid for the deferral: a ScalarArrayOp on the
+   * leading btree column cannot serve the ORDER BY from the index, so the consolidated landing page
+   * read its whole window (46,712 rows / 31,477 buffers measured) and top-N sorted it. Mean in
+   * pg_stat_statements: 3,475 ms. Each branch is now a single-id scope, so the equality form above
+   * applies INSIDE each branch and the ordered walk on cmd_charge_rollup_entity_payment_id_desc
+   * serves it (1.9 ms / 347 buffers, same page). If `= any` ever comes back at 2+ arity, that plan
+   * is gone and nothing else fails — exactly the trap the 1-id half of this test already documents.
+   */
   const two = buildCmdExplorerQuery(null, {}, SORT, 51, [...ENTITY, '141d459c-f371-4229-9a92-ace198e940bb']);
-  assert.match(two.sql, /where business_entity_id = any\(\$1::uuid\[\]\)/);
-  assert.deepEqual(two.params[0], [ENTITY[0], '141d459c-f371-4229-9a92-ace198e940bb']);
+  assert.doesNotMatch(two.sql, /business_entity_id = any/, 'no ScalarArrayOp at any arity above zero');
+  assert.match(two.sql, /where business_entity_id = \$1::uuid/, 'first branch pins the first id');
+  assert.match(two.sql, /where business_entity_id = \$3::uuid/, 'second branch pins the second id');
+  assert.equal(two.params[0], ENTITY[0]);
+  assert.equal(two.params[2], '141d459c-f371-4229-9a92-ace198e940bb');
+  assert.match(two.sql, /\) union all \(/, 'branches are unioned');
 
   // ZERO ids → MUST stay on the array form. `= any(ARRAY[]::uuid[])` matches NOTHING, which is the
   // fail-closed property this module relies on instead of assertEntityScope. Routing an empty scope
@@ -99,6 +113,51 @@ test('tenant predicate arity: 1 id emits plain equality, 2+ keeps the array, 0 s
 
   // The predicate is emitted UNCONDITIONALLY at every arity — there is no path to an unscoped read.
   for (const q of [one, two, none]) assert.match(q.sql, /where business_entity_id /);
+});
+
+/*
+ * ── THE CONSOLIDATED MERGE, pinned piece by piece (2026-09-04) ─────────────────────────────────
+ * The shape is: (ordered LIMITed scan per entity) UNION ALL … , then ONE merge layer that re-sorts
+ * the ≤ limit-per-branch rows and applies the global limit. Everything the single scan guaranteed
+ * must hold in EVERY branch, or one tenant's half of the page silently degrades.
+ */
+test('consolidated merge: every branch is ordered, LIMITed, windowed, and keyset-resumed', () => {
+  const TWO = [...ENTITY, '141d459c-f371-4229-9a92-ace198e940bb'];
+  const filter = { from: '2026-06-07', to: '2026-09-05', businessToday: '2026-09-04' };
+  const cursor = { id: 12345, value: '2026-08-20' };
+  const { sql, params } = buildCmdExplorerQuery(cursor, filter, SORT, 51, TWO, { requireWindow: true });
+
+  // Each branch carries its OWN order-by + limit — that is what lets the planner stop each walk at
+  // `limit` rows instead of reading the whole window. Two branch clauses + one merge clause.
+  const branchOrder = sql.match(/order by t\.payment_received desc nulls last, t\.id desc limit \$\d+/g) ?? [];
+  assert.equal(branchOrder.length, 2, 'both branches ordered + limited');
+  assert.match(sql, /\) u order by u\.payment_received desc nulls last, u\.id desc limit \$\d+\) p/, 'one merge layer, itself limited');
+
+  // The keyset cursor must appear in EVERY branch: a branch without it would restart at page 1 and
+  // the merge would re-serve rows the reader already paged past.
+  const keysets = sql.match(/payment_received < \$\d+ or \(payment_received = \$\d+ and id < \$\d+\)/g) ?? [];
+  assert.equal(keysets.length, 2, 'keyset predicate per branch');
+  // And so must the window bounds.
+  assert.equal((sql.match(/payment_received >= \$\d+::date/g) ?? []).length, 2, 'window lower bound per branch');
+  assert.equal((sql.match(/payment_received < \$\d+::date/g) ?? []).length, 2, 'window upper bound per branch');
+
+  // The merge orders by the OUTPUT column — sound for the two date keys because ISO-8601 text sorts
+  // identically to the dates, which is the same property the OUTER re-sort has always relied on.
+  // The outer joins and final order are untouched.
+  assert.match(sql, /\) p left join collections\.cmd_explorer_rows e on e\.id = p\.id/, 'employer join outside the merge');
+  assert.match(sql, /order by p\.payment_received desc nulls last, p\.id desc$/, 'outer re-sort unchanged');
+
+  // Params: each branch binds its own copies (positional params, values only — never SQL text).
+  // Bound ONCE per branch and the $n placeholder re-referenced inside the predicate — the same
+  // bind-once convention the facility translator documents. Two branches, two binds.
+  assert.equal(params.filter((v) => v === '2026-08-20').length, 2, 'cursor value bound once per branch');
+  assert.equal(params.filter((v) => v === 51).length, 3, 'branch limits + merge limit');
+
+  // A single-entity call emits NO union and NO merge layer — the shape the BXR/Indigo tabs and
+  // Payer Intel already plan for.
+  const single = buildCmdExplorerQuery(cursor, filter, SORT, 51, ENTITY, { requireWindow: true });
+  assert.doesNotMatch(single.sql, /union all/);
+  assert.doesNotMatch(single.sql, /\) u order by/);
 });
 
 test('substring search: OR across ONLY allowlisted columns, one shared pattern param', () => {
