@@ -148,11 +148,30 @@ test('grid density: house type scale, tight rows, and the header offset that tra
   }
 });
 
-test('the grid keeps a min-height floor so it cannot collapse at 200% zoom', () => {
+test('the grid keeps a min-height floor so it cannot collapse at 200% zoom — and the floor is MODE-DEPENDENT', () => {
   // flex-1 with no floor + a tall filter panel = a few pixels of table on a short viewport.
   // The floor makes the column overflow and the DOCUMENT scroll instead, which is the
   // intended fallback rather than a failure.
-  assert.match(explorerSrc, /min-h-\[20rem\]/, 'the grid has a min-height floor');
+  //
+  // TWO LITERALS + THE CONDITION (2026-09-03). The floor was a global 20rem; it is now
+  //   · `min-h-[20rem]` with no search — byte-for-byte the old value. Measured: at 1440×900 the
+  //     landing state sits ON that floor (flex share ~310px vs 320, the 10px absorbed by <main>'s
+  //     bottom padding), so it is the one state that cannot spend height without pushing the pager
+  //     below the fold on every page load. That is why the floor is conditional and not raised.
+  //   · `min-h-[min(31rem,80dvh)]` with a search — that column already scrolls at 1440×900, so the
+  //     floor is what caps rows-once-scrolled: 320 → 10 rows, 496 → 17.
+  // ⚠ THE dvh CAP IS THE 200% GUARANTEE, not decoration. A bare 31rem is 496 CSS px inside the
+  // 450px viewport a 1440×900 window has at 200% zoom: the scroll container outgrows the screen and
+  // the sticky header scrolls off while the reader is inside the grid. min(31rem, 80dvh) resolves to
+  // 360px there — 12 rows, container on screen, header still pinned. Never "simplify" to `31rem`.
+  assert.match(
+    explorerSrc,
+    /hasAnySearch \? 'min-h-\[min\(31rem,80dvh\)\]' : 'min-h-\[20rem\]'/,
+    'the floor is chosen by hasAnySearch: 20rem landing, min(31rem,80dvh) searched',
+  );
+  assert.equal((explorerCode.match(/min-h-\[20rem\]/g) ?? []).length, 1, 'exactly one landing floor');
+  assert.doesNotMatch(explorerCode, /min-h-\[31rem\]/, 'never a bare 31rem — the dvh cap is the 200% guarantee');
+  assert.doesNotMatch(explorerCode, /min-h-\[\d+px\]/, 'never a fixed px floor — WCAG 1.4.4');
 });
 
 test('the pinned header stays sticky, opaque, and above the body cells', () => {

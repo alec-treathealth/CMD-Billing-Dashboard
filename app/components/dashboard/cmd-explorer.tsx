@@ -2398,37 +2398,37 @@ export function CmdCollectionsExplorer({
         </div>
       </div>
 
-      {/* ---- Search summary (search-engine result) ------------------------ */}
-      {/* Wrapped only for `shrink-0` — see the note on the search hero above. Same for the AI and
-          cohort panels below: each is a fixed-size block in the column, and only the detail grid
-          grows. */}
-      {hasAnySearch && (
-        <div className="shrink-0">
-          <SearchSummaryPanel
-            state={summary}
-            label="your selection"
-            refinement={refinement}
-            onDrill={applyRefinement}
-            onDrillCombo={applyComboRefinement}
-            facilityDisplayName={facilityDisplayName}
-          />
-        </div>
-      )}
+      {/* ---- Search result: yield card → AI output → drill panel ----------------- */}
+      {/* ONE keyed mount for the three result cards (split 2026-09-03). SearchResultPanels renders
+          three `shrink-0` siblings straight into this column (a fragment, no wrapper DOM), so the
+          `gap-4` spacing and the height chain are exactly what the separate wrappers gave before —
+          see the note on the search hero above: each is a fixed-size block, only the grid grows.
 
-      {/* ---- AI analysis (streamed, both modes) ---------------------------- */}
-      {/* Keyed on the search signature: any filter/search/prefix/view change remounts it to idle and
-          its unmount cleanup aborts an in-flight stream, so a stale answer can't describe a new
-          selection.
-          ⚠ ORDER: this sits ABOVE the cohort panel as of 2026-08-31 (it is the primary read; the
-          prefix-wide cohort panel below is reference and now opens collapsed). This is a PLAIN
-          SIBLING reorder — `aiInput` is computed in THIS component from the `cohort` state, never
-          from anything CohortCurvePanel renders, and the two carry different render gates
-          (`hasAnySearch` vs `cohortPresence.rendered`), so neither has ever been able to assume the
-          other is mounted. Moving them changes paint order and nothing else. */}
+          KEYED ON THE SEARCH SIGNATURE, and the key now does TWO jobs:
+            · the AI state lives inside (the trigger sits in the yield card's header, the output
+              is its own card), so any filter/search/prefix/view change still remounts it to idle
+              and the unmount cleanup still aborts an in-flight stream — a stale answer can't
+              describe a new selection. Same invalidation CollectionsAiPanel carried since 2026-08-09;
+            · the drill panel's `collapsed` state reinitialises, so EVERY search opens folded —
+              the #313 cohort ruling applied here (D3, 2026-09-03). `useState(true)` alone is not
+              enough: this JSX position is stable across searches.
+          ⚠ ORDER: the whole group sits ABOVE the cohort panel (2026-08-31: the selection read is
+          primary; the prefix-wide cohort panel is reference and opens collapsed). `aiInput` is
+          computed in THIS component from the `cohort` state, never from anything CohortCurvePanel
+          renders, and the two carry different render gates (`hasAnySearch` vs
+          `cohortPresence.rendered`), so neither can assume the other is mounted. */}
       {hasAnySearch && (
-        <div className="shrink-0">
-          <CollectionsAiPanel key={aiKey} input={aiInput} view={view} />
-        </div>
+        <SearchResultPanels
+          key={aiKey}
+          summary={summary}
+          label="your selection"
+          aiInput={aiInput}
+          view={view}
+          refinement={refinement}
+          onDrill={applyRefinement}
+          onDrillCombo={applyComboRefinement}
+          facilityDisplayName={facilityDisplayName}
+        />
       )}
 
       {/* ---- Alpha-prefix cohort payer-behavior curve (PHI-gated, Session D) --- */}
@@ -2615,8 +2615,27 @@ export function CmdCollectionsExplorer({
              panel squeeze the grid to a few pixels on a short viewport — which is exactly the
              200%-zoom case (WCAG 1.4.4) this change exists to satisfy. The floor wins over
              `flex-1`, the column overflows <main>, and the document scrolls instead. Deliberately
-             NOT `min-h-0` here: the floor is the point. */
-          <div className="relative flex min-h-[20rem] flex-1 flex-col">
+             NOT `min-h-0` here: the floor is the point.
+
+             MODE-DEPENDENT SINCE 2026-09-03 (Alec's ruling, measured in a headless-Chromium harness
+             of this column first):
+               · no search → `min-h-[20rem]`, byte-for-byte what it was. At 1440×900 the landing
+                 state sits ON this floor — the grid's flex share is ~310px against the 320px floor,
+                 the 10px overflowing into <main>'s bottom padding without a document scroll — so
+                 it is the one state that cannot spend height without pushing the pager below the
+                 fold on every page load. THAT MEASUREMENT IS WHY THE FLOOR IS MODE-DEPENDENT AND
+                 NOT SIMPLY RAISED: a global 31rem would make every landing scroll ~155px. Do not
+                 collapse the ternary.
+               · search active → `min-h-[min(31rem,80dvh)]`. The searched column already scrolls at
+                 1440×900 (~270px with the three result cards up), so the floor is what caps
+                 rows-once-scrolled: 320px → 10 rows, 496px → 17. The result cards and the taller
+                 floor land in the same paint, so the grid never visibly resizes on search.
+             ⚠ THE `80dvh` CAP IS WHAT PRESERVES THE 200%-ZOOM GUARANTEE ABOVE. A bare 31rem is
+             496 CSS px inside a 450px viewport (a 1440×900 window at 200%): the scroll container
+             then outgrows the screen and the sticky header scrolls off while the reader is inside
+             the grid — exactly the loss 1.4.4 is about. min() resolves to 360px there: 12 rows,
+             container on screen, header pinned. */
+          <div className={`relative flex flex-1 flex-col ${hasAnySearch ? 'min-h-[min(31rem,80dvh)]' : 'min-h-[20rem]'}`}>
             {/* Non-blocking refetch: keep the current page visible, dimmed, with a thin progress bar
                 on top — don't blank to a skeleton on every filter/sort/pagination change.
                 z-30 so it stays above the sticky header (z-20) it now overlaps. */}
@@ -3303,20 +3322,19 @@ type YieldMoney = { charged: number; allowed: number; paid: number; balance: num
  * prefix cohort still drives the curve panel and the AI read (cohortResolved/cohortData are
  * untouched), but the header cards always show the filter-wide selection yield.
  * Visual treatment (cardGreen + formatPercentNum) is unchanged from the dual-mode cards.
+ *
+ * PROSE CUT (Alec, 2026-09-03 — same ruling as a8c5400 and the name-search explainer). Gone from
+ * above the cards: the "Selection payer behavior — all filtered charge lines" sub-heading, the
+ * "matches the N charge lines & filters above" chip, and the "Dollar-weighted across every charge
+ * line…" explainer. Each was checked against the trap the name-search removal recorded (an element
+ * doing TWO jobs): all three were unconditional static text with no id, no aria relationship and no
+ * state — the chip only RESTATED `total_count`, which the headline directly above still carries.
+ * `chargeLines` left with the chip; it was the chip's only reader.
  */
-function YieldCardsPanel({ pct, chargeLines, money }: { pct: YieldPct; chargeLines: number; money: YieldMoney }) {
+function YieldCardsPanel({ pct, money }: { pct: YieldPct; money: YieldMoney }) {
   const round = (n: number) => Math.round(n);
   return (
     <div className="mt-3">
-      <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
-        <span className="text-xs font-semibold text-ink900">Selection payer behavior — all filtered charge lines</span>
-        <span className="rounded-full border border-line bg-surface px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-          matches the {chargeLines.toLocaleString()} charge lines &amp; filters above
-        </span>
-      </div>
-      <p className="mb-2 text-[11px] text-muted-foreground">
-        Dollar-weighted across every charge line in the current selection (facility · payer · date · search) — a filtered aggregate, not a patient cohort.
-      </p>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
         <div className={`rounded-lg p-3 ${cardGreen(pct.pct_allowed)}`}>
           <div className="flex flex-wrap items-center gap-1.5">
@@ -3357,10 +3375,23 @@ function YieldCardsPanel({ pct, chargeLines, money }: { pct: YieldPct; chargeLin
           <div className="text-[11px] text-ink400">not a payer yield — collected separately</div>
         </div>
       </div>
+      {/* THE ONE LINE OF PROSE THAT STAYS (Alec, 2026-09-03, option B). It is the only place the UI
+          says the allowed→collected gap is expected contractual write-off, and a biller reading a bare
+          32% would otherwise read it as lost revenue. Shortened to the disambiguating clause — the
+          "compare across payers/facilities rather than as a target" advice went with the rest of the
+          prose — and set at the house `text-xs` (13px), not the arbitrary 10px it wore: the 12px floor
+          in docs/archive/design-system.md applies here too. NOT a `title` and NOT an sr-only twin: a
+          tooltip is unreachable by touch and keyboard, and sr-only text gives screen readers context
+          sighted users don't get. Conditional on all three percentages because the identity needs all
+          three terms. The "¹" marker is gone — nothing on the cards ever carried the superscript.
+          TOKEN: `text-ink400` (#63756E) measured 4.88:1 against the card surface (white) — WCAG AA
+          for normal text is 4.5:1, so it passes, but with 0.38 of headroom. `text-muted-foreground`
+          (ink600) is 7.07:1 if a redesign ever darkens the card. A test pins the token so a "tidy the
+          greys" pass cannot quietly demote the one line here that has to be read. */}
       {pct.pct_allowed !== null && pct.pct_paid !== null && pct.pct_collected !== null && (
-        <p className="mt-1.5 text-[10px] text-ink400">
-          ¹ {round(pct.pct_allowed)}% × {round(pct.pct_paid)}% ≈ {round(pct.pct_collected)}% — most of the gap is
-          expected contractual write-off, not lost revenue. Compare across payers/facilities rather than as a target.
+        <p className="mt-1.5 text-xs text-ink400">
+          {round(pct.pct_allowed)}% × {round(pct.pct_paid)}% ≈ {round(pct.pct_collected)}% — most of the gap is
+          expected contractual write-off, not lost revenue.
         </p>
       )}
     </div>
@@ -3397,15 +3428,15 @@ function AiSection({ title, body }: { title: string; body: string }) {
 }
 
 /**
- * The AI analysis panel — where the deleted curves were, in BOTH modes. Manual "Generate AI Analysis"
- * trigger (no auto-regen). Streams the model's TL;DR / Signals / Risks back through the server action
- * and renders each section progressively. Five states: idle (button) / loading (skeleton) /
- * streaming+ready (sections) / error (generic notice) / insufficient (fixed sentence, button
- * disabled). The panel is KEYED on the search signature by the parent, so any filter/search change
- * remounts it to idle and its unmount cleanup aborts an in-flight stream — a stale summary describing
- * a different selection can never linger.
+ * The AI analysis state machine, lifted out of the panel (2026-09-03, D1). The TRIGGER now lives in
+ * the yield card's header and the OUTPUT is its own card beneath it, so the two share this hook via
+ * SearchResultPanels — which the parent KEYS on the search signature, so any filter/search/prefix/view
+ * change still remounts everything to idle and the unmount cleanup still aborts an in-flight stream.
+ * A stale summary describing a different selection can never linger. States: idle (nothing rendered
+ * below the yield card) / loading (skeleton) / streaming+ready (sections) / error (generic notice) /
+ * insufficient (fixed sentence, trigger disabled). Manual trigger only — no auto-regen.
  */
-function CollectionsAiPanel({ input, view }: { input: CollectionsAiInput | null; view: DashboardView }) {
+function useCollectionsAi(input: CollectionsAiInput | null, view: DashboardView) {
   const [state, setState] = useState<AiState>({ kind: 'idle' });
   // A mutable guard read inside the async stream loop; flipped on unmount so a superseded stream
   // stops updating state (and cancels its reader) after a filter/search-change remount.
@@ -3418,7 +3449,7 @@ function CollectionsAiPanel({ input, view }: { input: CollectionsAiInput | null;
   }, []);
 
   const sufficient = input != null && isSufficientForAi(input);
-  const mode = input?.mode ?? 'selection';
+  const mode: 'cohort' | 'selection' = input?.mode ?? 'selection';
   const busy = state.kind === 'loading' || state.kind === 'streaming';
 
   async function generate() {
@@ -3457,43 +3488,65 @@ function CollectionsAiPanel({ input, view }: { input: CollectionsAiInput | null;
     if (!guardRef.current.cancelled) setState(acc.trim() ? { kind: 'ready', text: acc } : { kind: 'error' });
   }
 
+  return { state, sufficient, mode, busy, generate };
+}
+type CollectionsAi = ReturnType<typeof useCollectionsAi>;
+
+/**
+ * The "Generate AI Analysis" trigger — rendered in the yield card's header row (the idle-state
+ * paragraph it used to sit under was cut with the rest of the prose, 2026-09-03).
+ *
+ * ⚠ THE INSUFFICIENT SENTENCE IS LOAD-BEARING AND MOVED HERE, NOT DELETED. The gate
+ * (`isSufficientForAi`: ≥ SELECTION_MIN_CHARGES lines AND allowed > 0) disables the button by design
+ * on most member-scoped searches — measured 2026-09-03: 60% of members have < 25 charge lines in the
+ * default 90-day window. A disabled button with no explanation reads as "broken", so the sentence
+ * renders VISIBLY beside it whenever the gate is closed. Not a `title`: disabled controls don't
+ * reliably show tooltips, and it would be invisible to keyboard and screen-reader users.
+ */
+function AiTrigger({ ai }: { ai: CollectionsAi }) {
+  const { state, sufficient, mode, busy } = ai;
+  return (
+    <div className="flex flex-wrap items-center justify-end gap-2">
+      {!sufficient && <span className="text-xs text-muted-foreground">{INSUFFICIENT_COPY[mode]}</span>}
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        disabled={!sufficient || busy}
+        aria-busy={busy}
+        onClick={ai.generate}
+        className="border-line bg-[var(--brand-soft)]/50 text-ink900 hover:bg-[var(--brand-soft)]"
+      >
+        <Sparkles className="h-4 w-4" aria-hidden />
+        {state.kind === 'ready' ? 'Regenerate' : busy ? 'Generating…' : 'Generate AI Analysis'}
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * The AI analysis OUTPUT card — rendered by SearchResultPanels only once the state has left idle, so
+ * an un-clicked trigger costs the column nothing. Streams the model's TL;DR / Signals / Risks and
+ * renders each section progressively; the trigger (and its Regenerate label) stays in the yield card.
+ */
+function CollectionsAiPanel({ ai }: { ai: CollectionsAi }) {
+  const { state, mode, busy } = ai;
   const text = state.kind === 'streaming' || state.kind === 'ready' ? state.text : '';
   const sections = text ? parseAiSections(text) : null;
 
   return (
     <div className="rounded-xl border border-line bg-card p-4 shadow-ths">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink900">
-          <Sparkles className="h-4 w-4 text-[var(--brand-ink)]" aria-hidden />
-          AI analysis
-          <span className="rounded-full border border-line bg-surface px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-            {mode === 'cohort' ? 'cohort' : 'selection'} · aggregates only
-          </span>
-        </h3>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={!sufficient || busy}
-          aria-busy={busy}
-          onClick={generate}
-          className="border-line bg-[var(--brand-soft)]/50 text-ink900 hover:bg-[var(--brand-soft)]"
-        >
-          <Sparkles className="h-4 w-4" aria-hidden />
-          {state.kind === 'ready' ? 'Regenerate' : busy ? 'Generating…' : 'Generate AI Analysis'}
-        </Button>
-      </div>
+      <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink900">
+        <Sparkles className="h-4 w-4 text-[var(--brand-ink)]" aria-hidden />
+        AI analysis
+        <span className="rounded-full border border-line bg-surface px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+          {mode === 'cohort' ? 'cohort' : 'selection'} · aggregates only
+        </span>
+      </h3>
 
       <div className="relative mt-3">
         {busy && (
           <div className="absolute inset-x-0 top-0 h-0.5 animate-pulse rounded-t bg-[var(--brand-accent)]" aria-hidden />
-        )}
-        {state.kind === 'idle' && (
-          <p className="text-sm text-muted-foreground">
-            {sufficient
-              ? 'Generate a short AI read (TL;DR, signals, risks) of the percentages, payers, facilities and CPT×Rev rows above. Aggregates only — no patient data leaves the server.'
-              : INSUFFICIENT_COPY[mode]}
-          </p>
         )}
         {state.kind === 'insufficient' && <p className="text-sm text-muted-foreground">{INSUFFICIENT_COPY[mode]}</p>}
         {state.kind === 'loading' && (
@@ -3641,35 +3694,71 @@ function PhiField({
 }
 
 /**
- * The search-engine result: headline count + the consolidated %-with-dollar cards, the two
- * single-dimension drill-down lists (payers, facilities), then the (CPT × Revenue-code)
- * combination list full-width below them (it carries more numbers per row — count, charge,
- * %-allowed, %-paid — so it gets the full width to stay readable).
+ * The three search-result cards from ONE summary state (split 2026-09-03, D1): the always-visible
+ * yield card (headline count + the four %-with-dollar cards, AI trigger in its header), the AI output
+ * card (only once the trigger has been clicked), and the collapsible drill panel. Returns a FRAGMENT
+ * of `shrink-0` siblings so they land directly in the parent's flex column — the `gap-4` spacing and
+ * the height chain see exactly what three separate wrappers gave before.
+ *
+ * The parent keys this on the search signature; that is what resets the AI state AND the drill
+ * panel's fold on every search (see the render site).
  */
-function SearchSummaryPanel({
-  state,
+function SearchResultPanels({
+  summary,
   label,
+  aiInput,
+  view,
   refinement,
   onDrill,
   onDrillCombo,
   facilityDisplayName,
 }: {
-  state: SummaryState;
+  summary: SummaryState;
   label: string;
+  aiInput: CollectionsAiInput | null;
+  view: DashboardView;
   refinement: Refinement | null;
   onDrill: (kind: RefineKind, value: string) => void;
   onDrillCombo: (cpt: string, revenue: string) => void;
-  /** Raw facility text → curated friendly name, for the Top facilities card display only. */
   facilityDisplayName?: (raw: string) => string;
 }) {
-  // Fold/unfold the panel body below the header (Session F). Local, resets each session — not a
-  // saved-view mechanism. Conditional render (not a max-height transition) so the drill buttons
-  // inside are fully removed from the tab order while collapsed, not just visually hidden.
-  const [collapsed, setCollapsed] = useState(false);
-  const bodyId = useId();
+  const ai = useCollectionsAi(aiInput, view);
+  return (
+    <>
+      <div className="shrink-0">
+        <SelectionYieldPanel state={summary} label={label} ai={ai} />
+      </div>
+      {ai.state.kind !== 'idle' && (
+        <div className="shrink-0">
+          <CollectionsAiPanel ai={ai} />
+        </div>
+      )}
+      <div className="shrink-0">
+        <SearchDrillPanel
+          state={summary}
+          refinement={refinement}
+          onDrill={onDrill}
+          onDrillCombo={onDrillCombo}
+          facilityDisplayName={facilityDisplayName}
+        />
+      </div>
+    </>
+  );
+}
 
+/**
+ * The always-visible half of the search result: the headline count, the AI trigger, and the
+ * consolidated %-with-dollar cards. Renders on EVERY search with no expand action — the yield read is
+ * the answer; the drill lists beneath are how you refine it.
+ *
+ * OWNS EVERY NON-DATA STATE FOR BOTH CARDS. Loading paints the footprint-matched skeleton; error paints
+ * the one notice; a zero-result search paints the "no charge lines" notice — and SearchDrillPanel
+ * returns null in all three, so a zero-result search never shows an empty drill header and an errored
+ * one never shows two notices.
+ */
+function SelectionYieldPanel({ state, label, ai }: { state: SummaryState; label: string; ai: CollectionsAi }) {
   // First load (no prior data) → footprint-matched skeleton (no blank flash, no layout shift).
-  if (state.kind === 'loading') return <SummaryPanelSkeleton />;
+  if (state.kind === 'loading') return <YieldPanelSkeleton />;
   if (state.kind === 'error') {
     return (
       <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
@@ -3679,7 +3768,7 @@ function SearchSummaryPanel({
   }
   if (state.kind === 'idle') return null;
 
-  // 'ready' or 'refreshing' both carry data. On a refetch we keep the prior panel visible + dimmed
+  // 'ready' or 'refreshing' both carry data. On a refetch we keep the prior card visible + dimmed
   // (see the refresh treatment below) rather than collapsing it to a skeleton on every keystroke.
   const refreshing = state.kind === 'refreshing';
   const s = state.data;
@@ -3698,88 +3787,146 @@ function SearchSummaryPanel({
         refreshing ? 'opacity-60' : ''
       }`}
     >
+      {/* THE ONE progress bar. The drill card below dims too but carries no bar of its own — two
+          pulsing bars 16px apart read as noise, and this is the card the eye lands on. */}
       {refreshing && (
         <div className="absolute inset-x-0 top-0 h-0.5 animate-pulse rounded-t-xl bg-[var(--brand-accent)]" aria-hidden />
       )}
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
+      {/* Header row: the count on the left, the AI trigger (and, when the gate is closed, its
+          explanation) on the right. `items-center` because the trigger is a 36px button; the old
+          `items-baseline` was for text against text. */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-ink900">
           <span className="tabular-nums">{s.total_count.toLocaleString()}</span> charge line
           {s.total_count === 1 ? '' : 's'} match {label}
         </h3>
+        <AiTrigger ai={ai} />
+      </div>
+      {/* Consolidated header cards — the three percentage cards each carry their own dollar total as
+          a secondary line, plus a dollar-only Patient Balance card. Same aggregate as the tiles it
+          replaced (2026-08-31), no new query; always the filter-wide selection yield.
+          No reveal animation here: this card remounts on every search-signature change (the parent
+          keys the group), so a mount animation would replay on each debounced keystroke. */}
+      <YieldCardsPanel
+        pct={s.yield_pct}
+        money={{ charged: s.total_charge, allowed: s.total_allowed, paid: s.total_paid, balance: s.total_balance }}
+      />
+    </div>
+  );
+}
+
+/**
+ * The collapsible half: the two single-dimension drill lists (payers, facilities) and the
+ * (CPT × Revenue-code) combination list full-width below them (it carries more numbers per row —
+ * count, charge, %-allowed, %-paid — so it gets the full width to stay readable). Owns ONLY the
+ * data-bearing states: loading paints its collapsed-header footprint so the grid does not jump when
+ * data lands, and every other non-data state is rendered (once) by SelectionYieldPanel above.
+ */
+function SearchDrillPanel({
+  state,
+  refinement,
+  onDrill,
+  onDrillCombo,
+  facilityDisplayName,
+}: {
+  state: SummaryState;
+  refinement: Refinement | null;
+  onDrill: (kind: RefineKind, value: string) => void;
+  onDrillCombo: (cpt: string, revenue: string) => void;
+  /** Raw facility text → curated friendly name, for the Top facilities card display only. */
+  facilityDisplayName?: (raw: string) => string;
+}) {
+  // ⚠ COLLAPSED BY DEFAULT — RULED 2026-09-03 (D2/D3). The yield card above is the answer; these
+  // lists are the refinement tool, so they open folded. Local, never persisted (no localStorage /
+  // sessionStorage), and reset on EVERY search because the parent keys SearchResultPanels on the
+  // search signature — `useState(true)` alone would leave an expanded panel expanded for the next
+  // search (the #313 cohort lesson).
+  //
+  // THE FOLD IS `hidden`, NOT A CONDITIONAL RENDER — and the reason it used to be conditional still
+  // holds. The old comment wanted the drill buttons OUT OF THE TAB ORDER while folded; `hidden` does
+  // that too (the subtree leaves the accessibility tree and the tab order). What conditional render
+  // could not do, now that the DEFAULT is folded, is keep `aria-controls={bodyId}` pointing at an
+  // element that exists: an unmounted target is an ARIA violation on every first paint, not an edge
+  // case. Same pattern and same reasoning as CohortCurvePanel. Known side effect, accepted there too:
+  // the lists' `animate-ths-reveal` runs once at mount while hidden, so expanding shows them without
+  // the staged settle.
+  const [collapsed, setCollapsed] = useState(true);
+  const bodyId = useId();
+
+  if (state.kind === 'loading') return <DrillPanelSkeleton />;
+  if (state.kind === 'error') return null;
+  if (state.kind === 'idle') return null;
+  const refreshing = state.kind === 'refreshing';
+  const s = state.data;
+  if (s.total_count === 0) return null;
+
+  return (
+    <div
+      aria-busy={refreshing}
+      className={`relative rounded-xl border border-line bg-card p-4 shadow-ths transition-opacity duration-150 ${
+        refreshing ? 'opacity-60' : ''
+      }`}
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-sm font-semibold text-ink900">Drill in</h3>
         <div className="flex items-center gap-2">
           <span className="text-xs text-muted-foreground">Click a payer, CPT, or CPT×Rev combo to drill in.</span>
           <button
             type="button"
             aria-expanded={!collapsed}
             aria-controls={bodyId}
-            aria-label={collapsed ? 'Expand search results' : 'Collapse search results'}
+            aria-label={collapsed ? 'Expand drill-in lists' : 'Collapse drill-in lists'}
             title={collapsed ? 'Expand' : 'Collapse'}
             onClick={() => setCollapsed((c) => !c)}
-            className="shrink-0 rounded-md p-1 text-ink400 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)]"
+            className="shrink-0 rounded-md p-1 text-ink400 transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)]"
           >
             <ChevronDown className={`h-4 w-4 transition-transform ${collapsed ? '-rotate-90' : ''}`} aria-hidden />
           </button>
         </div>
       </div>
 
-      {!collapsed && (
-        <div id={bodyId}>
-          {/* Staged reveal: the four groups arrive in ONE response (single Promise.all), so this is a
-              bounded, capped visual settle (0→180ms), not a slow per-panel cascade. It runs once on
-              mount; a refetch keeps the same mounted elements, so it doesn't re-animate on each keystroke. */}
-          {/* Consolidated header cards — the three percentage cards each carry their own dollar
-              total as a secondary line, plus a dollar-only Patient Balance card. Replaces the
-              former CHARGED / INSURANCE PAID / PATIENT BALANCE tile row (same aggregate, no new
-              query) and always shows the filter-wide selection yield — the cohort display mode
-              was retired 2026-08-31 (the curve panel + AI read still consume the cohort data). */}
-          <div className="animate-ths-reveal">
-            <YieldCardsPanel
-              pct={s.yield_pct}
-              chargeLines={s.total_count}
-              money={{ charged: s.total_charge, allowed: s.total_allowed, paid: s.total_paid, balance: s.total_balance }}
-            />
-          </div>
-
-          {/* Top Results groups: Payer + Facility single-dimension lists, then the full-width CPT×Rev
-              combo below. The standalone CPT list was dropped here — the CPT×Rev combo table below
-              already carries CPT (with its revenue code + dollar-weighted %s), so a top-facilities
-              list is the more useful second card. Render-only: the summary still returns by_cpt
-              (unused now, mirroring how by_facility used to be), so its shape and the server groups
-              are unchanged; facility drill reuses the existing refinement path (case 'facility' →
-              filter.facility). */}
-          <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
-            <DrillList
-              title="Top payers"
-              icon={<CreditCard className="h-3.5 w-3.5" aria-hidden />}
-              kind="primary_payer"
-              groups={s.by_payer}
-              activeValue={refinement?.kind === 'primary_payer' ? refinement.value : null}
-              onDrill={onDrill}
-              revealDelayMs={60}
-            />
-            <DrillList
-              title="Top facilities"
-              icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
-              kind="facility"
-              groups={s.by_facility}
-              activeValue={refinement?.kind === 'facility' ? refinement.value : null}
-              onDrill={onDrill}
-              revealDelayMs={120}
-              displayFor={facilityDisplayName}
-            />
-          </div>
-
-          {/* Fourth list, full-width: the (CPT × Revenue-code) combination with dollar-weighted
-              %-allowed / %-paid — one click drills the grid by BOTH codes at once. */}
-          <ComboDrillList
-            groups={s.by_combo}
-            activeCombo={refinement?.kind === 'combo' ? { cpt: refinement.cpt, revenue: refinement.revenue } : null}
-            onDrill={onDrillCombo}
-            revealDelayMs={180}
-            fallbackPctAllowed={s.yield_pct.pct_allowed}
+      {/* Always MOUNTED, hidden with the `hidden` attribute when folded — see the note above the
+          `collapsed` state. Kept in the DOM so `aria-controls` always resolves. */}
+      <div id={bodyId} hidden={collapsed}>
+        {/* Top Results groups: Payer + Facility single-dimension lists, then the full-width CPT×Rev
+            combo below. The standalone CPT list was dropped here — the CPT×Rev combo table below
+            already carries CPT (with its revenue code + dollar-weighted %s), so a top-facilities
+            list is the more useful second card. Render-only: the summary still returns by_cpt
+            (unused now, mirroring how by_facility used to be), so its shape and the server groups
+            are unchanged; facility drill reuses the existing refinement path (case 'facility' →
+            filter.facility). */}
+        <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-2">
+          <DrillList
+            title="Top payers"
+            icon={<CreditCard className="h-3.5 w-3.5" aria-hidden />}
+            kind="primary_payer"
+            groups={s.by_payer}
+            activeValue={refinement?.kind === 'primary_payer' ? refinement.value : null}
+            onDrill={onDrill}
+            revealDelayMs={60}
+          />
+          <DrillList
+            title="Top facilities"
+            icon={<Building2 className="h-3.5 w-3.5" aria-hidden />}
+            kind="facility"
+            groups={s.by_facility}
+            activeValue={refinement?.kind === 'facility' ? refinement.value : null}
+            onDrill={onDrill}
+            revealDelayMs={120}
+            displayFor={facilityDisplayName}
           />
         </div>
-      )}
+
+        {/* Fourth list, full-width: the (CPT × Revenue-code) combination with dollar-weighted
+            %-allowed / %-paid — one click drills the grid by BOTH codes at once. */}
+        <ComboDrillList
+          groups={s.by_combo}
+          activeCombo={refinement?.kind === 'combo' ? { cpt: refinement.cpt, revenue: refinement.revenue } : null}
+          onDrill={onDrillCombo}
+          revealDelayMs={180}
+          fallbackPctAllowed={s.yield_pct.pct_allowed}
+        />
+      </div>
     </div>
   );
 }
@@ -4556,15 +4703,19 @@ function GridSkeleton({ cols }: { cols: number }) {
   );
 }
 
-/** Search-summary skeleton — header + 3 stat tiles + 3 drill lists + the combo list, same layout. */
-function SummaryPanelSkeleton() {
+/**
+ * Yield-card skeleton — header row (count + trigger) and the four %-with-dollar cards, the footprint of
+ * SelectionYieldPanel. Re-split from the old combined summary skeleton (2026-09-03), which had ALSO
+ * drifted: it still drew THREE drill-list columns after the panel went to two, so it never matched
+ * the layout it existed to hold.
+ */
+function YieldPanelSkeleton() {
   return (
     <div className="rounded-xl border border-line bg-card p-4 shadow-ths" aria-hidden>
       <div className="flex items-center justify-between">
         <Skeleton className="h-5 w-64" />
-        <Skeleton className="h-3.5 w-48" />
+        <Skeleton className="h-9 w-44 rounded-md" />
       </div>
-      {/* Footprint-matches the consolidated header cards: four %-with-dollar cards in one row. */}
       <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
         {Array.from({ length: 4 }).map((_, i) => (
           <div key={i} className="rounded-lg border border-line bg-surface p-3">
@@ -4574,25 +4725,17 @@ function SummaryPanelSkeleton() {
           </div>
         ))}
       </div>
-      <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-3">
-        {Array.from({ length: 3 }).map((_, i) => (
-          <div key={i} className="rounded-lg border border-line bg-surface p-3">
-            <Skeleton className="mb-2 h-3 w-24" />
-            <div className="space-y-2">
-              {Array.from({ length: 6 }).map((_, r) => (
-                <Skeleton key={r} className="h-5 w-full" />
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="mt-3 rounded-lg border border-line bg-surface p-3">
-        <Skeleton className="mb-2 h-3 w-56" />
-        <div className="space-y-2">
-          {Array.from({ length: 4 }).map((_, r) => (
-            <Skeleton key={r} className="h-5 w-full" />
-          ))}
-        </div>
+    </div>
+  );
+}
+
+/** Drill-panel skeleton — the collapsed HEADER ROW only, because folded is the panel's default footprint. */
+function DrillPanelSkeleton() {
+  return (
+    <div className="rounded-xl border border-line bg-card p-4 shadow-ths" aria-hidden>
+      <div className="flex items-center justify-between">
+        <Skeleton className="h-5 w-20" />
+        <Skeleton className="h-3.5 w-72" />
       </div>
     </div>
   );
