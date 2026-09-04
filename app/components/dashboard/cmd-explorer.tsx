@@ -648,6 +648,16 @@ export function CmdCollectionsExplorer({
   // component is the term (once, in a Server Action body) and what comes back is row IDS only.
   const [nameQuery, setNameQuery] = useState('');
   const [nameSearching, setNameSearching] = useState(false);
+  /*
+   * Generation stamp for the name search (Qodo #325). runNameSearch awaits a Server Action and then
+   * writes nameMatch/nameNotice; nothing used to invalidate a request still in flight, so pressing
+   * "Clear search" (or clearing the name filter, or switching tenants) while one was pending let the
+   * LATE RESPONSE resurrect the search: nameMatch repopulates, hasAnySearch flips true, the result
+   * and AI panels remount, and the grid re-applies the patient filter the reader just cleared.
+   * Every writer bumps the generation; the async path re-checks it after each await and drops its
+   * own writes when it lost. A ref, not state — bumping it must never itself cause a render.
+   */
+  const nameSearchGen = useRef(0);
   /** null = no name filter applied. [] = searched and matched NOTHING (an empty grid is correct,
    *  and is deliberately distinguished from "no filter" so it cannot silently widen to every row). */
   // ⚠ THE RESOLVING VIEW IS STORED WITH THE RESULT, not just the result. A member token is a keyed
@@ -899,6 +909,7 @@ export function CmdCollectionsExplorer({
    * VISIBLE state agree. A reset effect alone would leave one render with the stale filter applied.
    */
   useEffect(() => {
+    nameSearchGen.current += 1; // a pending search for the OLD tenant must not land after this reset
     setNameMatch(null);
     setNameQuery('');
     setNameNotice(null);
@@ -921,10 +932,16 @@ export function CmdCollectionsExplorer({
   const runNameSearch = useCallback(async () => {
     const term = nameQuery.trim();
     if (term === '' || !nameSearchAllowed) return;
+    // Claim the CURRENT generation. If anything bumps it while the Server Action is in flight —
+    // Clear search, Clear name filter, a tenant switch, or a newer run — this response is a zombie
+    // and must write NOTHING: not the match, not the notice, not even the spinner reset (whoever
+    // bumped the generation owns nameSearching now).
+    const gen = ++nameSearchGen.current;
     setNameSearching(true);
     setNameNotice(null);
     try {
       const res = await searchCollectionsPatientName(term, view);
+      if (gen !== nameSearchGen.current) return;
       if (!res.ok) { setNameNotice(res.error); return; }
       const r = res.result;
       if (!r.ok) {
@@ -968,9 +985,10 @@ export function CmdCollectionsExplorer({
         );
       }
     } catch {
-      setNameNotice('The name search could not be completed right now.');
+      if (gen === nameSearchGen.current) setNameNotice('The name search could not be completed right now.');
     } finally {
-      setNameSearching(false);
+      // Guarded like every other write: a stale run resetting this would wipe a NEWER run's spinner.
+      if (gen === nameSearchGen.current) setNameSearching(false);
     }
   }, [nameQuery, nameSearchAllowed, view, hasOtherFilters]);
 
@@ -1970,6 +1988,11 @@ export function CmdCollectionsExplorer({
     setNameQuery('');
     setNameMatch(null);
     setNameNotice(null);
+    // Invalidate any name search still in flight — its late response would otherwise RESURRECT the
+    // search this button just cleared (see nameSearchGen). Having bumped the generation, this
+    // handler owns the spinner: the zombie's own finally is no longer allowed to touch it.
+    nameSearchGen.current += 1;
+    setNameSearching(false);
     // The drill refinement is part of the search from the reader's point of view — it is the pill
     // sitting in this very row — so a clear that left it applied would not have cleared the search.
     setRefinement(null);
@@ -2507,7 +2530,13 @@ export function CmdCollectionsExplorer({
               {nameMatchTokens !== null && (
                 <button
                   type="button"
-                  onClick={() => { setNameMatch(null); setNameQuery(''); setNameNotice(null); }}
+                  onClick={() => {
+                    nameSearchGen.current += 1; // same zombie as clearSearch: a pending search must not undo this
+                    setNameMatch(null);
+                    setNameQuery('');
+                    setNameNotice(null);
+                    setNameSearching(false);
+                  }}
                   className="h-8 rounded-md px-2 text-xs text-muted-foreground underline-offset-2 hover:underline"
                 >
                   Clear name filter
@@ -4132,8 +4161,18 @@ const FOLD_ROW_INTERACTIVE = 'button,a,input,select,textarea,label,[role="button
 function foldRowClickHandler(toggle: () => void) {
   return (e: ReactMouseEvent<HTMLElement>) => {
     if ((e.target as HTMLElement | null)?.closest(FOLD_ROW_INTERACTIVE)) return;
+    // Scoped to THIS row (Qodo #325): the guard exists for a drag that selected header text, so it
+    // must ask whether the selection touches the clicked row — not whether one exists anywhere in
+    // the document. A selection surviving elsewhere on the page (a mousedown usually collapses one,
+    // but keyboard selection and browser edge cases do not) must not veto the fold.
     const selection = typeof window === 'undefined' ? null : window.getSelection();
-    if (selection && !selection.isCollapsed && selection.toString().trim() !== '') return;
+    if (
+      selection &&
+      !selection.isCollapsed &&
+      selection.toString().trim() !== '' &&
+      (e.currentTarget.contains(selection.anchorNode) || e.currentTarget.contains(selection.focusNode))
+    )
+      return;
     toggle();
   };
 }

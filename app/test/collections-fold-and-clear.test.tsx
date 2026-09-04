@@ -69,6 +69,11 @@ test('the row click is GUARDED — it never hijacks a control, and never ends a 
   // count and the prefix — the two things a reader is most likely to be copying.
   assert.match(handler, /getSelection\(\)/, 'an active text selection suppresses the toggle');
   assert.match(handler, /!selection\.isCollapsed/, 'and it checks the selection is non-empty');
+  // ⚠ SCOPED TO THE CLICKED ROW (Qodo #325). window.getSelection() is document-global, and the
+  // first draft vetoed the fold for a selection ANYWHERE on the page. The guard exists for a drag
+  // that selected THIS header's text, so it must ask whether the selection touches the row.
+  assert.match(handler, /e\.currentTarget\.contains\(selection\.anchorNode\)/, 'selection anchor must be in the row');
+  assert.match(handler, /e\.currentTarget\.contains\(selection\.focusNode\)/, 'or its focus end must be');
   // SSR-safe: this module is a client component but the guard must not assume a window exists.
   assert.match(handler, /typeof window === 'undefined' \? null :/, 'no bare window access');
 });
@@ -179,6 +184,12 @@ test('clearSearch empties EVERY search facet — a missed one leaves the search 
     'setNameMatch(null)',
     'setNameNotice(null)',
     'setRefinement(null)',
+    // Qodo #325: a name search still in flight would RESURRECT the cleared search when it resolved
+    // — nameMatch repopulates, hasAnySearch flips true, the panels and the AI remount, and the grid
+    // re-applies the filter the reader just cleared. The generation bump is what de-fangs it, and
+    // the spinner reset comes with it because the zombie's own finally no longer may touch it.
+    'nameSearchGen.current += 1',
+    'setNameSearching(false)',
   ]) {
     assert.ok(clearSrc.includes(reset), `clearSearch must call ${reset}`);
   }
@@ -197,6 +208,31 @@ test('clearing the search is what clears the AI answer — the render gate it re
   // that reasoning true, so it is pinned here rather than left in a comment.
   assert.match(explorerCode, /\{hasAnySearch && \(\s*<SearchResultPanels\s+key=\{aiKey\}/, 'the result group is gated on hasAnySearch and keyed on aiKey');
   assert.doesNotMatch(clearSrc, /setAi|abort|Abort/, 'clearSearch must not grow a second, weaker copy of that invalidation');
+});
+
+/*
+ * THE ZOMBIE NAME SEARCH (Qodo #325). runNameSearch awaits a Server Action; every state writer that
+ * clears a name search must invalidate a response still in flight, or that response lands later and
+ * un-clears it. Pinned as source because the async race is exactly what a jsdom render cannot
+ * exercise honestly (no real Server Action, no real latency).
+ */
+test('a pending name search cannot outlive whatever cleared it', () => {
+  const run = explorerSrc.slice(
+    explorerSrc.indexOf('const runNameSearch = useCallback('),
+    explorerSrc.indexOf('const nameMatchKey ='),
+  );
+  // The run claims the CURRENT generation before its await, and re-checks it after.
+  assert.match(run, /const gen = \+\+nameSearchGen\.current;/, 'each run claims a fresh generation');
+  assert.match(run, /await searchCollectionsPatientName[\s\S]{0,120}?if \(gen !== nameSearchGen\.current\) return;/, 'the response is dropped if the generation moved');
+  // The finally is guarded too: a stale run resetting the spinner would wipe a NEWER run's spinner.
+  assert.match(run, /if \(gen === nameSearchGen\.current\) setNameSearching\(false\);/, 'only the current run may retire the spinner');
+  assert.match(run, /if \(gen === nameSearchGen\.current\) setNameNotice\('The name search could not be completed right now\.'\);/, 'even the failure notice is generation-guarded');
+
+  // EVERY clearer bumps: Clear search, the per-facet Clear name filter, and the tenant switch.
+  const bumps = (explorerCode.match(/nameSearchGen\.current \+= 1/g) ?? []).length;
+  assert.equal(bumps, 3, 'Clear search + Clear name filter + the view-switch reset all invalidate');
+  // And the ref must be a ref: bumping a generation must never itself cause a render.
+  assert.match(explorerCode, /const nameSearchGen = useRef\(0\);/, 'generation lives in a ref, not state');
 });
 
 test('focus does not fall on the floor when the button unmounts (WCAG 2.4.3)', () => {
