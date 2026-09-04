@@ -1530,14 +1530,21 @@ export function AddForecastForm({
       </p>
     );
   }
+  /*
+   * ⚠ NOT WRAPPED IN A <details> ANY MORE (2026-09-04). This form used to carry its own collapsed
+   * disclosure labelled "Add an expected payment" — correct when it lived at the BOTTOM of the
+   * Future Payments tile, where it was one item among several and had to stay out of the way.
+   * It was hoisted into AddForecastPanel, whose card heading is already the words "Add an
+   * expected payment", so the disclosure became a second control with the SAME label nested
+   * inside the first: open the panel, then find and open an identically-named twin to reach the
+   * only form in it. That was the second duplicate entry point on this surface, and it is the
+   * one a screenshot shows most clearly.
+   *
+   * If this form is ever mounted somewhere that needs it collapsed, wrap it AT THE CALL SITE —
+   * the component should not carry a disclosure that only one of its hosts wants.
+   */
   return (
-    <details className="ths-item">
-      <summary className="ths-item-summary ths-add-summary">
-        <span className="ths-item-chevron" aria-hidden>
-          ▸
-        </span>
-        <span className="font-medium">Add an expected payment</span>
-      </summary>
+    <>
       <form
         className="ths-add-form"
         onSubmit={(e) => {
@@ -1628,6 +1635,6 @@ export function AddForecastForm({
         Added here, not in the sheet — the hourly sheet sync never touches it, and it shows as
         &ldquo;added by admin&rdquo; on the tile.
       </p>
-    </details>
+    </>
   );
 }

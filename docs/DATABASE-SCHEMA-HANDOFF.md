@@ -140,7 +140,7 @@ ask" as a misconfiguration, not a data state. See `CensusVisibilityError` in
 | `collections.refresh_cmd_explorer_charge_rollup` | `postgres` | The :45 rollup refresh |
 | `collections.refresh_facility_resolution` | `postgres` | Facility-resolution matview refresh |
 | `collections.save_facility_assignments` | `postgres` | Human "No Facility" assignment (0085) |
-| `collections.add_manual_deposit` / `remove_manual_deposit` | `postgres` | Hand-keyed deposits (0096) |
+| `collections.add_manual_deposit` / `remove_manual_deposit` | `postgres` | **Applied but UNREACHABLE from the app since 2026-09-04 — no caller remains; do not wire it** (see §5.2) |
 | `collections.record_qualify_prefix_echo` | `postgres` | **Applied but deliberately UNWIRED — do not wire it** (see §5.2) |
 | `staging.upsert_expected_payment_manual` / `remove_*` / `set_*_status` / `delete_*` | — | Upcoming-payments manual overrides |
 | `core.consolidated_summary` | `consolidated_reader` | The cross-tenant aggregate |
@@ -370,7 +370,19 @@ strictly worse on coverage: it can only ever label prefixes somebody already *se
 tape of the whole book would stay mostly masked for weeks, and it costs a write per search.
 Ratified 2026-08-09.
 
-**`'manual'` deposits are ADDITIVE, not a rank participant (0096).**
+**`'manual'` deposits are ADDITIVE, not a rank participant (0096) — AND THE WRITE PATH IS GONE
+(2026-09-04).** Everything in this subsection still describes the VIEW correctly, and the two
+historical `'manual'` rows are still there (both soft-deleted, $0 live), so the ranking semantics
+below remain worth knowing. What is no longer true is that anything can CREATE such a row: the
+Overview form, its three Server Actions and the data-layer writers were deleted after a ruling that
+this app is not a system of record for money — "there is nobody manually entering payments through
+this platform; the payments land in CollaborateMD already". Operators now record an expected
+payment as a FORECAST in `staging.expected_payment_manual`, which this view does not reference and
+which therefore cannot reach MTD. `collections.add_manual_deposit` / `remove_manual_deposit` still
+exist and `claims_reader` still holds EXECUTE on them — a REVOKE is pending Alec's call — so the
+capability is live in Postgres and dead in the application. Do not add a new caller.
+
+
 `collections.daily_collections_resolved` is a three-branch view:
 
 1. `cmd`/`workbook`/`deposit_sheet` — three competing *imports of the same deposits* —
