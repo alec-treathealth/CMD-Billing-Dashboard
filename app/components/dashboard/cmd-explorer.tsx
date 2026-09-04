@@ -143,6 +143,7 @@ import { INDIGO_ENTITY_ID } from '../../../src/tenants';
 import {
   isSufficientForAi,
   parseAiSections,
+  splitAiStream,
   INSUFFICIENT_COPY,
   AI_SECTIONS,
   type CollectionsAiInput,
@@ -3412,7 +3413,10 @@ type AiState =
   | { kind: 'idle' }
   | { kind: 'loading' } // request sent, awaiting first token
   | { kind: 'streaming'; text: string }
-  | { kind: 'ready'; text: string }
+  // `truncated`: the model stopped at its token ceiling (the server marked the stream — see
+  // AI_TRUNCATED_MARK). What arrived is real and renders; the panel adds one sentence saying the read
+  // was cut short. Never the generic error: it was generated, it was clipped.
+  | { kind: 'ready'; text: string; truncated: boolean }
   | { kind: 'error' }
   | { kind: 'insufficient' };
 
@@ -3489,13 +3493,19 @@ function useCollectionsAi(input: CollectionsAiInput | null, view: DashboardView)
         }
         if (done) break;
         acc += value;
-        setState({ kind: 'streaming', text: acc });
+        // Strip the truncation mark on EVERY render path — it must never paint and never reach
+        // parseAiSections. `text` is the only thing that ever lands in state.
+        setState({ kind: 'streaming', text: splitAiStream(acc).text });
       }
     } catch {
       if (!guardRef.current.cancelled) setState({ kind: 'error' });
       return;
     }
-    if (!guardRef.current.cancelled) setState(acc.trim() ? { kind: 'ready', text: acc } : { kind: 'error' });
+    if (guardRef.current.cancelled) return;
+    // A clipped answer is READY, not an error — even when nothing arrived before the ceiling, the
+    // honest state is "cut short", never "could not be generated" (it was generated).
+    const { text, truncated } = splitAiStream(acc);
+    setState(truncated || text.trim() ? { kind: 'ready', text, truncated } : { kind: 'error' });
   }
 
   return { state, sufficient, mode, busy, generate };
@@ -3578,6 +3588,15 @@ function CollectionsAiPanel({ ai }: { ai: CollectionsAi }) {
             ))}
             {state.kind === 'streaming' && <span className="inline-block h-3 w-2 animate-pulse bg-ink400 align-middle" aria-hidden />}
           </div>
+        )}
+        {/* Cut short at the ceiling: say so, under whatever DID arrive. Its own status region — NOT
+            inside `{sections && …}`, because when the ceiling landed before any text `sections` is
+            null and this sentence is then the only thing there is to show. Not the error box: nothing
+            failed, the answer was clipped. */}
+        {state.kind === 'ready' && state.truncated && (
+          <p role="status" className="mt-2 text-xs text-muted-foreground">
+            This read was cut short at the length limit — everything above is what arrived.
+          </p>
         )}
       </div>
     </div>

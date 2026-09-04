@@ -8,6 +8,9 @@ import {
   parseAiSections,
   INSUFFICIENT_COPY,
   AI_SECTIONS,
+  AI_MAX_TOKENS,
+  AI_TRUNCATED_MARK,
+  splitAiStream,
   type CollectionsAiInput,
 } from '../src/collections/aiAnalysis.js';
 
@@ -113,4 +116,73 @@ test('insufficient copy + section markers are the agreed constants', () => {
   assert.equal(INSUFFICIENT_COPY.cohort, 'Not enough data on this cohort to create a reliable summary.');
   assert.match(INSUFFICIENT_COPY.selection, /this selection/);
   assert.deepEqual([...AI_SECTIONS], ['TL;DR', 'Signals', 'Risks']);
+});
+
+// ── Token ceiling + prompt budget (measured 2026-09-04, see the module docblock) ────────────────────
+
+test('AI_MAX_TOKENS is the MEASURED value, not a floor — change it only with a new measurement', () => {
+  // With the per-section budget the observed max across real selection + cohort payloads was 792
+  // output tokens (thinking included); 1536 is 1.9× that. The prompt as it was measured 1,101–1,578,
+  // which is why 1024 clipped every production run (output_tokens == 1024 in the Vercel log).
+  assert.equal(AI_MAX_TOKENS, 1536, 'the cap is a measurement; re-measure before moving it');
+});
+
+test('SYSTEM_PROMPT states the per-section budget the cap was sized to', () => {
+  const { system } = buildAiMessages(baseSelection);
+  assert.match(system, /40 words at most/, 'TL;DR budget');
+  assert.equal((system.match(/25 words at most/g) ?? []).length, 2, 'Signals + Risks bullet budget');
+  assert.match(system, /WHOLE answer stays under 220 words/, 'total budget');
+  assert.match(system, /Output EXACTLY these three markdown sections/, 'the format contract is unchanged');
+});
+
+// ── Truncation: the one-code-point wire convention ─────────────────────────────────────────────────
+
+test('AI_TRUNCATED_MARK is one private-use code unit — a chunk boundary cannot split it', () => {
+  assert.equal(AI_TRUNCATED_MARK.length, 1);
+  const cp = AI_TRUNCATED_MARK.codePointAt(0)!;
+  assert.ok(cp >= 0xe000 && cp <= 0xf8ff, 'Unicode private-use area: no model output contains it');
+});
+
+test('splitAiStream: no mark → text unchanged, not truncated', () => {
+  const acc = '## TL;DR\nfine.\n## Signals\n- a\n## Risks\n- b';
+  assert.deepEqual(splitAiStream(acc), { text: acc, truncated: false });
+});
+
+test('splitAiStream: trailing mark → truncated, and the mark never reaches the text', () => {
+  const body = '## TL;DR\nfine.\n## Signals\n- a\n## Risks\n- b';
+  const out = splitAiStream(body + AI_TRUNCATED_MARK);
+  assert.equal(out.truncated, true);
+  assert.equal(out.text, body);
+  assert.ok(!out.text.includes(AI_TRUNCATED_MARK));
+});
+
+test('splitAiStream: detection is on the ACCUMULATED string — chunking cannot hide the mark', () => {
+  // The client re-splits the whole accumulation on every chunk; wherever the transport puts the mark,
+  // the result is the same, and a stray duplicate is stripped too.
+  const chunks = ['## TL;DR\nfine.\n## Sig', 'nals\n- a\n## Risks\n- b', AI_TRUNCATED_MARK];
+  let acc = '';
+  const seen: boolean[] = [];
+  for (const c of chunks) {
+    acc += c;
+    seen.push(splitAiStream(acc).truncated);
+  }
+  assert.deepEqual(seen, [false, false, true]);
+  assert.equal(splitAiStream(`x${AI_TRUNCATED_MARK}y${AI_TRUNCATED_MARK}`).text, 'xy');
+});
+
+test('THE BUG THIS PR FIXES: a stream that ends mid-section is CUT SHORT, not a silently complete render', () => {
+  // Reproduces the 2026-09-04 production shape: the ceiling landed inside Risks, after its first
+  // bullet. Every section header is present and every body is NON-EMPTY, so a client-side
+  // "missing or empty section" heuristic reports the answer complete — the exact silent partial the
+  // server mark exists to make impossible.
+  const clipped =
+    '## TL;DR\nYield is healthy for OON.\n## Signals\n- S9480 allows 20.87%.\n- H0017 pays 89.56%.\n## Risks\n- Day-90 bucket exceeds 100% —';
+  const out = splitAiStream(clipped + AI_TRUNCATED_MARK);
+  const sections = parseAiSections(out.text);
+  for (const s of AI_SECTIONS) assert.ok(sections[s].length > 0, `${s} is non-empty — the heuristic would pass it`);
+  assert.equal(out.truncated, true, 'the mark is what says it was cut short');
+  assert.match(sections.Risks, /exceeds 100% —$/, 'what arrived renders as it arrived');
+  // And with NOTHING arriving before the ceiling (a probe at a 200-token cap did exactly this), the
+  // flag still says cut short — the panel then shows the sentence alone, never "could not be generated".
+  assert.deepEqual(splitAiStream(AI_TRUNCATED_MARK), { text: '', truncated: true });
 });

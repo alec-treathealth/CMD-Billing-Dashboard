@@ -37,6 +37,7 @@ import { makeAnthropicClientFromEnv } from '../../src/agent/index.js';
 import type { AnthropicMessagesClient } from '../../src/agent/index.js';
 import {
   AI_MAX_TOKENS,
+  AI_TRUNCATED_MARK,
   buildAiMessages,
   isSufficientForAi,
   type CollectionsAiInput,
@@ -3155,6 +3156,14 @@ export const loadCmdSearchSummary = unstable_cache(
 // reaches this layer (the action calls CollectionsAiInputSchema.parse). No tools → no
 // tool_choice/thinking conflict. NOT cached — every run is a fresh, user-initiated analysis.
 
+/**
+ * ⚠ THE STREAM IS NOT PURE TEXT. It carries the model's text deltas AND, when the model stopped at
+ * `max_tokens`, exactly one `AI_TRUNCATED_MARK` (U+E000, private-use) enqueued after the last delta
+ * and before close — the one-code-point wire convention that lets the client say "this read was cut
+ * short" instead of presenting a clipped answer as complete (Vercel log 2026-09-04: output_tokens ==
+ * AI_MAX_TOKENS exactly, three headers, missing bodies, nothing errored). The client strips it with
+ * `splitAiStream` on every render path; nothing else may be enqueued here that is not model text.
+ */
 export type CollectionsAiStreamResult =
   | { ok: false; reason: 'insufficient' | 'error' }
   | { ok: true; stream: ReadableStream<string> };
@@ -3212,7 +3221,11 @@ export async function streamCollectionsAiAnalysis(
           }
         }
         const final = await ms.finalMessage();
+        // Clipped at the ceiling → tell the client, in-band, before close. See the type's docblock.
+        if (final.stop_reason === 'max_tokens') controller.enqueue(AI_TRUNCATED_MARK);
         // PHI-free cost-governance line (mirrors emitAgentAudit): mode + tenant + model + tokens.
+        // `stop_reason` rides along (as Qualify's does) so a truncation or a refusal is visible in
+        // ops rather than silent — the 2026-09-04 clip was found in this line, not in an error.
         console.log(
           JSON.stringify({
             kind: 'collections_ai_analysis',
@@ -3221,6 +3234,7 @@ export async function streamCollectionsAiAnalysis(
             model,
             input_tokens: final.usage?.input_tokens,
             output_tokens: final.usage?.output_tokens,
+            stop_reason: final.stop_reason,
           }),
         );
         controller.close();
