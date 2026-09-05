@@ -396,6 +396,23 @@ instead. That is the correct split, not a shortcut."
 would leave a real row in the money table this whole change exists to protect. `has_function_privilege`
 answers the same question and writes nothing.
 
+Re-run the check yourself — it is read-only, takes one paste, and is the whole basis of the claim
+above, so it should be re-run rather than trusted whenever the REVOKE lands:
+
+```sql
+select has_function_privilege('claims_reader',
+         'collections.add_manual_deposit(uuid,text,date,text,numeric,uuid)', 'EXECUTE') as reader_add,
+       has_function_privilege('claims_reader',
+         'collections.remove_manual_deposit(uuid,bigint,uuid)', 'EXECUTE')             as reader_remove,
+       has_function_privilege('public',
+         'collections.add_manual_deposit(uuid,text,date,text,numeric,uuid)', 'EXECUTE') as public_add,
+       pg_has_role(current_user, 'claims_reader', 'USAGE')                              as could_set_role;
+-- 2026-09-04, as postgres: t | t | f | f
+-- The final `f` is why this is a catalog check: the operator role cannot BECOME claims_reader.
+-- After the REVOKE, the first two must read `f` and the app must still behave identically —
+-- nothing calls them.
+```
+
 
 `collections.daily_collections_resolved` is a three-branch view:
 
