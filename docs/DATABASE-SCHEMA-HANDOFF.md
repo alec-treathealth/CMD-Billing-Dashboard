@@ -382,6 +382,20 @@ which therefore cannot reach MTD. `collections.add_manual_deposit` / `remove_man
 exist and `claims_reader` still holds EXECUTE on them — a REVOKE is pending Alec's call — so the
 capability is live in Postgres and dead in the application. Do not add a new caller.
 
+**VERIFIED 2026-09-04, and by the method this repo ratified for `claims_reader` specifically:**
+`has_function_privilege('claims_reader', …, 'EXECUTE')` returns **true** for both, and
+`has_function_privilege('public', …)` returns **false** — so the grant is real and not
+world-executable. It is a catalog check rather than an execution test *on purpose*, and the reason
+is recorded in CLAUDE.md: **`postgres` cannot `SET ROLE claims_reader`** (no grant — re-confirmed
+the same day via `pg_has_role`), so an execution test as that role is not possible from an operator
+session, and "the reader's access was proven via `has_table_privilege`/`has_function_privilege`
+instead. That is the correct split, not a shortcut."
+
+⚠ AND EXECUTING THESE TWO IN PARTICULAR WOULD BE SELF-DEFEATING: `add_manual_deposit` INSERTs into
+`collections.daily_collections`. Proving "nothing may write the ledger" by writing to the ledger
+would leave a real row in the money table this whole change exists to protect. `has_function_privilege`
+answers the same question and writes nothing.
+
 
 `collections.daily_collections_resolved` is a three-branch view:
 

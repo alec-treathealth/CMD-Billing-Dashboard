@@ -833,8 +833,12 @@ export async function matchUpcomingManual(
  * numbers behind it.
  *
  * ⚠ STILL OPEN AT THE DATA LAYER, DELIBERATELY NOT DONE HERE: `claims_reader` retains EXECUTE on
- * the SECURITY DEFINER functions collections.add_manual_deposit() / remove_manual_deposit().
- * No app path reaches them now, but the capability exists in the database. Closing it is a
+ * the SECURITY DEFINER functions collections.add_manual_deposit() / remove_manual_deposit() —
+ * VERIFIED 2026-09-04 with has_function_privilege (true for claims_reader, false for public), not
+ * assumed. Not an execution test, because `postgres` cannot SET ROLE claims_reader and because
+ * running add_manual_deposit would insert a real row into the ledger this change protects; see
+ * docs/DATABASE-SCHEMA-HANDOFF.md §5.2. No app path reaches them now, but the capability exists in
+ * the database. Closing it is a
  * REVOKE migration — gated, and Alec's call — and REVOKE rather than DROP, because 0096's
  * rollback file is explicit that manual rows are money a human asserted and the two historical
  * rows must stay readable.
