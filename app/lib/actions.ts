@@ -100,10 +100,6 @@ import {
   getUpcomingManual,
   saveUpcomingManualRow,
   setUpcomingManualStatusRow,
-  getManualDeposits,
-  addManualDepositRow,
-  removeManualDepositRow,
-  type ManualDepositRow,
   removeUpcomingManualRow,
   type ManualForecastRow,
 } from '@/lib/server';
@@ -283,9 +279,6 @@ export type {
   CohortDrilldownTable,
   CohortDrilldownResult,
   GridViewRow,
-  // 0096. `export type` is fully erased at compile time, so this does NOT violate the
-  // 'use server' rule that a non-function VALUE export 500s every action on the page.
-  ManualDepositRow,
 };
 
 export type AgentActionResult =
@@ -822,133 +815,34 @@ export async function matchUpcomingManual(
 // the All Facilities table and the Master chart — Alec, 2026-08-10: "if it doesn't add to the
 // actual MTD total or All Facilities table it's useless."
 
-/**
- * Live manual deposits for the clamped view. READ — open to any entitled viewer, matching
- * loadUpcomingManual: these are non-PHI facility-day aggregates and anyone who can see the
- * totals they contribute to should be able to see what makes them up. Only WRITING is gated.
- */
-export async function loadManualDeposits(
-  view?: DashboardView,
-): Promise<DashboardResult<{ rows: ManualDepositRow[] }>> {
-  try {
-    const entityIds = await viewEntityScope(view);
-    if (!entityIds || entityIds.length === 0) return { ok: false };
-    return { ok: true, data: { rows: await getManualDeposits(entityIds) } };
-  } catch {
-    return { ok: false };
-  }
-}
-
-/** ISO calendar date, and nothing else. */
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-/** Dollars, up to two decimals. Mirrors 0096's positive-amount CHECK and the form's pattern. */
-const MONEY = /^\d{1,10}(\.\d{1,2})?$/;
-
-/**
- * Record a deposit CMD has not posted yet. SUPER-ADMIN ONLY.
+/*
+ * ── THE MANUAL-DEPOSIT WRITE PATH IS GONE, AND DELETING THE BUTTON WAS NOT ENOUGH ─────────────
+ * (Alec, 2026-09-04: "Nobody should have the ability to record a payment… it counts toward MTD".)
  *
- * Same three layers as saveUpcomingManual: role here, a claims.access_audit row written BEFORE
- * the mutation, and 0096's own CHECKs. Plus the two roster guards, for the same reasons —
- * daily_collections does not FK facility_code, so nothing else in the stack can tell that CAMH
- * is BXR's, and a retired CMD account can never receive a payment.
+ * `loadManualDeposits` / `addManualDeposit` / `removeManualDeposit` lived here and wrote
+ * collections.daily_collections with source_tag='manual' (0096) — the ledger MTD, the All
+ * Facilities table and the Master chart all read. They are removed, not merely unmounted:
+ * a Server Action is a POST endpoint, so an exported-but-uncalled `addManualDeposit` leaves the
+ * capability fully live for anyone able to craft the call. "Nobody has the ability" is a claim
+ * about the ENDPOINT, not about the button.
+ *
+ * The surviving expected-payment path (saveUpcomingManual, above) writes
+ * staging.expected_payment_manual — a table daily_collections_resolved does not reference — so a
+ * forecast cannot reach MTD by construction. That is the whole point: this app is not a system of
+ * record for money; CMD is. See AddForecastPanel's docblock for the ruling and the production
+ * numbers behind it.
+ *
+ * ⚠ STILL OPEN AT THE DATA LAYER, DELIBERATELY NOT DONE HERE: `claims_reader` retains EXECUTE on
+ * the SECURITY DEFINER functions collections.add_manual_deposit() / remove_manual_deposit() —
+ * VERIFIED 2026-09-04 with has_function_privilege (true for claims_reader, false for public), not
+ * assumed. Not an execution test, because `postgres` cannot SET ROLE claims_reader and because
+ * running add_manual_deposit would insert a real row into the ledger this change protects; see
+ * docs/DATABASE-SCHEMA-HANDOFF.md §5.2. No app path reaches them now, but the capability exists in
+ * the database. Closing it is a
+ * REVOKE migration — gated, and Alec's call — and REVOKE rather than DROP, because 0096's
+ * rollback file is explicit that manual rows are money a human asserted and the two historical
+ * rows must stay readable.
  */
-export async function addManualDeposit(
-  input: { facilityCode: string; paymentDate: string; method: 'EFT' | 'Check'; amount: string },
-  view?: DashboardView,
-): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
-  const gate = await dashboardAccess();
-  if (!gate.ok || gate.access.role !== 'super_admin' || !gate.access.user) {
-    return { ok: false, error: 'forbidden' };
-  }
-  const actor = gate.access.user;
-  if (input.facilityCode.length < 1 || input.facilityCode.length > 64) {
-    return { ok: false, error: 'bad_facility' };
-  }
-  if (!ISO_DATE.test(input.paymentDate)) return { ok: false, error: 'bad_date' };
-  if (input.method !== 'EFT' && input.method !== 'Check') return { ok: false, error: 'bad_method' };
-  if (!MONEY.test(input.amount) || Number(input.amount) <= 0) {
-    return { ok: false, error: 'bad_amount' };
-  }
-  const entityId = await singleWriteEntity(view);
-  if (!entityId) return { ok: false, error: 'pick_a_tenant_view' };
-  if (!facilityBelongsToEntity(input.facilityCode, entityId)) {
-    return { ok: false, error: 'facility_not_in_tenant' };
-  }
-  if (!facilityIsActiveForEntity(input.facilityCode, entityId)) {
-    return { ok: false, error: 'facility_retired' };
-  }
-  try {
-    await recordAccess({
-      actorEmail: actor.email,
-      actorUserId: actor.id,
-      action: 'add_manual_deposit',
-      // NON-PHI: facility, day, method, money. daily_collections has no patient column.
-      detail: {
-        facility_code: input.facilityCode,
-        payment_date: input.paymentDate,
-        method: input.method,
-        amount: input.amount,
-        entity: entityId,
-      },
-    });
-    const id = await addManualDepositRow({
-      businessEntityId: entityId,
-      facilityCode: input.facilityCode,
-      paymentDate: input.paymentDate,
-      method: input.method,
-      amount: input.amount,
-      actorUserId: actor.id,
-    });
-    // These rows are read through cached collections actions, so a write that does not bust
-    // the tag would leave the operator staring at the old MTD figure and concluding it failed.
-    revalidateTag(DASHBOARD_CACHE_TAG);
-    return { ok: true, id };
-  } catch (err) {
-    // DP001 is add_manual_deposit's "a live manual deposit already holds this facility-day"
-    // (migration 0098). It is a REFUSAL, not a failure: nothing was written and retrying is
-    // guaranteed to fail the same way, so it must not wear `write_failed`'s "that may not have been
-    // saved, reopen and check" wording — that invites the retry, and before 0098 the retry is what
-    // produced a bare 23505 the operator could do nothing with.
-    //
-    // ⚠ MATCHED ON SQLSTATE, NEVER ON THE MESSAGE. The message names the row and its amount and
-    // will be reworded; the code is the contract. It is read defensively because a pg error's
-    // `code` is untyped on the way through node-pg.
-    if (typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'DP001') {
-      return { ok: false, error: 'deposit_exists' };
-    }
-    console.error('addManualDeposit failed:', err instanceof Error ? err.message : String(err));
-    return { ok: false, error: 'write_failed' };
-  }
-}
-
-/** Soft-remove one manual deposit (e.g. once CMD has posted it). SUPER-ADMIN ONLY. */
-export async function removeManualDeposit(
-  id: number,
-  view?: DashboardView,
-): Promise<{ ok: true; removed: boolean } | { ok: false; error: string }> {
-  const gate = await dashboardAccess();
-  if (!gate.ok || gate.access.role !== 'super_admin' || !gate.access.user) {
-    return { ok: false, error: 'forbidden' };
-  }
-  const actor = gate.access.user;
-  if (!Number.isSafeInteger(id) || id <= 0) return { ok: false, error: 'bad_id' };
-  const entityId = await singleWriteEntity(view);
-  if (!entityId) return { ok: false, error: 'pick_a_tenant_view' };
-  try {
-    await recordAccess({
-      actorEmail: actor.email,
-      actorUserId: actor.id,
-      action: 'remove_manual_deposit',
-      detail: { deposit_id: id, entity: entityId },
-    });
-    const removed = await removeManualDepositRow(entityId, id, actor.id);
-    revalidateTag(DASHBOARD_CACHE_TAG);
-    return { ok: true, removed };
-  } catch (err) {
-    console.error('removeManualDeposit failed:', err instanceof Error ? err.message : String(err));
-    return { ok: false, error: 'write_failed' };
-  }
-}
 
 /** Claim volume by source year. */
 export async function loadClaimsByYear(): Promise<DashboardResult<DistributionSummary>> {

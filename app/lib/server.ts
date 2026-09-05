@@ -1538,104 +1538,22 @@ export async function setUpcomingManualStatusRow(
   return rows[0]?.updated === true;
 }
 
-// --- MANUAL DEPOSITS (collections.daily_collections, source_tag='manual', 0096) ---------
-
-/** One operator-recorded deposit CMD has not posted yet. Non-PHI: facility, day, money. */
-export interface ManualDepositRow {
-  /** bigint — narrowed at the read boundary; see the note on the read below. */
-  id: number;
-  facility_code: string;
-  payment_date: string;
-  checks_amount: string;
-  eft_amount: string;
-  gross_amount: string;
-  created_at: string;
-  /**
-   * A CMD deposit now exists for the same facility + day, so this row is probably counted
-   * twice. NOT auto-removed (Alec, 2026-08-10): auto-suppressing would swallow a genuine
-   * second same-day payment invisibly. The UI prompts; a human decides.
-   */
-  cmd_now_covers: boolean;
-}
-
-/**
- * Live manual deposits for an already-clamped entity scope, each flagged with whether CMD has
- * since posted a deposit for the same facility-day.
+/*
+ * ── MANUAL DEPOSITS: REMOVED 2026-09-04, AND NOT COMING BACK ─────────────────────────────────
+ * `ManualDepositRow`, `getManualDeposits`, `addManualDepositRow` and `removeManualDepositRow`
+ * lived here. They were the only writers of collections.daily_collections from the app — every
+ * other row in that table is CMD-sourced by a cron — and they are gone because this app is not a
+ * system of record for money: payments land in CollaborateMD, and an operator's note about an
+ * expected payment must never enter the ledger MTD reads.
  *
- * Uses the 0096 partial index (business_entity_id, facility_code, payment_date)
- * WHERE source_tag='manual' AND removed_at IS NULL — and unlike 033's dropped index, the
- * predicate is genuinely present in this query, which is the whole reason it can be used.
+ * The expected-payment feature survives ABOVE, in saveUpcomingManualRow, writing
+ * staging.expected_payment_manual — a table daily_collections_resolved does not reference, which
+ * is why a forecast cannot reach MTD by construction rather than by remembering to filter it out.
+ *
+ * Do not add a writer to collections.daily_collections here. See AddForecastPanel's docblock in
+ * components/dashboard/overview-kpis.tsx for the ruling and the production numbers.
  */
-export async function getManualDeposits(entityIds: string[]): Promise<ManualDepositRow[]> {
-  if (entityIds.length === 0) throw new Error('getManualDeposits: empty entity scope');
-  const { rows } = await readerExecutor().query<Omit<ManualDepositRow, 'id'> & { id: string }>(
-    `select d.id, d.facility_code, d.payment_date::text as payment_date,
-            d.checks_amount::text as checks_amount, d.eft_amount::text as eft_amount,
-            d.gross_amount::text as gross_amount, d.created_at::text as created_at,
-            exists (
-              select 1 from collections.daily_collections c
-               where c.business_entity_id = d.business_entity_id
-                 and c.facility_code = d.facility_code
-                 and c.payment_date = d.payment_date
-                 and c.source_tag = 'cmd'
-                 and c.removed_at is null
-            ) as cmd_now_covers
-       from collections.daily_collections d
-      where d.business_entity_id = any($1::uuid[])
-        and d.source_tag = 'manual'
-        and d.removed_at is null
-      order by d.payment_date desc, d.facility_code asc, d.id asc`,
-    [entityIds],
-  );
-  // int8 arrives as TEXT and this repo registers no type parser, so a raw pass-through would
-  // put the STRING "21" in a field typed `number` — the exact lie that made every Remove
-  // button on the forecast tile a silent no-op for two days (see upcomingForecast.ts).
-  return rows.map((r) => {
-    const id = Number(r.id);
-    if (!Number.isSafeInteger(id) || id <= 0) {
-      throw new Error(`getManualDeposits: daily_collections.id is not a safe integer (${r.id})`);
-    }
-    return { ...r, id };
-  });
-}
 
-/** Record a deposit CMD has not posted yet. Returns the new row id. */
-export async function addManualDepositRow(input: {
-  businessEntityId: string;
-  facilityCode: string;
-  paymentDate: string;
-  method: 'EFT' | 'Check';
-  amount: string;
-  actorUserId: string;
-}): Promise<string> {
-  const { rows } = await readerExecutor().query<{ id: string }>(
-    'select collections.add_manual_deposit($1::uuid, $2, $3::date, $4, $5::numeric, $6::uuid) as id',
-    [
-      input.businessEntityId,
-      input.facilityCode,
-      input.paymentDate,
-      input.method,
-      input.amount,
-      input.actorUserId,
-    ],
-  );
-  const id = rows[0]?.id;
-  if (!id) throw new Error('addManualDepositRow: insert returned no id');
-  return id;
-}
-
-/** Soft-remove one manual deposit. False when no LIVE manual row matched (idempotent). */
-export async function removeManualDepositRow(
-  businessEntityId: string,
-  id: number,
-  actorUserId: string,
-): Promise<boolean> {
-  const { rows } = await readerExecutor().query<{ removed: boolean }>(
-    'select collections.remove_manual_deposit($1::uuid, $2::bigint, $3::uuid) as removed',
-    [businessEntityId, id, actorUserId],
-  );
-  return rows[0]?.removed === true;
-}
 
 /**
  * GET /api/cron/upcoming-overrides — "Upcoming Payments" sheet → staging.

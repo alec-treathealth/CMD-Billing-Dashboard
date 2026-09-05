@@ -1490,10 +1490,26 @@ export function payerSuggestions(
 /**
  * Add a payment neither feed knows about (024 kind='add').
  *
- * WHY A DISCLOSURE, NOT AN ALWAYS-OPEN FORM: this is the rarest action on the tile — the sheet
- * is the normal way a forecast arrives, and this exists for the payment that never made it
- * there. Collapsed by default keeps the tile a report rather than a data-entry screen, and
- * <details> gives the same free keyboard + announced-state behaviour as the parent rows above.
+ * ⚠ ALWAYS OPEN, AND THIS PARAGRAPH USED TO SAY THE OPPOSITE (corrected 2026-09-04, Qodo #327).
+ * It read "WHY A DISCLOSURE, NOT AN ALWAYS-OPEN FORM… Collapsed by default keeps the tile a
+ * report rather than a data-entry screen, and <details> gives the same free keyboard +
+ * announced-state behaviour as the parent rows above." Every clause of that was true of the
+ * component's ORIGINAL home — the bottom of the Future Payments tile, where it was one rare
+ * action among many rows — and none of it is true now.
+ *
+ * The form was hoisted into AddForecastPanel, a card whose heading is already the words "Add an
+ * expected payment", and it is that panel's ONLY content. A self-disclosure there meant a second
+ * control with the SAME label nested inside the first: open the panel, then find and open an
+ * identically-named twin to reach the one form in it. The <details> is gone; see the note above
+ * the return.
+ *
+ * THE A11Y CLAIM WENT WITH IT, AND NOTHING IS OWED. `<details>` was carrying keyboard and
+ * announced-state behaviour for free — but only for a disclosure that now has nothing to
+ * disclose. The panel that replaced it is itself opened by a real <button> with its own
+ * announced state, so the expand/collapse affordance is announced exactly once instead of twice.
+ *
+ * A future host that genuinely needs this collapsed should wrap it AT THE CALL SITE. The
+ * component must not carry a disclosure only one of its hosts wants.
  *
  * UNCONTROLLED, so the whole tile stays a pure function of its props: values are read off the
  * form on submit, validated, and handed up as an intent. No client state, nothing to get out of
@@ -1530,14 +1546,21 @@ export function AddForecastForm({
       </p>
     );
   }
+  /*
+   * ⚠ NOT WRAPPED IN A <details> ANY MORE (2026-09-04). This form used to carry its own collapsed
+   * disclosure labelled "Add an expected payment" — correct when it lived at the BOTTOM of the
+   * Future Payments tile, where it was one item among several and had to stay out of the way.
+   * It was hoisted into AddForecastPanel, whose card heading is already the words "Add an
+   * expected payment", so the disclosure became a second control with the SAME label nested
+   * inside the first: open the panel, then find and open an identically-named twin to reach the
+   * only form in it. That was the second duplicate entry point on this surface, and it is the
+   * one a screenshot shows most clearly.
+   *
+   * If this form is ever mounted somewhere that needs it collapsed, wrap it AT THE CALL SITE —
+   * the component should not carry a disclosure that only one of its hosts wants.
+   */
   return (
-    <details className="ths-item">
-      <summary className="ths-item-summary ths-add-summary">
-        <span className="ths-item-chevron" aria-hidden>
-          ▸
-        </span>
-        <span className="font-medium">Add an expected payment</span>
-      </summary>
+    <>
       <form
         className="ths-add-form"
         onSubmit={(e) => {
@@ -1628,6 +1651,6 @@ export function AddForecastForm({
         Added here, not in the sheet — the hourly sheet sync never touches it, and it shows as
         &ldquo;added by admin&rdquo; on the tile.
       </p>
-    </details>
+    </>
   );
 }

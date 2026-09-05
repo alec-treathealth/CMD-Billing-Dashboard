@@ -831,7 +831,16 @@ const renderForm = (facilityOptions: { code: string; label: string }[]) =>
 
 test('the add form offers facilities as a closed list, never free text', () => {
   const html = renderForm(FACILITIES);
-  assert.ok(html.includes('Add an expected payment'), 'the form names itself');
+  /*
+   * ⚠ IT NO LONGER NAMES ITSELF, AND THAT IS THE POINT (2026-09-04). This asserted
+   * `includes('Add an expected payment')` — the label on the <details>/<summary> the form used to
+   * wrap itself in. That disclosure is gone: the form is mounted inside AddForecastPanel, whose
+   * card heading is already those exact words, so carrying its own copy meant a second control
+   * with the SAME label nested inside the first. The panel names the form now; the form renders
+   * the form. The closed-list claim this test is actually about is untouched below.
+   */
+  assert.ok(!html.includes('<details'), 'the form carries no disclosure of its own');
+  assert.ok(html.includes('<select'), 'it opens straight onto the facility picker');
   assert.ok(html.includes('CA MENTAL HEALTH'), 'facilities are selectable, not free text');
   assert.ok(html.includes('KENTUCKY WELLNESS CENTER'));
 });
@@ -843,7 +852,16 @@ test('THE FORM IS GONE FROM THE TILE — it must not render in two places', () =
     <EraUpcomingBody data={S({})} canEdit facilityOptions={FACILITIES} />,
   );
   assert.ok(empty.includes('No future payments scheduled'), 'still the calm empty read');
-  assert.ok(!empty.includes('Add an expected payment'), 'the tile no longer carries the form');
+  /*
+   * ⚠ ANCHORED ON THE FORM'S OWN MARKUP, NOT ON ITS OLD LABEL. This asserted the ABSENCE of
+   * 'Add an expected payment' — a string the form stopped emitting when its self-label was
+   * removed, so from that moment the assertion would have passed even with the form fully
+   * rendered here. That is passing for the wrong reason, which is worse than failing. Verified by
+   * mutation: pointed at a real form render, this pin fails. The payer datalist id is emitted by
+   * AddForecastForm and by nothing else on the tile.
+   */
+  assert.ok(!empty.includes('ths-payer-suggestions'), 'the tile no longer carries the form');
+  assert.ok(!empty.includes('ths-add-form'), 'nor its form element');
 });
 
 test('Consolidated explains instead of offering a form the server would reject', () => {
