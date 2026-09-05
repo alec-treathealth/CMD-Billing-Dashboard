@@ -140,7 +140,7 @@ ask" as a misconfiguration, not a data state. See `CensusVisibilityError` in
 | `collections.refresh_cmd_explorer_charge_rollup` | `postgres` | The :45 rollup refresh |
 | `collections.refresh_facility_resolution` | `postgres` | Facility-resolution matview refresh |
 | `collections.save_facility_assignments` | `postgres` | Human "No Facility" assignment (0085) |
-| `collections.add_manual_deposit` / `remove_manual_deposit` | `postgres` | Hand-keyed deposits (0096) |
+| `collections.add_manual_deposit` / `remove_manual_deposit` | `postgres` | **Applied but UNREACHABLE from the app since 2026-09-04 — no caller remains; do not wire it** (see §5.2) |
 | `collections.record_qualify_prefix_echo` | `postgres` | **Applied but deliberately UNWIRED — do not wire it** (see §5.2) |
 | `staging.upsert_expected_payment_manual` / `remove_*` / `set_*_status` / `delete_*` | — | Upcoming-payments manual overrides |
 | `core.consolidated_summary` | `consolidated_reader` | The cross-tenant aggregate |
@@ -370,7 +370,50 @@ strictly worse on coverage: it can only ever label prefixes somebody already *se
 tape of the whole book would stay mostly masked for weeks, and it costs a write per search.
 Ratified 2026-08-09.
 
-**`'manual'` deposits are ADDITIVE, not a rank participant (0096).**
+**`'manual'` deposits are ADDITIVE, not a rank participant (0096) — AND THE WRITE PATH IS GONE
+(2026-09-04).** Everything in this subsection still describes the VIEW correctly, and the two
+historical `'manual'` rows are still there (both soft-deleted, $0 live), so the ranking semantics
+below remain worth knowing. What is no longer true is that anything can CREATE such a row: the
+Overview form, its three Server Actions and the data-layer writers were deleted after a ruling that
+this app is not a system of record for money — "there is nobody manually entering payments through
+this platform; the payments land in CollaborateMD already". Operators now record an expected
+payment as a FORECAST in `staging.expected_payment_manual`, which this view does not reference and
+which therefore cannot reach MTD. `collections.add_manual_deposit` / `remove_manual_deposit` still
+exist and `claims_reader` still holds EXECUTE on them — a REVOKE is pending Alec's call — so the
+capability is live in Postgres and dead in the application. Do not add a new caller.
+
+**VERIFIED 2026-09-04, and by the method this repo ratified for `claims_reader` specifically:**
+`has_function_privilege('claims_reader', …, 'EXECUTE')` returns **true** for both, and
+`has_function_privilege('public', …)` returns **false** — so the grant is real and not
+world-executable. It is a catalog check rather than an execution test *on purpose*, and the reason
+is recorded in CLAUDE.md: **`postgres` cannot `SET ROLE claims_reader`** (no grant — re-confirmed
+the same day via `pg_has_role`), so an execution test as that role is not possible from an operator
+session, and "the reader's access was proven via `has_table_privilege`/`has_function_privilege`
+instead. That is the correct split, not a shortcut."
+
+⚠ AND EXECUTING THESE TWO IN PARTICULAR WOULD BE SELF-DEFEATING: `add_manual_deposit` INSERTs into
+`collections.daily_collections`. Proving "nothing may write the ledger" by writing to the ledger
+would leave a real row in the money table this whole change exists to protect. `has_function_privilege`
+answers the same question and writes nothing.
+
+Re-run the check yourself — it is read-only, takes one paste, and is the whole basis of the claim
+above, so it should be re-run rather than trusted whenever the REVOKE lands:
+
+```sql
+select has_function_privilege('claims_reader',
+         'collections.add_manual_deposit(uuid,text,date,text,numeric,uuid)', 'EXECUTE') as reader_add,
+       has_function_privilege('claims_reader',
+         'collections.remove_manual_deposit(uuid,bigint,uuid)', 'EXECUTE')             as reader_remove,
+       has_function_privilege('public',
+         'collections.add_manual_deposit(uuid,text,date,text,numeric,uuid)', 'EXECUTE') as public_add,
+       pg_has_role(current_user, 'claims_reader', 'USAGE')                              as could_set_role;
+-- 2026-09-04, as postgres: t | t | f | f
+-- The final `f` is why this is a catalog check: the operator role cannot BECOME claims_reader.
+-- After the REVOKE, the first two must read `f` and the app must still behave identically —
+-- nothing calls them.
+```
+
+
 `collections.daily_collections_resolved` is a three-branch view:
 
 1. `cmd`/`workbook`/`deposit_sheet` — three competing *imports of the same deposits* —
