@@ -323,7 +323,7 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
                   className={[
                     'rounded-full border px-3 py-1 text-xs font-medium transition-colors',
                     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
-                    on ? 'border-[var(--brand-accent)] bg-[var(--brand-accent)]/10 text-[var(--brand-ink)]' : 'border-line text-ink600 hover:text-ink900',
+                    on ? 'border-[var(--brand-accent)] bg-[var(--brand-accent-a10)] text-[var(--brand-ink)]' : 'border-line text-ink600 hover:text-ink900',
                   ].join(' ')}
                 >
                   {s.label}
@@ -352,7 +352,7 @@ export function BillableDaysPanel({ view, canRevealPhi }: { view: DashboardView;
           {countOverrides(cellOv, statusOv) > 0 && (
             <div
               role="status"
-              className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--brand-accent)] bg-[var(--brand-accent)]/8 px-3 py-2 text-xs"
+              className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--brand-accent)] bg-[var(--brand-accent-a8)] px-3 py-2 text-xs"
             >
               <span className="font-semibold text-[var(--brand-ink)]">
                 {countOverrides(cellOv, statusOv)} manual override

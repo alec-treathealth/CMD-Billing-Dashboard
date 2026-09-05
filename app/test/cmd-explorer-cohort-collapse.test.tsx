@@ -85,10 +85,31 @@ test('disclosure trigger is a real button with complete ARIA wiring and a focus 
     /<button\s+type="button"\s+aria-expanded=\{!collapsed\}\s+aria-controls=\{bodyId\}[\s\S]{0,600}?<\/button>/,
   );
   assert.ok(trigger, 'trigger must be a <button type="button"> with aria-expanded + aria-controls');
-  assert.match(trigger[0], /onClick=\{\(\) => setCollapsed\(/, 'trigger toggles the collapse state');
+  assert.match(trigger[0], /onClick=\{toggle\}/, 'trigger toggles the collapse state');
+  assert.match(cohortPanelSrc, /const toggle = \(\) => setCollapsed\(/, 'and `toggle` is the one that flips it');
   assert.match(trigger[0], /focus-visible:ring-2/, 'trigger must show a visible focus ring');
-  // Not a div+onClick standing in for a button.
-  assert.doesNotMatch(cohortPanelSrc, /<div[^>]*onClick=\{\(\) => setCollapsed/, 'never a div+onClick');
+
+  /*
+   * ⚠ "NEVER A DIV+ONCLICK" NEEDED RESTATING, NOT JUST RE-PASSING (2026-09-04). The header row is
+   * now a click target as well ("the user can click anywhere on them for the dropdown"), so this
+   * file's old assertion — `doesNotMatch(/<div[^>]*onClick=\{\(\) => setCollapsed/)` — would still
+   * have passed, purely because the row calls a shared handler instead of an inline setter. That is
+   * passing on a technicality, which is worse than failing: the rule it was protecting would have
+   * been quietly hollowed out.
+   *
+   * The rule was never "no div may carry a click". It was "a div must not STAND IN FOR a button",
+   * because a div is unreachable by keyboard and invisible to assistive tech. So the real invariant,
+   * asserted directly: the row's click exists ONLY alongside the real button above, and the row
+   * contributes no disclosure semantics of its own — no aria-expanded, no aria-controls, no role,
+   * no tabIndex. Two elements claiming to be the disclosure is its own bug.
+   */
+  const row = cohortPanelSrc.match(/<div className=\{FOLD_ROW_CLASS\}[^>]*>/);
+  assert.ok(row, 'the header row is the shared fold row');
+  assert.match(row[0], /onClick=\{foldRowClickHandler\(toggle\)\}/, 'it runs the same toggle as the button');
+  assert.doesNotMatch(row[0], /aria-expanded|aria-controls|role=|tabIndex/, 'and claims no disclosure semantics');
+  // An INLINE setter on a div is still banned — that is the shape that appears when someone drops
+  // the real button and "simplifies" the row into being the control.
+  assert.doesNotMatch(cohortPanelSrc, /<div[^>]*onClick=\{\(\) => setCollapsed/, 'never a div+inline setter');
 });
 
 test('aria-controls target is always mounted and hidden with the hidden attribute', () => {

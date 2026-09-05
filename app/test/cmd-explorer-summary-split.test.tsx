@@ -53,13 +53,25 @@ test('the yield read is its own always-visible card; the drill panel no longer c
 });
 
 test('render order: hero → result group (yield, AI output, drill) → cohort → grid; group keyed on aiKey', () => {
+  /*
+   * ⚠ THE POSITIONS MUST ALL COME FROM ONE STRING, AND IT HAS TO BE `src` — the two boundary
+   * markers are JSX comments (`{/* ---- Search hero ---- *​/}`), so a comment-stripped copy does not
+   * contain them at all. Offsets from `src` and `code` are not comparable, so this cannot mix them.
+   *
+   * ⚠ WHICH LEFT ONE HAZARD, AND IT FIRED (2026-09-04): `src.indexOf('<SearchResultPanels')` finds
+   * the FIRST occurrence anywhere, prose included, so a comment that quoted that opening tag above
+   * the real render site made `group` point at prose and failed this test with the render order
+   * completely unchanged. `group` is therefore anchored on the GATE — `hasAnySearch && (` plus the
+   * tag — which is the render site and not a phrase anybody writes in passing. The COUNT is what
+   * `code` is for: a bare tag count is exactly the prose-sensitive check the strip exists for.
+   */
   const hero = src.indexOf('---- Search hero');
-  const group = src.indexOf('<SearchResultPanels');
+  const group = src.search(/hasAnySearch && \(\s*<SearchResultPanels/);
   const cohort = src.indexOf('{cohortPresence.rendered && (');
   const grid = src.indexOf('---- Detail grid');
   assert.ok(hero > 0 && group > hero && cohort > group && grid > cohort, 'group sits directly under the hero');
   assert.match(src, /hasAnySearch && \(\s*<SearchResultPanels\s+key=\{aiKey\}/, 'gated on hasAnySearch, keyed on aiKey');
-  assert.equal(src.split('<SearchResultPanels').length - 1, 1, 'one mount');
+  assert.equal(code.split('<SearchResultPanels').length - 1, 1, 'one mount');
   // Inside the group: yield card, then AI output (only when not idle), then the drill panel — each
   // a `shrink-0` sibling so the height chain and `gap-4` see three fixed blocks, as before.
   const y = groupSrc.indexOf('<SelectionYieldPanel');
@@ -141,7 +153,15 @@ test('drill panel is COLLAPSED by default and its body stays mounted + hidden (n
   assert.doesNotMatch(drillSrc, /\{!collapsed && \(/, 'no conditional unmount — it dangles aria-controls in the default state');
   const trigger = drillSrc.match(/<button\s+type="button"\s+aria-expanded=\{!collapsed\}\s+aria-controls=\{bodyId\}[\s\S]{0,700}?<\/button>/);
   assert.ok(trigger, 'trigger is a <button type="button"> with aria-expanded + aria-controls');
-  assert.match(trigger[0], /onClick=\{\(\) => setCollapsed\(/, 'trigger toggles the fold');
+  /*
+   * ONE `toggle`, SHARED (2026-09-04). This asserted an inline `onClick={() => setCollapsed(` until
+   * the whole header row became a click target too — the row and the button must run the SAME
+   * function or the two entry points can drift (or double-toggle). So the pin moved from "the
+   * button has an inline setter" to "the button and the row share one named toggle", which is the
+   * stronger claim. collections-fold-and-clear.test.tsx owns the row half.
+   */
+  assert.match(trigger[0], /onClick=\{toggle\}/, 'trigger toggles the fold');
+  assert.match(drillSrc, /const toggle = \(\) => setCollapsed\(/, 'and `toggle` is the one that flips it');
   assert.match(trigger[0], /focus-visible:ring-2/, 'trigger shows a focus ring');
   assert.doesNotMatch(drillSrc, /localStorage\.|sessionStorage\./, 'fold state is never persisted');
 });

@@ -170,11 +170,18 @@ test('the index alarm fires on a STOPPED sync, not on a non-zero lag', () => {
   assert.match(explorerSrc, /const STALE_INDEX_MINUTES = 180;/);
 });
 
-test('a tenant switch clears the search UI, not just the filter', () => {
+test('a tenant switch clears the search UI, not just the filter — and kills a pending search', () => {
   // ⚠ THE TOKEN GUARD ALONE LEFT A PHANTOM SEARCH: the filter correctly stopped applying, while the
   // term stayed in the input and the match count stayed under it describing nothing. Both mechanisms
   // are required — the guard is synchronous and correct for the render before this effect flushes.
-  assert.match(explorerSrc, /useEffect\(\(\) => \{\s*setNameMatch\(null\);\s*setNameQuery\(''\);\s*setNameNotice\(null\);\s*\}, \[view\]\);/);
+  //
+  // The generation bump joined the effect with Qodo #325: a name search still in flight when the
+  // tenant switches would otherwise land AFTER this reset and repaint the phantom this effect
+  // exists to clear. `[^\n]*` after the bump: it carries a trailing why-comment in the source.
+  assert.match(
+    explorerSrc,
+    /useEffect\(\(\) => \{\s*nameSearchGen\.current \+= 1;[^\n]*\s*setNameMatch\(null\);\s*setNameQuery\(''\);\s*setNameNotice\(null\);\s*\}, \[view\]\);/,
+  );
 });
 
 // -- 4. The client ------------------------------------------------------------------------------

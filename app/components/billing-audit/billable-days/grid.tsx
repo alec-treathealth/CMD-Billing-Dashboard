@@ -72,7 +72,7 @@ function DayCell({
             <span
               key={`${c}-${i}`}
               title={codeTitle(c)}
-              className="rounded bg-[var(--brand-accent)]/12 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-[var(--brand-ink)]"
+              className="rounded bg-[var(--brand-accent-a12)] px-1.5 py-0.5 font-mono text-[11px] font-semibold text-[var(--brand-ink)]"
             >
               {c}
             </span>

@@ -60,6 +60,41 @@
     --brand-accent: #1c8b82; /* highlight: KPI top border, active underline, fills */
     --brand-soft: #eaf4f2; /* soft tint: tracks / subtle backgrounds */
 
+    /* ---- Brand ALPHA STEPS, and they exist because Tailwind cannot express them -------------
+       ⚠ `bg-[var(--brand-accent)]/10` AND EVERY CLASS OF THAT SHAPE EMITS NO RULE AT ALL.
+       Tailwind's `/<alpha>` modifier has to rewrite the colour into a channel form to insert an
+       alpha, which it can only do for a value it can parse — an opaque `var()` is not one (the
+       technique needs a var holding bare channels, e.g. `--x: 28 139 130`, which the --brand-*
+       tokens are not). It does not warn, `tsc` is happy, `next build` is happy, and the element
+       simply has no such style. 17 classes in this repo were written that way and NONE of them had
+       ever painted — hover tints, focus halos, active-state fills and, twice, a DATA BAR that was
+       silently invisible. ALL 17 were repointed here on 2026-09-04 and the shape is now banned
+       repo-wide by test/brand-token-alpha.test.tsx, which also rejects a reference to an alpha step
+       that does not exist (an undeclared var emits a rule and is transparent — same symptom, and
+       the obvious next mistake now that the steps are named by percentage).
+
+       Each step is the exact percentage its call site originally asked for, so intent is preserved
+       one-for-one rather than re-designed. `color-mix` is the working equivalent and was already
+       the house pattern a few lines below (--m3-rail-indicator).
+
+       Declared on :root === <html> for the same reason the --m3-* tokens are: `var(--brand-accent)`
+       inside a custom property is substituted at computed-value time on the element, so these pick
+       up whatever the active [data-view] rule set on that same element. One scale, three tenant
+       palettes, no second copy.
+
+       ⚠ VERIFY, DO NOT ASSUME. A class using one of these must be findable as a real rule in
+       app/.next/static/css/*.css after a build. That grep is the only proof that matters here —
+       reading the JSX is exactly what let 17 dead classes survive for months. */
+    --brand-accent-a8: color-mix(in srgb, var(--brand-accent) 8%, transparent);
+    --brand-accent-a10: color-mix(in srgb, var(--brand-accent) 10%, transparent);
+    --brand-accent-a12: color-mix(in srgb, var(--brand-accent) 12%, transparent);
+    --brand-accent-a20: color-mix(in srgb, var(--brand-accent) 20%, transparent);
+    --brand-accent-a25: color-mix(in srgb, var(--brand-accent) 25%, transparent);
+    --brand-accent-a40: color-mix(in srgb, var(--brand-accent) 40%, transparent);
+    --brand-accent-a50: color-mix(in srgb, var(--brand-accent) 50%, transparent);
+    --brand-soft-a50: color-mix(in srgb, var(--brand-soft) 50%, transparent);
+    --brand-soft-a60: color-mix(in srgb, var(--brand-soft) 60%, transparent);
+
     /* ---- Material-3 navigation-rail tokens ----------------------------------
        STRUCTURE from Material 3, COLOR from the brand vars above. Declared here
        (on :root === <html>) so they substitute against whatever --brand-* the
@@ -153,6 +188,74 @@
     stroke-dashoffset: 0 !important;
   }
 }
+
+/*
+ * ── COLLAPSED-PANEL DISCLOSURE AFFORDANCE (Alec, 2026-09-04) ────────────────────────────────────
+ *
+ * The ask: *"i want them to be highlighted/glowing with motion and the user can click anywhere on
+ * them for the dropdown"* — about the two folded result panels on Collections (Drill in, Cohort
+ * payer behavior). Both shipped collapsed-by-default with a 16x16 chevron as their only affordance,
+ * so a reader could not tell there was anything to open. `.ths-fold` paints the highlight AND the
+ * motion; the whole-header click target is at the call site (see foldRowClickHandler).
+ *
+ * ⚠ ALL OF THE COLOUR LIVES HERE RATHER THAN IN TAILWIND ARBITRARY VALUES, AND THAT IS NOT A STYLE
+ * PREFERENCE — IT IS THE ONLY WAY IT RENDERS. Tailwind SILENTLY DROPS the `/<alpha>` modifier on an
+ * arbitrary `var()` colour: `border-[var(--brand-accent)]/55` emits NO RULE AT ALL, because Tailwind
+ * cannot compute an alpha channel for an opaque `var()` (the technique needs a var holding bare
+ * channels, e.g. `--x: 28 139 130`, which none of the --brand-* tokens do). Verified against the
+ * shipped stylesheet: `.next/static/css/*.css` contains 31 `brand-accent` rules and ZERO of them
+ * carry an alpha modifier. This first draft used two such classes and painted nothing.
+ * `color-mix(in srgb, var(--brand-accent) N%, transparent)` is the working equivalent and is
+ * already the house pattern — see `--m3-rail-indicator` above.
+ * The 17 pre-existing occurrences of that dead pattern found alongside this change are FIXED, not
+ * deferred — see the alpha-step scale near the top of this file, and the repo-wide ban in
+ * test/brand-token-alpha.test.tsx. This block keeps the explanation because the mistake is
+ * invisible and inviting, not because any instance survives.
+ *
+ * ⚠ THE RING IS AN ::after, NOT A box-shadow OR AN outline. Those cards already carry `shadow-ths`,
+ * which compiles to `box-shadow` through --tw-shadow, so a rule or keyframe setting `box-shadow` on
+ * the card itself would take the elevation away for the animation's whole duration and hand it back
+ * at the end. A pseudo-element has its own box-shadow to spend. It is `pointer-events: none` so it
+ * cannot eat the header click, and it is absolutely positioned, so — like a ring — it costs NO
+ * LAYOUT. That matters more than usual here: both panels are fixed blocks in a viewport-bounded
+ * column whose height budget is measured to the pixel (see the floor note in cmd-explorer.tsx).
+ * Measured: the collapsed Drill in card is 58px with this class and 58px without it.
+ *
+ * ⚠ THREE ITERATIONS, NOT `infinite`. A permanent pulse on two cards is a distraction the reader
+ * cannot dismiss, and WCAG 2.2.2 exists because of exactly that; a finite pulse settles into the
+ * static ring the base rule leaves behind. It re-fires on its own for every new search WITHOUT any
+ * state of its own, because SearchResultPanels is keyed on the search signature — a new search
+ * remounts both panels and a CSS animation restarts on mount. Do not add a timer or an effect.
+ *
+ * Reduced motion needs no opt-out: the universal reset above sets animation-iteration-count: 1 and
+ * duration 0.01ms, so this collapses to the static ring — the correct non-animated equivalent of
+ * the same message.
+ */
+@keyframes ths-fold-glow {
+  0%,
+  100% {
+    border-color: color-mix(in srgb, var(--brand-accent) 18%, transparent);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand-accent) 0%, transparent);
+  }
+  50% {
+    border-color: color-mix(in srgb, var(--brand-accent) 78%, transparent);
+    box-shadow: 0 0 10px 2px color-mix(in srgb, var(--brand-accent) 34%, transparent);
+  }
+}
+
+.ths-fold::after {
+  content: '';
+  position: absolute;
+  /* Just outside the card's own border, and 2px more radius to stay concentric with `rounded-xl`
+     (0.75rem) at a 3px offset. */
+  inset: -3px;
+  border-radius: 0.875rem;
+  border: 2px solid color-mix(in srgb, var(--brand-accent) 26%, transparent);
+  /* The click target is the header row underneath; this ring must never intercept a press. */
+  pointer-events: none;
+  animation: ths-fold-glow 1.6s ease-in-out 3;
+}
+
 
 /*
  * ── Qualify tab (Prompt 3) — rating-bucket status colors + heat washes ──────────────────

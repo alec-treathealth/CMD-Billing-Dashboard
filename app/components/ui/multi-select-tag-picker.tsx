@@ -223,7 +223,7 @@ export function MultiSelectTagPicker({
           open
             ? tealTone
               ? 'border-teal700 ring-2 ring-teal500/25'
-              : 'border-[var(--brand-accent)] ring-2 ring-[var(--brand-accent)]/25'
+              : 'border-[var(--brand-accent)] ring-2 ring-[var(--brand-accent-a25)]'
             : tone === 'score'
               ? 'border-teal200 hover:border-teal500'
               : tone === 'list'
