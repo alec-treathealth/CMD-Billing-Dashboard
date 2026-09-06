@@ -20,9 +20,11 @@ import {
   ProposalCell,
   QueueList,
   ReviewNote,
+  RulingFormFields,
   VocabularyTabs,
   pageHref,
   vocabTabHref,
+  type RulingFormState,
 } from '../components/admin/payer-alias-leaves';
 import type {
   PayerAliasNeighbourRow,
@@ -189,17 +191,61 @@ test('an absent review note renders nothing at all', () => {
 
 /* ── 5. read-only ──────────────────────────────────────────────────────────────────────────────── */
 
-test('ARTIFACT 2 IS READ-ONLY — the queue markup contains no form, button, input or select', () => {
-  const html = renderToStaticMarkup(
-    <QueueList
-      rows={[row(), row({ alias_norm: 'UHC', canonical_payer_id: null, display_name: null, review_note: 'STRUCTURALLY AMBIGUOUS —' })]}
-      siblings={{ 'ANTHEM BCBS GA': [sibling()] }}
-      neighbours={{ 'ANTHEM BCBS GA': [neighbour()] }}
-    />,
-  );
-  for (const tag of ['<form', '<button', '<input', '<select', '<textarea']) {
-    assert.equal(html.includes(tag), false, `read-only surface emitted ${tag}`);
+/**
+ * ⚠️ TIGHTENED, NOT RELAXED, WHEN THE RULING FORM LANDED (2026-09-06).
+ *
+ * Before: "the queue markup contains no form/button/input/select". Once a form existed the naive
+ * move would be to delete this test, or to loosen it to "the page may contain controls" — either
+ * way every DISPLAY leaf loses its guard forever, and a stray button in NeighbourList or Pager
+ * becomes invisible.
+ *
+ * After: the exemption is scoped to ONE component. Every read-only leaf is still asserted to emit
+ * zero controls, INCLUDING QueueList rendered without a renderForm prop — which is how the guard
+ * survives the arrival of the form. RulingFormFields is the single permitted emitter, and it gets
+ * its own assertions below rather than a free pass.
+ */
+const CONTROL_TAGS = ['<form', '<button', '<input', '<select', '<textarea'];
+
+test('every DISPLAY leaf still emits zero controls — the exemption is one component, not the file', () => {
+  const displays: Array<[string, string]> = [
+    [
+      'QueueList (no renderForm)',
+      renderToStaticMarkup(
+        <QueueList
+          rows={[row(), row({ alias_norm: 'UHC', canonical_payer_id: null, display_name: null, review_note: 'STRUCTURALLY AMBIGUOUS —' })]}
+          siblings={{ 'ANTHEM BCBS GA': [sibling()] }}
+          neighbours={{ 'ANTHEM BCBS GA': [neighbour()] }}
+        />,
+      ),
+    ],
+    ['NeighbourList', renderToStaticMarkup(<NeighbourList neighbours={[neighbour()]} />)],
+    ['ProposalCell', renderToStaticMarkup(<ProposalCell row={row()} />)],
+    ['ReviewNote', renderToStaticMarkup(<ReviewNote note="a note" />)],
+    ['ConfidenceValue', renderToStaticMarkup(<ConfidenceValue value="0.5" />)],
+    ['VocabularyTabs', renderToStaticMarkup(<VocabularyTabs active="vob_payer_id" counts={COUNTS} />)],
+    [
+      'Pager',
+      renderToStaticMarkup(
+        <Pager vocabulary="vob_payer_id" page={1} pageSize={25} total={199} hasMore />,
+      ),
+    ],
+  ];
+  for (const [name, html] of displays) {
+    for (const tag of CONTROL_TAGS) {
+      assert.equal(html.includes(tag), false, `${name} emitted ${tag}`);
+    }
   }
+});
+
+test('a card only grows controls when a form is explicitly injected', () => {
+  const withoutForm = renderToStaticMarkup(
+    <QueueList rows={[row()]} siblings={{}} neighbours={{}} />,
+  );
+  const withForm = renderToStaticMarkup(
+    <QueueList rows={[row()]} siblings={{}} neighbours={{}} renderForm={() => <button>x</button>} />,
+  );
+  assert.equal(withoutForm.includes('<button'), false);
+  assert.ok(withForm.includes('<button'), 'renderForm must actually reach the card');
 });
 
 /* ── 6. context and a11y ───────────────────────────────────────────────────────────────────────── */
@@ -329,4 +375,115 @@ test('M2: Next is inert past the end even if a caller passes hasMore=true', () =
 test('an empty page states it rather than rendering a bare list', () => {
   const html = renderToStaticMarkup(<QueueList rows={[]} siblings={{}} neighbours={{}} />);
   assert.ok(html.includes('Nothing unruled on this page'), html);
+});
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════════
+ * THE RULING FORM — the one component permitted to emit controls, and what it owes in exchange.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
+
+const IDENTITIES = [
+  { canonical_payer_id: 'pi_cigna', display_name: 'Cigna', entity_kind: 'insurer' },
+  { canonical_payer_id: 'pi_optum', display_name: 'Optum', entity_kind: 'tpa' },
+];
+
+const formState = (over: Partial<RulingFormState> = {}): RulingFormState => ({
+  action: 'confirm',
+  relationship: 'same_payer',
+  canonicalPayerId: 'pi_cigna',
+  reviewNote: '',
+  ...over,
+});
+
+const renderForm = (over: Partial<RulingFormState> = {}, extra: Partial<{ error: string | null; errorField: string | null; pending: boolean; alias: string }> = {}) =>
+  renderToStaticMarkup(
+    <RulingFormFields
+      alias={extra.alias ?? 'ANTHEM BCBS GA'}
+      state={formState(over)}
+      identities={IDENTITIES}
+      pending={extra.pending ?? false}
+      error={extra.error ?? null}
+      errorField={extra.errorField ?? null}
+      onChange={() => {}}
+      idPrefix="t1"
+    />,
+  );
+
+test('all SIX relationships are offered — tpa and employer_self_funded are not hidden', () => {
+  const html = renderForm();
+  for (const r of ['same_payer', 'carve_out', 'tpa', 'employer_self_funded', 'program_label', 'unmapped']) {
+    assert.ok(html.includes(`value="${r}"`), `relationship ${r} is not offered`);
+  }
+});
+
+test('the canonical picker is OMITTED, not disabled, when the relationship forbids one', () => {
+  // payer_alias_map_relationship_canonical rejects a canonical on unmapped/program_label, so a
+  // greyed-out control still holding pi_cigna is a submission waiting to fail.
+  for (const r of ['unmapped', 'program_label'] as const) {
+    const html = renderForm({ relationship: r });
+    assert.equal(html.includes('name="canonicalPayerId"'), false, `${r} still rendered the picker`);
+    assert.equal(html.includes('pi_cigna'), false, `${r} left a stale canonical in the DOM`);
+  }
+  for (const r of ['same_payer', 'carve_out', 'tpa', 'employer_self_funded'] as const) {
+    assert.ok(renderForm({ relationship: r }).includes('name="canonicalPayerId"'), `${r} needs the picker`);
+  }
+});
+
+test('a defer hides the relationship and canonical controls and requires the note', () => {
+  const html = renderForm({ action: 'defer' });
+  assert.equal(html.includes('name="relationship"'), false);
+  assert.equal(html.includes('name="canonicalPayerId"'), false);
+  assert.ok(html.includes('required'), 'the note must be required on a defer');
+  assert.ok(html.includes('(required)'), 'the label must say so visually too');
+});
+
+test('every control is labelled — no placeholder-only or aria-less input', () => {
+  const html = renderForm();
+  for (const name of ['action', 'relationship', 'canonicalPayerId', 'reviewNote']) {
+    // Attribute ORDER is React's, not ours — match the tag then pull id and name out of it
+    // independently. An order-sensitive regex here was a false failure, not a real finding.
+    const tag = html.match(new RegExp(`<(?:select|textarea|input)\\b[^>]*name="${name}"[^>]*>`));
+    assert.ok(tag, `${name} control is missing`);
+    const id = tag[0].match(/id="([^"]+)"/);
+    assert.ok(id, `${name} has no id to label`);
+    assert.ok(html.includes(`for="${id[1]}"`), `${name} has no <label for>`);
+  }
+  assert.ok(html.includes('<legend'), 'the control group needs a legend');
+});
+
+test('a rejection is announced, not merely coloured', () => {
+  const html = renderForm({}, { error: 'That canonical payer is retired — pick a live one.', errorField: 'canonicalPayerId' });
+  assert.ok(html.includes('role="alert"'), 'the error must be announced');
+  assert.ok(html.includes('retired'), html);
+  // Colour alone fails WCAG 1.4.1; the field name is carried in text for a screen reader.
+  assert.ok(html.includes('canonicalPayerId'), 'the blamed field is not named to AT');
+});
+
+test('the form carries NO bulk affordance — one alias, one submit', () => {
+  const html = renderForm();
+  assert.equal((html.match(/type="submit"/g) ?? []).length, 1, 'exactly one submit control');
+  assert.equal(html.includes('type="checkbox"'), false, 'no multi-select checkbox');
+  assert.equal(html.includes('multiple'), false, 'no multi-select control');
+  // Exactly ONE hidden alias field — a form carrying two would be batching by another name.
+  assert.equal((html.match(/name="aliasNorm"/g) ?? []).length, 1, 'more than one alias in one form');
+  // ⚠️ Match AFFORDANCE wording, not the substring "bulk" — the form deliberately CONTAINS the words
+  // "no bulk confirm" as user-facing reassurance, so a bare /bulk/i test contradicts itself. That was
+  // this test's first draft and it failed on its own copy.
+  assert.equal(/select all|confirm all|rule all|apply to all/i.test(html), false, 'a bulk affordance appeared');
+  assert.ok(html.includes('no bulk confirm'), 'the single-row guarantee should be stated to the user');
+});
+
+test('the alias travels in a hidden field, never in an href or a fragment id', () => {
+  const html = renderForm({}, { alias: EMPLOYER_ALIAS });
+  assert.ok(html.includes(`value="${EMPLOYER_ALIAS}"`), 'the exact stored PK must be submitted');
+  assert.equal(html.includes('href'), false, 'the form emits no links at all');
+  // Every generated id comes from the caller's prefix — never from the alias itself.
+  for (const m of html.matchAll(/id="([^"]+)"/g)) {
+    assert.equal((m[1] ?? '').includes('ACME'), false, `alias leaked into a DOM id: ${m[1]}`);
+  }
+});
+
+test('pending disables the controls rather than hiding them', () => {
+  const html = renderForm({}, { pending: true });
+  assert.ok(html.includes('disabled'), 'controls must be disabled while a ruling is in flight');
+  assert.ok(html.includes('Saving'), 'the submit control should say what is happening');
 });

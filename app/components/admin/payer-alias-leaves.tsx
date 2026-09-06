@@ -22,7 +22,11 @@
  */
 import type { ReactNode } from 'react';
 import {
+  PAYER_ALIAS_RELATIONSHIPS,
   PAYER_ALIAS_VOCABULARIES,
+  RELATIONSHIP_REQUIRES_CANONICAL,
+  type PayerAliasRelationship,
+  type RulingAction,
   type PayerAliasNeighbourRow,
   type PayerAliasQueueRow,
   type PayerAliasSiblingRow,
@@ -251,10 +255,14 @@ export function QueueCard({
   row,
   siblings,
   neighbours,
+  renderForm,
 }: {
   row: PayerAliasQueueRow;
   siblings: readonly PayerAliasSiblingRow[];
   neighbours: readonly PayerAliasNeighbourRow[];
+  /** Injected by the page so this leaf stays pure and server-import-free. OMITTED → the card is
+   *  read-only and emits no controls at all, which is what the render guard asserts. */
+  renderForm?: (row: PayerAliasQueueRow) => ReactNode;
 }): ReactNode {
   return (
     <li className="rounded-lg border border-line bg-surface p-4">
@@ -273,6 +281,7 @@ export function QueueCard({
       <ReviewNote note={row.review_note} />
       <SiblingList siblings={siblings} />
       <NeighbourList neighbours={neighbours} />
+      {renderForm ? renderForm(row) : null}
     </li>
   );
 }
@@ -281,10 +290,12 @@ export function QueueList({
   rows,
   siblings,
   neighbours,
+  renderForm,
 }: {
   rows: readonly PayerAliasQueueRow[];
   siblings: Record<string, PayerAliasSiblingRow[]>;
   neighbours: Record<string, PayerAliasNeighbourRow[]>;
+  renderForm?: (row: PayerAliasQueueRow) => ReactNode;
 }): ReactNode {
   if (rows.length === 0) {
     return (
@@ -301,6 +312,7 @@ export function QueueList({
           row={row}
           siblings={siblings[row.alias_norm] ?? []}
           neighbours={neighbours[row.alias_norm] ?? []}
+          renderForm={renderForm}
         />
       ))}
     </ul>
@@ -361,5 +373,177 @@ export function Pager({
         )}
       </div>
     </nav>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════════
+ * THE RULING FORM — the ONLY part of this surface that emits controls.
+ *
+ * Everything above is read-only and the render suite asserts it stays that way: a control appearing
+ * in QueueList, NeighbourList, SiblingList, Pager, VocabularyTabs, ProposalCell, ReviewNote or
+ * ConfidenceValue is a test failure. The exemption is scoped to RulingFormFields alone, so adding a
+ * button to a display leaf still fails even though a form now exists on the page.
+ *
+ * PURE — no hooks, no effects, no server imports. All state and submission are the client island's
+ * (payer-alias-ruling-form.tsx); this renders markup from props so the hermetic suite can assert
+ * labelling, the relationship↔canonical pairing, and the absence of a bulk control.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
+
+/** Human labels for the six relationships. `tpa` and `employer_self_funded` have no rows today and
+ *  are offered anyway — forcing a genuine TPA into `same_payer` writes a permanent falsehood into a
+ *  row whose whole purpose is attributed truth (ruled 2026-09-05). */
+export const RELATIONSHIP_LABELS: Record<PayerAliasRelationship, string> = {
+  same_payer: 'Same payer',
+  carve_out: 'Carve-out',
+  tpa: 'TPA (administers for another)',
+  employer_self_funded: 'Employer, self-funded',
+  program_label: 'Program label (no payer)',
+  unmapped: 'Not a resolvable payer',
+};
+
+export interface RulingFormState {
+  action: RulingAction;
+  relationship: PayerAliasRelationship;
+  canonicalPayerId: string;
+  reviewNote: string;
+}
+
+export function RulingFormFields({
+  alias,
+  state,
+  identities,
+  pending,
+  error,
+  errorField,
+  onChange,
+  idPrefix,
+}: {
+  alias: string;
+  state: RulingFormState;
+  /** Active identities only — the definer rejects a retired canonical, so offering one is a dead end. */
+  identities: ReadonlyArray<{ canonical_payer_id: string; display_name: string; entity_kind: string | null }>;
+  pending: boolean;
+  error: string | null;
+  errorField: string | null;
+  onChange: (patch: Partial<RulingFormState>) => void;
+  /** Namespaces every id so N cards on a page cannot collide their <label for>. */
+  idPrefix: string;
+}): ReactNode {
+  const isDefer = state.action === 'defer';
+  const needsCanonical = !isDefer && RELATIONSHIP_REQUIRES_CANONICAL[state.relationship];
+  const id = (part: string) => `${idPrefix}-${part}`;
+
+  return (
+    <div className="mt-3 border-t border-line pt-3">
+      {/* The alias travels in a hidden field so the island submits the exact stored PK value. It is
+          NOT a link, NOT a route param, and NOT in any data-* a link consumes — alias_norm must
+          never reach a URL. */}
+      <input type="hidden" name="aliasNorm" value={alias} readOnly />
+
+      <fieldset className="flex flex-wrap items-center gap-3" disabled={pending}>
+        <legend className="sr-only">Ruling for {alias}</legend>
+
+        <div>
+          <label htmlFor={id('action')} className="mr-2 text-xs font-medium text-ink600">
+            Action
+          </label>
+          <select
+            id={id('action')}
+            name="action"
+            value={state.action}
+            onChange={(e) => onChange({ action: e.target.value as RulingAction })}
+            className="rounded-md border border-line bg-surface px-2 py-1 text-sm text-ink900"
+          >
+            <option value="confirm">Confirm</option>
+            <option value="defer">Defer with note</option>
+          </select>
+        </div>
+
+        {!isDefer ? (
+          <div>
+            <label htmlFor={id('relationship')} className="mr-2 text-xs font-medium text-ink600">
+              Relationship
+            </label>
+            <select
+              id={id('relationship')}
+              name="relationship"
+              value={state.relationship}
+              onChange={(e) => onChange({ relationship: e.target.value as PayerAliasRelationship })}
+              className="rounded-md border border-line bg-surface px-2 py-1 text-sm text-ink900"
+            >
+              {PAYER_ALIAS_RELATIONSHIPS.map((r) => (
+                <option key={r} value={r}>
+                  {RELATIONSHIP_LABELS[r]}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
+
+        {/* The canonical picker is OMITTED, not disabled, when the relationship forbids one. The
+            CHECK payer_alias_map_relationship_canonical rejects a canonical on program_label /
+            unmapped, so a greyed-out control holding a stale value is a submission waiting to fail. */}
+        {needsCanonical ? (
+          <div>
+            <label htmlFor={id('canonical')} className="mr-2 text-xs font-medium text-ink600">
+              Canonical payer
+            </label>
+            <select
+              id={id('canonical')}
+              name="canonicalPayerId"
+              value={state.canonicalPayerId}
+              onChange={(e) => onChange({ canonicalPayerId: e.target.value })}
+              className="rounded-md border border-line bg-surface px-2 py-1 text-sm text-ink900"
+            >
+              <option value="">Choose…</option>
+              {identities.map((pi) => (
+                <option key={pi.canonical_payer_id} value={pi.canonical_payer_id}>
+                  {pi.display_name}
+                  {pi.entity_kind ? ` · ${pi.entity_kind}` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
+      </fieldset>
+
+      <div className="mt-2">
+        <label htmlFor={id('note')} className="text-xs font-medium text-ink600">
+          Note{isDefer ? ' (required)' : ' (optional)'}
+        </label>
+        <textarea
+          id={id('note')}
+          name="reviewNote"
+          value={state.reviewNote}
+          disabled={pending}
+          maxLength={500}
+          rows={2}
+          required={isDefer}
+          onChange={(e) => onChange({ reviewNote: e.target.value })}
+          placeholder={isDefer ? 'What did you find? A defer without a note records nothing.' : ''}
+          className="mt-1 w-full rounded-md border border-line bg-surface px-2 py-1 text-sm text-ink900"
+        />
+      </div>
+
+      {/* role=alert so a rejection is announced, and aria-describedby wiring is on the control the
+          server blamed — a message that only appears visually is invisible to a screen reader. */}
+      {error !== null ? (
+        <p role="alert" className="mt-2 text-xs text-status-danger">
+          {error}
+          {errorField !== null ? <span className="sr-only"> (field: {errorField})</span> : null}
+        </p>
+      ) : null}
+
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          type="submit"
+          disabled={pending}
+          className="rounded-md bg-teal700 px-3 py-1.5 text-sm font-medium text-surface disabled:opacity-60"
+        >
+          {pending ? 'Saving…' : isDefer ? 'Save note' : 'Confirm ruling'}
+        </button>
+        <span className="text-xs text-ink400">One alias at a time — there is no bulk confirm.</span>
+      </div>
+    </div>
   );
 }

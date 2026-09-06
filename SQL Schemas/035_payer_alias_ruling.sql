@@ -179,17 +179,23 @@ create policy payer_alias_map_ruling_update on ref.payer_alias_map
 -- sloppy in isolation and the obvious "tightening" silently breaks every confirmation. A reader who
 -- finds it in pg_policies must be able to see why without locating this migration.
 comment on policy payer_alias_map_ruling_update on ref.payer_alias_map is
-  'Defence in depth for ref.rule_payer_alias. Scoping is in USING: only rows that are CURRENTLY '
-  'unruled are visible to an UPDATE, so the 695 legacy confirmed rows (029, permanently exempt) are '
-  'structurally unreachable through this policy. '
+  '⚠️ THIS POLICY IS INERT TODAY. It grants nothing and restricts nothing, and you should not read '
+  'it as active protection. claims_admin OWNS ref.payer_alias_map and relforcerowsecurity is false, '
+  'so a table owner bypasses row security entirely — ref.rule_payer_alias reaches its rows on '
+  'OWNERSHIP, never through this policy, and nothing here is currently evaluated. '
+  'IT IS A HEDGE, NOT A GUARD. It becomes load-bearing only if someone sets ALTER TABLE ... FORCE '
+  'ROW LEVEL SECURITY, or changes the definer''s owner to a non-owner role. In either case this '
+  'policy is what stops the write path becoming a silent no-op — an UPDATE that matches zero rows '
+  'and raises nothing, which is this repo''s recurring failure class (0089, 0101, patient_name_bidx). '
+  'It is deliberately kept so that day is a non-event rather than an outage nobody notices. '
+  'WHAT IT WOULD DO IF IT EVER APPLIED: USING restricts UPDATE to rows that are CURRENTLY unruled, '
+  'so the 695 legacy confirmed rows (029, permanently exempt) would be invisible to it. That is a '
+  'restatement of the guard, not the guard itself — the real one is `and needs_review` inside '
+  'ref.rule_payer_alias''s own WHERE ... FOR UPDATE, which IS evaluated on every call. '
   '⚠️ DO NOT "TIGHTEN" `with check (true)`. Omitting WITH CHECK makes Postgres reuse the USING '
   'expression for the POST-update row — here that is `needs_review`, which every confirmation sets '
   'to false, so the policy would reject every confirmation while permitting defers. The permissive '
-  'WITH CHECK is deliberate and load-bearing. '
-  'NOTE this policy is not what grants access today: claims_admin OWNS ref.payer_alias_map and '
-  'relforcerowsecurity is false, so the definer reaches its rows on ownership. This exists so a '
-  'later ALTER TABLE ... FORCE ROW LEVEL SECURITY, or a change of the definer''s owner, cannot turn '
-  'the write path into a silent no-op (the 0089 / 0101 / patient_name_bidx failure class).';
+  'WITH CHECK is deliberate.';
 
 -- ───────────────────────────────────────────────────────────────────────────────────────────────────
 -- 3. THE DEFINER — the one write

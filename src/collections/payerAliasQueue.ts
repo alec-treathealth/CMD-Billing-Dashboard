@@ -248,6 +248,232 @@ export function buildPayerAliasSiblingsQuery(
   };
 }
 
+/** One selectable canonical payer for the ruling form. ACTIVE only — the definer rejects a retired
+ *  identity, so offering one would be a dead end the reviewer only discovers on submit. */
+export interface PayerIdentityOptionRow {
+  canonical_payer_id: string;
+  display_name: string;
+  entity_kind: string | null;
+}
+
+/** All live identities, ordered for a picker. 188 rows today — small enough to send whole. */
+export function buildPayerIdentityOptionsQuery(): { sql: string; params: unknown[] } {
+  return {
+    sql:
+      'select canonical_payer_id, display_name, entity_kind ' +
+      `from ${PAYER_IDENTITY_TABLE} where is_active order by display_name`,
+    params: [],
+  };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════════
+ * THE WRITE PATH — one builder, one definer, and the containment that must precede it.
+ *
+ * Everything above this line is a SELECT over the crosswalk. Everything below exists because
+ * `claims_reader` holds no UPDATE on `ref.payer_alias_map` and never will: the only write is
+ * EXECUTE on `ref.rule_payer_alias`, the SECURITY DEFINER applied by Veris 035.
+ *
+ * ⚠️ THE DEFINER CANNOT SUPPLY FIELD-LEVEL ERRORS, WHICH IS WHY THE CONTAINMENT BELOW EXISTS.
+ * Discovered by probing it live at apply (2026-09-06): its `needs_review` row guard is the FIRST
+ * thing it evaluates, before any field validation. Passing a well-formed-but-wrong relationship for
+ * an alias that is already ruled — or simply misspelled — returns `P0002 no unruled row`, not the
+ * `22023` the field actually deserves. Four probes intended to test relationship validation all came
+ * back P0002 because the fixture alias lived in a different vocabulary.
+ *
+ * That ordering is CORRECT (fail closed on the row before trusting anything about the payload) and
+ * must not be reordered. The consequence is that a user cannot be told which field is wrong by the
+ * database, so every rejection the definer can raise is restated here and checked BEFORE the call.
+ * The definer's own checks remain as the authority — this layer exists for the message, not the
+ * safety.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
+
+/** The two DB-level actions. "Rule as unmapped" is a `confirm` carrying relationship `unmapped`. */
+export const RULING_ACTIONS = ['confirm', 'defer'] as const;
+export type RulingAction = (typeof RULING_ACTIONS)[number];
+
+/**
+ * The `claims.access_audit` action name for a ruling.
+ *
+ * ⚠️ IT LIVES HERE, NOT IN ruling-actions.ts, AND THAT IS NOT ARBITRARY. A `'use server'` module may
+ * export ONLY async functions. Exporting a plain string from one passes `next build`, both
+ * typechecks and both test suites, then throws at first require — "A 'use server' file can only
+ * export async functions, found string" — and the blast radius is the whole PAGE, not the file:
+ * Next generates one action-entry module per page, so a single bad export 500s every Server Action
+ * on it while the page still renders 200. Constants that an action needs belong on this side of the
+ * boundary.
+ */
+export const PAYER_ALIAS_RULING_AUDIT_ACTION = 'payer_alias_ruling_write';
+
+/** `payer_identity_id_shape` + `payer_identity_id_len`, restated. */
+export const CANONICAL_PAYER_ID_RE = /^pi_[a-z0-9_]+$/;
+
+export interface PayerAliasRulingInput {
+  vocabulary: PayerAliasVocabulary;
+  aliasNorm: string;
+  action: RulingAction;
+  /** Required for `confirm`; ignored by the definer for `defer`. */
+  relationship: PayerAliasRelationship | null;
+  canonicalPayerId: string | null;
+  reviewNote: string | null;
+  /** The principal's email, resolved server-side from the session — NEVER client input. */
+  ruledBy: string;
+}
+
+/** A rejection aimed at one form control, so the UI can point at it. */
+export interface RulingFieldError {
+  field: 'alias' | 'action' | 'relationship' | 'canonicalPayerId' | 'reviewNote' | 'ruledBy';
+  message: string;
+}
+
+/**
+ * SHAPE containment — every definer rejection that can be decided WITHOUT touching the database.
+ * Ordered to mirror the definer so the first failure a user sees is the first one it would raise.
+ */
+export function validateRulingShape(input: PayerAliasRulingInput): RulingFieldError | null {
+  if (!(RULING_ACTIONS as readonly string[]).includes(input.action)) {
+    return { field: 'action', message: 'Pick Confirm or Defer.' };
+  }
+  // payer_alias_ruling_audit_ruled_by_len: 3..200. Cannot come from the client, but an empty session
+  // email must never reach the definer as a bare 22023.
+  const ruledBy = input.ruledBy.trim();
+  if (ruledBy.length < 3 || ruledBy.length > 200) {
+    return { field: 'ruledBy', message: 'Your account has no usable email; sign in again.' };
+  }
+  // payer_alias_map_alias_len: 1..200.
+  const alias = input.aliasNorm;
+  if (alias.length < 1 || alias.length > 200) {
+    return { field: 'alias', message: 'That alias is not a valid crosswalk key.' };
+  }
+
+  const note = input.reviewNote === null ? null : input.reviewNote.trim();
+
+  if (input.action === 'defer') {
+    // The definer requires a note on defer — deferring without one records nothing.
+    if (note === null || note.length < 2) {
+      return { field: 'reviewNote', message: 'A defer needs a note saying what you found.' };
+    }
+    if (note.length > 500) {
+      return { field: 'reviewNote', message: 'Keep the note under 500 characters.' };
+    }
+    return null;
+  }
+
+  // ── confirm ──
+  if (input.relationship === null || !(PAYER_ALIAS_RELATIONSHIPS as readonly string[]).includes(input.relationship)) {
+    return { field: 'relationship', message: 'Pick how this alias relates to a canonical payer.' };
+  }
+  // payer_alias_map_review_note_len: 2..500 when present. An empty note is stored as NULL, not ''.
+  if (note !== null && note.length > 0 && (note.length < 2 || note.length > 500)) {
+    return { field: 'reviewNote', message: 'A note must be 2–500 characters, or left blank.' };
+  }
+
+  const requires = RELATIONSHIP_REQUIRES_CANONICAL[input.relationship];
+  if (requires && input.canonicalPayerId === null) {
+    return { field: 'canonicalPayerId', message: `“${input.relationship}” needs a canonical payer.` };
+  }
+  if (!requires && input.canonicalPayerId !== null) {
+    return {
+      field: 'canonicalPayerId',
+      message: `“${input.relationship}” must not carry a canonical payer.`,
+    };
+  }
+  if (input.canonicalPayerId !== null && !CANONICAL_PAYER_ID_RE.test(input.canonicalPayerId)) {
+    return { field: 'canonicalPayerId', message: 'That is not a canonical payer id.' };
+  }
+  return null;
+}
+
+/** What the containment query answers. `null` on either field means "no such row". */
+export interface RulingContainmentFacts {
+  /** `ref.payer_alias_map.needs_review` for the target, or null when the alias does not exist. */
+  rowNeedsReview: boolean | null;
+  /** `ref.payer_identity.is_active` for the proposed canonical, or null when it does not exist. */
+  canonicalActive: boolean | null;
+}
+
+/**
+ * DATABASE containment — the two rejections that need a read: does the target row exist and is it
+ * still unruled, and is the proposed canonical payer real and live.
+ *
+ * ⚠️ THIS IS NOT THE SAFETY BOUNDARY AND MUST NOT BE MISTAKEN FOR ONE. Between this check and the
+ * definer call another reviewer can rule the same row; the definer's own `and needs_review`
+ * re-evaluates under `FOR UPDATE` and is what actually prevents the double-rule. This exists so the
+ * common case produces "already ruled — refresh the queue" instead of an opaque P0002.
+ */
+export function validateRulingContainment(
+  input: PayerAliasRulingInput,
+  facts: RulingContainmentFacts,
+): RulingFieldError | null {
+  if (facts.rowNeedsReview === null) {
+    return { field: 'alias', message: 'That alias is no longer in the queue. Refresh and try again.' };
+  }
+  if (facts.rowNeedsReview === false) {
+    return { field: 'alias', message: 'Someone already ruled this alias. Refresh to see their ruling.' };
+  }
+  if (input.canonicalPayerId !== null) {
+    if (facts.canonicalActive === null) {
+      return { field: 'canonicalPayerId', message: 'That canonical payer does not exist.' };
+    }
+    if (facts.canonicalActive === false) {
+      return { field: 'canonicalPayerId', message: 'That canonical payer is retired — pick a live one.' };
+    }
+  }
+  return null;
+}
+
+/**
+ * The containment READ. Two scalar subqueries, one round trip, both null-when-absent. It is a
+ * SELECT and touches only the two in-scope tables, so it sits under the read-only guard with the
+ * queue builders rather than with the write builder below.
+ */
+export function buildPayerAliasContainmentQuery(
+  vocabulary: PayerAliasVocabulary,
+  aliasNorm: string,
+  canonicalPayerId: string | null,
+): { sql: string; params: unknown[] } {
+  return {
+    sql:
+      'select ' +
+      `(select needs_review from ${PAYER_ALIAS_MAP_TABLE} ` +
+      '  where vocabulary = $1 and alias_norm = $2) as "rowNeedsReview", ' +
+      `(select is_active from ${PAYER_IDENTITY_TABLE} ` +
+      '  where canonical_payer_id = $3) as "canonicalActive"',
+    params: [vocabulary, aliasNorm, canonicalPayerId],
+  };
+}
+
+/**
+ * ⚠️ THE ONLY BUILDER ON THIS SURFACE THAT CAUSES A WRITE. Everything it changes is changed by the
+ * definer, under the definer's owner — this emits a bare `select` of a function call and contains no
+ * write verb of its own, which is exactly the property the read-only guard asserts about it.
+ *
+ * `ref.rule_payer_alias` is the single sanctioned mutation path for `ref.payer_alias_map`; adding a
+ * second write builder here, or an `update` anywhere in this file, is a rule violation that
+ * test/payerAliasQueue.test.ts fails on rather than a style preference.
+ */
+export const PAYER_ALIAS_RULING_FN = 'ref.rule_payer_alias';
+
+export function buildPayerAliasRulingCall(input: PayerAliasRulingInput): {
+  sql: string;
+  params: unknown[];
+} {
+  const note = input.reviewNote === null ? null : input.reviewNote.trim();
+  return {
+    sql: `select ${PAYER_ALIAS_RULING_FN}($1, $2, $3, $4, $5, $6, $7) as ruling_id`,
+    params: [
+      input.vocabulary,
+      input.aliasNorm,
+      input.action,
+      // The definer ignores these two on a defer; passing null keeps the audit row's "new" columns
+      // equal to its "prior" columns, which is what a defer means.
+      input.action === 'confirm' ? input.relationship : null,
+      input.action === 'confirm' ? input.canonicalPayerId : null,
+      note === null || note === '' ? null : note,
+      input.ruledBy.trim(),
+    ],
+  };
+}
+
 /** A confirmed alias that LOOKS like the seed, with the ruling it already received. */
 export interface PayerAliasNeighbourRow {
   seed: string;
