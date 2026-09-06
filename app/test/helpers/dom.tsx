@@ -39,6 +39,7 @@
  * `test/dom/` subdirectory would silently never run. Helpers like this one are fine here because
  * they are imported, not collected.
  */
+import { createRequire } from 'node:module';
 import { JSDOM } from 'jsdom';
 
 /** The globals React 18's DOM renderer and our components touch. Assigned onto `globalThis` because
@@ -77,7 +78,8 @@ function assertReactDomNotYetLoaded(): void {
   // future native-ESM runner the cache is simply unreadable, and a harness guard must never be the
   // thing that breaks the suite it protects.
   const cache = (globalThis as { require?: { cache?: Record<string, unknown> } }).require?.cache
-    ?? (typeof require !== 'undefined' ? require.cache : undefined);
+    ?? (typeof require !== 'undefined' ? require.cache : undefined)
+      ?? createRequire(import.meta.url).cache;
   if (cache === undefined) return;
   const loaded = Object.keys(cache).filter((k) => REACT_DOM_CLIENT_BUNDLE.test(k));
   if (loaded.length === 0) return;
