@@ -322,8 +322,16 @@ export function Pager({
   total: number;
   hasMore: boolean;
 }): ReactNode {
-  const first = total === 0 ? 0 : (page - 1) * pageSize + 1;
-  const last = Math.min(page * pageSize, total);
+  // ⚠️ THE PAGE IS CLAMPED HERE TOO, NOT ONLY IN THE LOADER (M2, 2026-09-06). `clampPage` bounds a
+  // route value to [1, MAX_PAGE] because it cannot know the row count; MAX_PAGE is 200 against a
+  // queue of ~990, so `?p=200` produced first=4976, last=990 — an inverted range, rendered as
+  // "Showing 4976–990 of 990 unruled". The loader now clamps to the real last page, but this leaf is
+  // exported and independently renderable, so it must not depend on a caller having done that: a
+  // presentational component handed an out-of-range page should still print a coherent range.
+  const lastPage = Math.max(1, Math.ceil(total / pageSize));
+  const shown = Math.min(Math.max(1, Math.trunc(page)), lastPage);
+  const first = total === 0 ? 0 : (shown - 1) * pageSize + 1;
+  const last = Math.min(shown * pageSize, total);
   const linkCls =
     'rounded-md border border-line px-3 py-1.5 text-sm text-ink900 hover:bg-ground';
   const deadCls = 'rounded-md border border-line px-3 py-1.5 text-sm text-ink400';
@@ -333,8 +341,8 @@ export function Pager({
         {total === 0 ? 'No unruled rows' : `Showing ${first}–${last} of ${total} unruled`}
       </p>
       <div className="flex gap-2">
-        {page > 1 ? (
-          <a href={pageHref(vocabulary, page - 1)} className={linkCls} rel="prev">
+        {shown > 1 ? (
+          <a href={pageHref(vocabulary, shown - 1)} className={linkCls} rel="prev">
             Previous
           </a>
         ) : (
@@ -342,8 +350,8 @@ export function Pager({
             Previous
           </span>
         )}
-        {hasMore ? (
-          <a href={pageHref(vocabulary, page + 1)} className={linkCls} rel="next">
+        {hasMore && shown < lastPage ? (
+          <a href={pageHref(vocabulary, shown + 1)} className={linkCls} rel="next">
             Next
           </a>
         ) : (

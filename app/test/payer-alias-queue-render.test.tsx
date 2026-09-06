@@ -279,6 +279,53 @@ test('pager range arithmetic is honest at both ends and when empty', () => {
   assert.ok(empty.includes('No unruled rows'), empty);
 });
 
+/**
+ * M2 REGRESSION (2026-09-06). `clampPage` bounds a route value to [1, MAX_PAGE=200] because it
+ * cannot know the row count, so `?p=200` against 990 rows rendered "Showing 4976–990 of 990" — an
+ * inverted range. The loader now clamps to the real last page, but this leaf is exported and
+ * independently renderable, so it re-clamps rather than trusting its caller.
+ *
+ * The original pager test covered page 2, the tail page and empty — never PAST the end, which is
+ * exactly why this shipped green.
+ */
+test('M2: a past-the-end page never renders an inverted range', () => {
+  const html = renderToStaticMarkup(
+    <Pager vocabulary="vob_insurance_co" page={200} pageSize={25} total={990} hasMore={false} />,
+  );
+  assert.equal(html.includes('4976'), false, 'the pre-fix offset must not appear');
+  assert.ok(html.includes('Showing 976–990 of 990 unruled'), html);
+});
+
+test('M2: the rendered range is never inverted at any page, for any total', () => {
+  for (const total of [0, 1, 24, 25, 26, 145, 990]) {
+    for (const page of [1, 2, 6, 40, 200, 1000]) {
+      const html = renderToStaticMarkup(
+        <Pager vocabulary="vob_payer_id" page={page} pageSize={25} total={total} hasMore={false} />,
+      );
+      const m = html.match(/Showing (\d+)–(\d+) of (\d+)/);
+      if (m) {
+        const [first, last, shown] = [Number(m[1]), Number(m[2]), Number(m[3])];
+        assert.ok(first <= last, `inverted at total=${total} page=${page}: ${first}–${last}`);
+        assert.ok(last <= shown, `last exceeds total at total=${total} page=${page}`);
+        assert.ok(first >= 1, `first below 1 at total=${total} page=${page}`);
+      } else {
+        assert.ok(html.includes('No unruled rows'), `total=${total} page=${page} rendered neither`);
+      }
+    }
+  }
+});
+
+test('M2: Next is inert past the end even if a caller passes hasMore=true', () => {
+  // Defensive: the loader would never do this, but the leaf must not emit a link to page 201.
+  const html = renderToStaticMarkup(
+    <Pager vocabulary="vob_insurance_co" page={200} pageSize={25} total={990} hasMore />,
+  );
+  const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map((x) => (x[1] ?? '').replaceAll('&amp;', '&'));
+  for (const h of hrefs) {
+    assert.equal(h.includes('p=201'), false, `emitted a link past the end: ${h}`);
+  }
+});
+
 test('an empty page states it rather than rendering a bare list', () => {
   const html = renderToStaticMarkup(<QueueList rows={[]} siblings={{}} neighbours={{}} />);
   assert.ok(html.includes('Nothing unruled on this page'), html);

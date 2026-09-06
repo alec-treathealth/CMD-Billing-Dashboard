@@ -94,6 +94,8 @@ export default async function PayerAliasesPage({
 
         <QueueList rows={queue.rows} siblings={queue.siblings} neighbours={queue.neighbours} />
 
+        {/* queue.page is already clamped to the real last page by the loader (M2); the Pager
+            re-clamps defensively because it is an independently-renderable leaf. */}
         <Pager
           vocabulary={vocabulary}
           page={queue.page}
