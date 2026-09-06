@@ -1440,7 +1440,16 @@ function ForecastRowControls({
             // The Server Action validates the CANONICAL string independently; 024's CHECK is
             // the third layer. Normalizing here loosens neither of them.
             const amount = normalizeAmountInput(raw);
-            if (amount === null) return;
+             if (amount === null) {
+               if (input instanceof HTMLInputElement) {
+                 input.setCustomValidity('Enter a positive amount up to $9,999,999,999.99.');
+                 input.reportValidity();
+               }
+               return;
+             }
+             if (input instanceof HTMLInputElement) input.setCustomValidity('');
+            // Parser rejection is surfaced above on the amount field.
+              // (The native pattern remains a first-pass check.)
             onEdit?.({ op: 'correct', ...target, amount });
           }}
         >
@@ -1461,6 +1470,7 @@ function ForecastRowControls({
             pattern={AMOUNT_INPUT_PATTERN}
             title={AMOUNT_HINT}
             onBlur={(e) => settleAmountBox(e.currentTarget)}
+              onInput={(e) => e.currentTarget.setCustomValidity('')}
             className="ths-input ths-num"
             aria-label={`Correct amount: ${label}`}
           />
@@ -1610,8 +1620,17 @@ export function AddForecastForm({
           // per-kind CHECK both expect. A silent no-op is better than a submitted-and-rejected
           // round trip; the required/pattern attributes have already told the operator about
           // the common cases before we get here.
-          const amount = normalizeAmountInput(read('amount'));
-          if (!facilityCode || !payerLabel || amount === null) return;
+          const amountInput = f.elements.namedItem('amount');
+            const amount = normalizeAmountInput(read('amount'));
+            if (amount === null) {
+              if (amountInput instanceof HTMLInputElement) {
+                amountInput.setCustomValidity('Enter a positive amount up to $9,999,999,999.99.');
+                amountInput.reportValidity();
+              }
+              return;
+            }
+            if (amountInput instanceof HTMLInputElement) amountInput.setCustomValidity('');
+          if (!facilityCode || !payerLabel) return;
           if (!/^\d{4}-\d{2}-\d{2}$/.test(expectedDate)) return;
           if (methodLabel !== 'EFT' && methodLabel !== 'Check') return;
           onEdit?.({ op: 'add', facilityCode, payerLabel, expectedDate, methodLabel, amount });
@@ -1672,6 +1691,7 @@ export function AddForecastForm({
             pattern={AMOUNT_INPUT_PATTERN}
             title={AMOUNT_HINT}
             onBlur={(e) => settleAmountBox(e.currentTarget)}
+              onInput={(e) => e.currentTarget.setCustomValidity('')}
             required
             placeholder="4200.00"
           />
