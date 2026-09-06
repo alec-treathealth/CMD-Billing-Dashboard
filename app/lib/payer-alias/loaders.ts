@@ -5,10 +5,9 @@
  * page is a Server Component and passes plain data down — there is NO client-side DB access on this
  * surface, and no route handler either.
  *
- * POOL: the qualify/loaders.ts precedent — a module-cached PgExecutor on `makeReaderPool`
- * (claims_reader, max 4, verify-full TLS through the one ssl.ts path, unnamed parameterized queries
- * only for Supavisor 6543). The pool is built LAZILY inside payerAliasReader(), so importing this
- * module reads no env and opens no socket — which is what lets the assembly be tested hermetically.
+ * POOL: shared with the ruling write path via ./db.ts — one lazily-built claims_reader pool serves
+ * both halves of this surface. Importing this module reads no env and opens no socket, which is what
+ * lets the assembly be tested hermetically.
  *
  * ⚠️ DELIBERATELY NOT WRAPPED IN `unstable_cache`. A failed background revalidation there serves the
  * previous value silently, which on a ruling queue would mean a reviewer working a list that no
@@ -18,12 +17,13 @@
  * READ-ONLY. This module issues SELECTs only: no definer call, no INSERT/UPDATE, no audit row. The
  * write chain lives in the Server Action, not here.
  */
-import { PgExecutor, makeReaderPool, readerConnectionStringFromEnv } from '../../../src/queries/executor';
+import { payerAliasDb, type PayerAliasDb } from './db';
 import {
   buildPayerAliasQueueQuery,
   buildPayerAliasQueueCountsQuery,
   buildPayerAliasSiblingsQuery,
   buildPayerAliasNeighboursQuery,
+  buildPayerIdentityOptionsQuery,
   clampPage,
   PAYER_ALIAS_VOCABULARIES,
   QUEUE_PAGE_SIZE,
@@ -31,23 +31,11 @@ import {
   type PayerAliasQueueRow,
   type PayerAliasSiblingRow,
   type PayerAliasVocabulary,
+  type PayerIdentityOptionRow,
 } from '../../../src/collections/payerAliasQueue';
 
-/**
- * The ONLY capability this module needs from a database handle. Declared structurally rather than as
- * `PgExecutor` so the assembly can be exercised against a fake with no pg, no pool and no network —
- * see app/test/payer-alias-loaders.test.tsx. PgExecutor satisfies it as-is.
- */
-export interface QueueReader {
-  query<T>(sql: string, params: readonly unknown[]): Promise<{ rows: T[] }>;
-}
-
-let executor: PgExecutor | null = null;
-/** Module-cached executor on a SEPARATE small claims_reader pool (the verisReaderPool precedent). */
-function payerAliasReader(): QueueReader {
-  if (!executor) executor = new PgExecutor(makeReaderPool(readerConnectionStringFromEnv(), 'payer-alias-queue'));
-  return executor;
-}
+/** Re-exported so existing callers and tests keep one import site for the handle type. */
+export type QueueReader = PayerAliasDb;
 
 export interface PayerAliasQueuePage {
   vocabulary: PayerAliasVocabulary;
@@ -103,7 +91,7 @@ function groupBy<T>(rows: readonly T[], key: (row: T) => string): Record<string,
 export async function loadPayerAliasQueue(
   vocabulary: PayerAliasVocabulary,
   page: number,
-  db: QueueReader = payerAliasReader(),
+  db: QueueReader = payerAliasDb(),
 ): Promise<PayerAliasQueuePage> {
   const countsQ = buildPayerAliasQueueCountsQuery();
   const countsRes = await db.query<{ vocabulary: string; unruled: number }>(countsQ.sql, countsQ.params);
@@ -155,4 +143,13 @@ export async function loadPayerAliasQueue(
     neighbours,
     hasMore: p < lastPage,
   };
+}
+
+/** Active canonical payers for the ruling form's picker. Read-only, like everything else here. */
+export async function loadRulingIdentities(
+  db: QueueReader = payerAliasDb(),
+): Promise<PayerIdentityOptionRow[]> {
+  const q = buildPayerIdentityOptionsQuery();
+  const res = await db.query<PayerIdentityOptionRow>(q.sql, q.params);
+  return res.rows;
 }

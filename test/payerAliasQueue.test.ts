@@ -12,35 +12,88 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  buildPayerAliasContainmentQuery,
   buildPayerAliasNeighboursQuery,
   buildPayerAliasQueueCountsQuery,
   buildPayerAliasQueueQuery,
+  buildPayerAliasRulingCall,
   buildPayerAliasSiblingsQuery,
+  buildPayerIdentityOptionsQuery,
   clampPage,
   clampVocabulary,
   isPayerAliasVocabulary,
   PAYER_ALIAS_RELATIONSHIPS,
+  PAYER_ALIAS_RULING_AUDIT_ACTION,
+  PAYER_ALIAS_RULING_FN,
   PAYER_ALIAS_VOCABULARIES,
   QUEUE_PAGE_SIZE,
   RELATIONSHIP_REQUIRES_CANONICAL,
+  validateRulingContainment,
+  validateRulingShape,
   type PayerAliasRelationship,
 } from '../src/collections/payerAliasQueue.js';
 
-const ALL_BUILDERS = () => [
+/**
+ * ⚠️ THE READ/WRITE SPLIT IS THE GUARD, AND IT WAS TIGHTENED RATHER THAN RELAXED WHEN THE WRITE PATH
+ * LANDED (2026-09-06).
+ *
+ * Before: one list, "no builder emits a write verb". That check would have stayed GREEN when the
+ * definer call arrived, because `select ref.rule_payer_alias(...)` contains no write verb — it would
+ * have gone on asserting a property that had quietly stopped meaning anything.
+ *
+ * After: two lists. READ builders must additionally NOT invoke the definer — a genuinely new
+ * assertion the old grep could not make — and the WRITE list must contain exactly ONE builder, which
+ * must itself be a bare `select` of the definer and nothing else. Adding a second write builder, or
+ * slipping a definer call into a read builder, now fails. The exemption is scoped to one named
+ * function, not to the file.
+ */
+const READ_BUILDERS = () => [
   buildPayerAliasQueueQuery('vob_insurance_co', 1),
   buildPayerAliasQueueCountsQuery(),
   buildPayerAliasSiblingsQuery(['CIGNA'], 'vob_insurance_co'),
   buildPayerAliasNeighboursQuery(['CIGNA']),
+  buildPayerIdentityOptionsQuery(),
+  buildPayerAliasContainmentQuery('vob_insurance_co', 'CIGNA', 'pi_cigna'),
 ];
 
-test('every builder is READ-ONLY — no write verb can reach the database', () => {
-  for (const q of ALL_BUILDERS()) {
+const WRITE_BUILDERS = () => [
+  buildPayerAliasRulingCall({
+    vocabulary: 'vob_insurance_co',
+    aliasNorm: 'CIGNA',
+    action: 'confirm',
+    relationship: 'same_payer',
+    canonicalPayerId: 'pi_cigna',
+    reviewNote: null,
+    ruledBy: 'a@b.co',
+  }),
+];
+
+const ALL_BUILDERS = () => [...READ_BUILDERS(), ...WRITE_BUILDERS()];
+
+const WRITE_VERBS = ['insert ', 'update ', 'delete ', 'truncate', 'drop ', 'alter ', 'grant '];
+
+test('READ builders are read-only — no write verb AND no definer invocation', () => {
+  for (const q of READ_BUILDERS()) {
     const sql = q.sql.toLowerCase();
-    for (const verb of ['insert ', 'update ', 'delete ', 'truncate', 'drop ', 'alter ', 'grant ']) {
-      assert.equal(sql.includes(verb), false, `builder emitted "${verb.trim()}": ${q.sql}`);
+    for (const verb of WRITE_VERBS) {
+      assert.equal(sql.includes(verb), false, `read builder emitted "${verb.trim()}": ${q.sql}`);
     }
-    assert.ok(sql.trimStart().startsWith('select'), 'every builder starts with select');
+    // THE TIGHTENING: a read builder may not reach the write path by calling the definer either.
+    assert.equal(sql.includes('rule_payer_alias'), false, `read builder calls the definer: ${q.sql}`);
+    assert.ok(sql.trimStart().startsWith('select'), 'every read builder starts with select');
   }
+});
+
+test('exactly ONE builder may cause a write, and only through the definer', () => {
+  const writers = WRITE_BUILDERS();
+  assert.equal(writers.length, 1, 'a second write builder is a rule violation, not a refactor');
+  const sql = writers[0]!.sql;
+  // The builder itself still emits no write verb — the mutation is the definer's, under its owner.
+  for (const verb of WRITE_VERBS) {
+    assert.equal(sql.toLowerCase().includes(verb), false, `the write builder emitted "${verb.trim()}"`);
+  }
+  assert.match(sql, /^select ref\.rule_payer_alias\(\$1, \$2, \$3, \$4, \$5, \$6, \$7\) as ruling_id$/);
+  assert.equal(PAYER_ALIAS_RULING_FN, 'ref.rule_payer_alias');
 });
 
 test('no builder uses SELECT * — columns are projected explicitly', () => {
@@ -199,4 +252,157 @@ test('RELATIONSHIP_REQUIRES_CANONICAL mirrors payer_alias_map_relationship_canon
   for (const r of PAYER_ALIAS_RELATIONSHIPS) {
     assert.equal(typeof RELATIONSHIP_REQUIRES_CANONICAL[r], 'boolean', r);
   }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════════
+ * THE WRITE PATH — containment must cover EVERY rejection the definer can raise.
+ *
+ * ⚠️ WHY THIS MATTERS MORE THAN USUAL. Probing the applied definer (2026-09-06) showed its
+ * `needs_review` row guard runs FIRST, before any field validation. So a bad relationship on an
+ * already-ruled (or misspelled) alias returns `P0002 no unruled row`, not the `22023` the field
+ * deserves — the database structurally cannot tell a user which field is wrong. Four probes intended
+ * to exercise relationship validation all came back P0002 for exactly this reason.
+ *
+ * That ordering is correct and must not be reordered. The consequence is that every definer
+ * rejection has to be restated in TS, and this block is the proof that none was missed.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
+
+const baseInput = (over: Partial<Parameters<typeof validateRulingShape>[0]> = {}) => ({
+  vocabulary: 'vob_insurance_co' as const,
+  aliasNorm: 'CIGNA',
+  action: 'confirm' as const,
+  relationship: 'same_payer' as PayerAliasRelationship | null,
+  canonicalPayerId: 'pi_cigna' as string | null,
+  reviewNote: null as string | null,
+  ruledBy: 'alec@treathealth.ai',
+  ...over,
+});
+
+test('containment covers EVERY definer rejection — each names a field, none is left to the DB', () => {
+  // Each row is a rejection ref.rule_payer_alias can raise, and the field a user should be pointed at.
+  const cases: Array<[string, ReturnType<typeof baseInput>, string]> = [
+    ['bad action', baseInput({ action: 'vaporize' as never }), 'action'],
+    ['empty ruled_by', baseInput({ ruledBy: '  ' }), 'ruledBy'],
+    ['ruled_by under 3 chars', baseInput({ ruledBy: 'ab' }), 'ruledBy'],
+    ['alias over 200 chars', baseInput({ aliasNorm: 'x'.repeat(201) }), 'alias'],
+    ['empty alias', baseInput({ aliasNorm: '' }), 'alias'],
+    ['confirm with null relationship', baseInput({ relationship: null }), 'relationship'],
+    ['confirm with unknown relationship', baseInput({ relationship: 'friend' as never }), 'relationship'],
+    ['same_payer without canonical', baseInput({ canonicalPayerId: null }), 'canonicalPayerId'],
+    ['tpa without canonical', baseInput({ relationship: 'tpa', canonicalPayerId: null }), 'canonicalPayerId'],
+    ['carve_out without canonical', baseInput({ relationship: 'carve_out', canonicalPayerId: null }), 'canonicalPayerId'],
+    ['employer_self_funded without canonical', baseInput({ relationship: 'employer_self_funded', canonicalPayerId: null }), 'canonicalPayerId'],
+    ['unmapped WITH canonical', baseInput({ relationship: 'unmapped', canonicalPayerId: 'pi_cigna' }), 'canonicalPayerId'],
+    ['program_label WITH canonical', baseInput({ relationship: 'program_label', canonicalPayerId: 'pi_cigna' }), 'canonicalPayerId'],
+    ['canonical of the wrong shape', baseInput({ canonicalPayerId: 'CIGNA' }), 'canonicalPayerId'],
+    ['canonical with uppercase', baseInput({ canonicalPayerId: 'pi_CIGNA' }), 'canonicalPayerId'],
+    ['defer with no note', baseInput({ action: 'defer', reviewNote: null }), 'reviewNote'],
+    ['defer with a 1-char note', baseInput({ action: 'defer', reviewNote: 'x' }), 'reviewNote'],
+    ['defer with a 501-char note', baseInput({ action: 'defer', reviewNote: 'x'.repeat(501) }), 'reviewNote'],
+    ['confirm with a 501-char note', baseInput({ reviewNote: 'x'.repeat(501) }), 'reviewNote'],
+  ];
+  for (const [name, input, field] of cases) {
+    const err = validateRulingShape(input);
+    assert.ok(err !== null, `${name}: expected a rejection, got none`);
+    assert.equal(err.field, field, `${name}: blamed the wrong field`);
+    assert.ok(err.message.length > 0, `${name}: rejection carries no message`);
+  }
+});
+
+test('containment does NOT over-reject — every legitimate ruling passes', () => {
+  const ok: Array<[string, ReturnType<typeof baseInput>]> = [
+    ['same_payer with canonical', baseInput()],
+    ['carve_out with canonical', baseInput({ relationship: 'carve_out' })],
+    ['tpa with canonical', baseInput({ relationship: 'tpa' })],
+    ['employer_self_funded with canonical', baseInput({ relationship: 'employer_self_funded' })],
+    ['rule as unmapped', baseInput({ relationship: 'unmapped', canonicalPayerId: null })],
+    ['program_label', baseInput({ relationship: 'program_label', canonicalPayerId: null })],
+    ['confirm with a note', baseInput({ reviewNote: 'checked the payer id spine' })],
+    ['confirm with an empty note (stored as NULL)', baseInput({ reviewNote: '' })],
+    ['defer with a note', baseInput({ action: 'defer', reviewNote: 'ambiguous, needs the plan doc' })],
+    ['a 500-char note exactly', baseInput({ reviewNote: 'x'.repeat(500) })],
+    ['a 200-char alias exactly', baseInput({ aliasNorm: 'x'.repeat(200) })],
+  ];
+  for (const [name, input] of ok) {
+    assert.equal(validateRulingShape(input), null, `${name}: rejected a legitimate ruling`);
+  }
+});
+
+test('EVERY relationship is covered by the pairing rule — a seventh cannot slip through unchecked', () => {
+  for (const r of PAYER_ALIAS_RELATIONSHIPS) {
+    const requires = RELATIONSHIP_REQUIRES_CANONICAL[r];
+    // With the canonical it requires → accepted. Without → rejected. Both directions, all six.
+    const withCanon = baseInput({ relationship: r, canonicalPayerId: 'pi_x' });
+    const without = baseInput({ relationship: r, canonicalPayerId: null });
+    assert.equal(validateRulingShape(requires ? withCanon : without), null, `${r}: valid form rejected`);
+    assert.ok(validateRulingShape(requires ? without : withCanon) !== null, `${r}: invalid form accepted`);
+  }
+});
+
+test('DB containment: a missing row, an already-ruled row, and a dead canonical each name a field', () => {
+  const input = baseInput();
+  assert.equal(
+    validateRulingContainment(input, { rowNeedsReview: null, canonicalActive: true })?.field,
+    'alias',
+  );
+  assert.equal(
+    validateRulingContainment(input, { rowNeedsReview: false, canonicalActive: true })?.field,
+    'alias',
+  );
+  assert.equal(
+    validateRulingContainment(input, { rowNeedsReview: true, canonicalActive: null })?.field,
+    'canonicalPayerId',
+  );
+  assert.equal(
+    validateRulingContainment(input, { rowNeedsReview: true, canonicalActive: false })?.field,
+    'canonicalPayerId',
+  );
+  assert.equal(validateRulingContainment(input, { rowNeedsReview: true, canonicalActive: true }), null);
+});
+
+test('DB containment ignores canonical facts when the ruling carries no canonical', () => {
+  const unmapped = baseInput({ relationship: 'unmapped', canonicalPayerId: null });
+  // A null canonicalActive here means "we did not ask", not "it is missing".
+  assert.equal(validateRulingContainment(unmapped, { rowNeedsReview: true, canonicalActive: null }), null);
+});
+
+test('the already-ruled message tells the reviewer to refresh, not that something broke', () => {
+  const err = validateRulingContainment(baseInput(), { rowNeedsReview: false, canonicalActive: true });
+  assert.ok(err !== null, 'an already-ruled row must be rejected');
+  assert.match(err.message, /already ruled/i);
+  assert.match(err.message, /refresh/i);
+});
+
+test('the write builder binds every value, and never interpolates the alias', () => {
+  const q = buildPayerAliasRulingCall(
+    baseInput({ aliasNorm: "O'MALLEY EMPLOYER HEALTH", reviewNote: '  spaced  ' }),
+  );
+  assert.equal(q.sql.includes("O'MALLEY"), false, 'the alias reached the SQL text');
+  assert.equal(q.params[1], "O'MALLEY EMPLOYER HEALTH");
+  assert.equal(q.params[5], 'spaced', 'the note is trimmed before binding');
+  assert.equal(q.params.length, 7);
+});
+
+test('a defer sends null relationship and null canonical — the audit row must show no change', () => {
+  const q = buildPayerAliasRulingCall(
+    baseInput({ action: 'defer', relationship: 'same_payer', canonicalPayerId: 'pi_cigna', reviewNote: 'note' }),
+  );
+  assert.equal(q.params[2], 'defer');
+  assert.equal(q.params[3], null, 'a defer must not carry a relationship');
+  assert.equal(q.params[4], null, 'a defer must not carry a canonical payer');
+});
+
+test('an empty or whitespace-only note binds as NULL, never as an empty string', () => {
+  // payer_alias_map_review_note_len rejects a 0- or 1-char note; NULL is the legal "no note".
+  for (const note of ['', '   ', null]) {
+    const q = buildPayerAliasRulingCall(baseInput({ reviewNote: note }));
+    assert.equal(q.params[5], null, `note ${JSON.stringify(note)} did not bind as null`);
+  }
+});
+
+test('the audit action name is defined on the src side, not exported from the use-server module', () => {
+  // A 'use server' file may export ONLY async functions. Exporting a plain string from one passes
+  // next build, both typechecks and both suites, then 500s EVERY Server Action on the page at first
+  // require. The constant therefore lives here.
+  assert.equal(PAYER_ALIAS_RULING_AUDIT_ACTION, 'payer_alias_ruling_write');
 });

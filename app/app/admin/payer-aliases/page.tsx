@@ -1,11 +1,15 @@
 /**
- * /admin/payer-aliases — the payer-alias RULING QUEUE (Artifact 2: read side only).
+ * /admin/payer-aliases — the payer-alias RULING QUEUE.
  *
- * Shows the 990 rows of `ref.payer_alias_map` that carry `needs_review`, with the context a
- * reviewer needs to rule on each one: the machine's proposal resolved through `ref.payer_identity`,
- * the 029 review note, the same string as ruled under the other vocabularies, and confirmed
- * trigram look-alikes. It ships ZERO writes — no confirm control, no relationship picker, no
- * definer, no audit row. The write chain is Artifact 3.
+ * Shows the rows of `ref.payer_alias_map` that carry `needs_review`, with the context a reviewer
+ * needs to rule on each one — the machine's proposal resolved through `ref.payer_identity`, the 029
+ * review note, the same string as ruled under the other vocabularies, and confirmed trigram
+ * look-alikes — and a form to rule it.
+ *
+ * ⚠️ THIS PAGE'S GATE IS THE FRONT DOOR, NOT THE LOCK. The ruling form is a Client Component and its
+ * only path to the database is `rulePayerAlias`, which re-gates on super_admin, re-validates with
+ * zod .strict(), re-runs containment and calls the definer. A hand-crafted POST that never loads
+ * this page meets exactly the same checks.
  *
  * ── GATE: super_admin, fail-closed ───────────────────────────────────────────────────────────────
  * `export const dynamic = 'force-dynamic'` is a SECURITY control, not a perf setting: without it the
@@ -32,7 +36,7 @@
 import type { Metadata } from 'next';
 import { redirect } from 'next/navigation';
 import { dashboardAccess } from '@/lib/access';
-import { loadPayerAliasQueue } from '@/lib/payer-alias/loaders';
+import { loadPayerAliasQueue, loadRulingIdentities } from '@/lib/payer-alias/loaders';
 import { clampPage, clampVocabulary } from '../../../../src/collections/payerAliasQueue';
 import {
   Pager,
@@ -41,6 +45,7 @@ import {
   VOCAB_LABELS,
   VocabularyTabs,
 } from '@/components/admin/payer-alias-leaves';
+import { PayerAliasRulingForm } from '@/components/admin/payer-alias-ruling-form';
 
 export const metadata: Metadata = { title: 'Payer aliases | CMD Billing' };
 
@@ -68,7 +73,10 @@ export default async function PayerAliasesPage({
   const vocabulary = clampVocabulary(first(params.v));
   const page = clampPage(first(params.p));
 
-  const queue = await loadPayerAliasQueue(vocabulary, page);
+  const [queue, identities] = await Promise.all([
+    loadPayerAliasQueue(vocabulary, page),
+    loadRulingIdentities(),
+  ]);
   const total = queue.counts[vocabulary];
 
   return (
@@ -78,7 +86,7 @@ export default async function PayerAliasesPage({
         <p className="mt-1 text-sm text-ink600">
           Raw payer strings awaiting a ruling. Confirming one sets the canonical payer it resolves
           to for <span className="font-medium">both tenants</span> — this crosswalk has no tenancy
-          dimension by design.
+          dimension by design. Your email and the time are recorded on every ruling.
         </p>
       </header>
 
@@ -92,7 +100,19 @@ export default async function PayerAliasesPage({
           <p className="mt-0.5 text-xs text-ink600">{VOCAB_HINTS[vocabulary]}</p>
         </div>
 
-        <QueueList rows={queue.rows} siblings={queue.siblings} neighbours={queue.neighbours} />
+        <QueueList
+          rows={queue.rows}
+          siblings={queue.siblings}
+          neighbours={queue.neighbours}
+          renderForm={(row) => (
+            <PayerAliasRulingForm
+              vocabulary={vocabulary}
+              alias={row.alias_norm}
+              proposedCanonicalId={row.canonical_payer_id}
+              identities={identities}
+            />
+          )}
+        />
 
         {/* queue.page is already clamped to the real last page by the loader (M2); the Pager
             re-clamps defensively because it is an independently-renderable leaf. */}
@@ -106,8 +126,9 @@ export default async function PayerAliasesPage({
       </section>
 
       <footer className="mt-10 border-t border-line pt-4 text-xs text-ink400">
-        Read-only. Rulings are not yet writable from this screen. No PHI lives on this surface —
-        payer names, payer identifiers and notes only.
+        Every ruling is attributed to you and appended to an audit trail that is never overwritten.
+        One alias at a time — there is no bulk confirm. No PHI lives on this surface: payer names,
+        payer identifiers and notes only.
       </footer>
     </main>
   );
