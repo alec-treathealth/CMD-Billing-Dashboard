@@ -42,6 +42,10 @@ import type {
   UpcomingOverrideRow,
   UpcomingOverrideSummary,
 } from '../../src/veris/upcomingOverride.js';
+import {
+  AMOUNT_INPUT_PATTERN,
+  normalizeAmountInput,
+} from '../../src/veris/upcomingOverrideSheet.js';
 
 const G = (over: Partial<EraUpcomingGroup>): EraUpcomingGroup => ({
   payment_date: '2026-08-03',
@@ -878,10 +882,31 @@ test('Consolidated explains instead of offering a form the server would reject',
 test('the amount field constrains itself to a money shape in the markup', () => {
   // The browser blocks a bad value and announces it on the field — the accessible place for
   // the message — before the client check or the Server Action ever see it.
+  //
+  // Asserted as the SHARED constant, never as a copied literal. The previous version pinned
+  // the regex text, so widening the accepted money forms failed this test for the wrong
+  // reason: what it protects is that native validation EXISTS on the field, not which
+  // characters it happens to allow this month.
   const html = renderForm(FACILITIES);
-  assert.ok(html.includes('pattern="\\d{1,10}(\\.\\d{1,2})?"'), 'money pattern is on the input');
+  assert.ok(html.includes(AMOUNT_INPUT_PATTERN), 'money pattern is on the input');
   assert.ok(html.includes('type="date"'), 'native date input, not a parsed text field');
   assert.ok(html.includes('required'), 'the required fields are marked for the browser');
+});
+
+test('the amount field ACCEPTS the money forms an operator types, not just bind syntax', () => {
+  // The regression this pins: `pattern` once mirrored the numeric(12,2) bind shape, so the
+  // browser refused `50,000` before any code could normalize it. The pattern is a first
+  // filter and must stay LOOSER than the parser — every form the parser can read has to
+  // survive the markup gate, or the operator never reaches the parser at all.
+  const gate = new RegExp(`^(?:${AMOUNT_INPUT_PATTERN})$`, 'v');
+  for (const typed of ['50,000', '$50,000', '$ 50,000.00', '4200', '4200.5', '4200.50']) {
+    assert.ok(gate.test(typed), `the browser lets "${typed}" through`);
+    assert.ok(normalizeAmountInput(typed) !== null, `and the parser reads "${typed}"`);
+  }
+  // One-directional: the gate may pass what the parser rejects, never the reverse.
+  for (const junk of ['abc', '-10', '1,23.00', '12.345']) {
+    assert.ok(!gate.test(junk), `the browser blocks "${junk}" and says so on the field`);
+  }
 });
 
 test('payerSuggestions dedupes across both feeds, forecast vocabulary first', () => {
@@ -1050,7 +1075,7 @@ test('the correct-amount box carries native validation, not a silent return', ()
   );
   assert.ok(html.includes('Correct amount:'), 'the box renders for a sheet-origin row');
   assert.ok(
-    html.includes('pattern="\\d{1,10}(\\.\\d{1,2})?"'),
+    html.includes(AMOUNT_INPUT_PATTERN),
     'a bad amount is blocked and announced ON THE FIELD rather than swallowed by a bare return',
   );
 });

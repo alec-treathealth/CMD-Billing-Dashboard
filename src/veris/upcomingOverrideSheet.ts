@@ -212,6 +212,43 @@ export function fixed2FromCents(cents: number): string {
 }
 
 /**
+ * The same money contract as `centsFromCurrency`, expressed for the HTML `pattern`
+ * attribute so the browser can announce a malformed amount ON THE FIELD (the accessible
+ * place for it) before a submit handler ever runs.
+ *
+ * ⚠️ It deliberately does NOT match `centsFromCurrency` exactly, and the gap is one-directional
+ * ON PURPOSE: `pattern` is a FIRST filter, not the decision. It lets through `$0.00` and
+ * `$ -`-adjacent shapes that `normalizeAmountInput` then rejects, because a regex cannot
+ * express "> 0" or the ten-digit numeric(12,2) ceiling. Nothing may pass this and fail to be
+ * re-checked below. Keep it LOOSER than the parser, never tighter — a tighter pattern is the
+ * bug this module exists to fix, where the browser blocked `50,000` before any code could
+ * normalize it.
+ */
+export const AMOUNT_INPUT_PATTERN = '\\s*\\$?\\s*(\\d{1,3}(,\\d{3})*|\\d+)(\\.\\d{1,2})?\\s*';
+
+/**
+ * Hand-typed money text → the canonical fixed-2 string the write path binds, or null.
+ *
+ * This is the OPERATOR-FACING half of the contract `centsFromCurrency` already implements for
+ * the hourly sheet sync, and it exists because the two halves had drifted: the cron happily
+ * read `$35,000.00` out of the workbook while the Overview forecast form next to it rejected
+ * the identical string, because that form's `pattern` mirrored the numeric(12,2) BIND SHAPE
+ * instead of what a human types. An operator was being asked to hand-key a SQL bind value.
+ *
+ * Null is a REJECTION, never a fallback — same discipline as `resolveFacilityCode`. It covers
+ * blanks, junk, negatives and takebacks, the `$ -` sentinel, and zero (024 CHECKs amount > 0).
+ *
+ * The return value is guaranteed to satisfy `\d{1,10}(\.\d{1,2})?` — the shape the Server
+ * Action's validator and 024's CHECK both gate on — so normalizing here LOOSENS nothing
+ * downstream. The trust boundary keeps its strict contract; only the typing does not.
+ */
+export function normalizeAmountInput(raw: string): string | null {
+  const cents = centsFromCurrency(raw);
+  if (cents === null || cents <= 0) return null;
+  return fixed2FromCents(cents);
+}
+
+/**
  * Parse the sheet's `MM/DD/YYYY` to an ISO `YYYY-MM-DD`, STRICTLY.
  *
  * Strict means the round trip is verified: `02/30/2026` parses arithmetically into March 2

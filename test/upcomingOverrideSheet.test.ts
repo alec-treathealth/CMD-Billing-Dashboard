@@ -19,6 +19,7 @@ import {
   fixed2FromCents,
   isoFromSheetDate,
   knownFacilityCodes,
+  normalizeAmountInput,
   normalizeFacilityLabel,
   parseOverrideSheet,
   resolveFacilityCode,
@@ -479,4 +480,39 @@ test('THE LIVE SHEET SHAPE: junk row, abandoned header, section title, interior 
 
   // And the PHI drop holds across the whole live shape.
   assert.equal(JSON.stringify(out).includes(PHI_NAME), false, 'patient name leaked');
+});
+
+/**
+ * normalizeAmountInput — the HAND-TYPED half of the same money contract.
+ *
+ * The sheet sync has accepted `$35,000.00` since it shipped; the operator form next to it
+ * rejected the identical string, because its HTML `pattern` mirrored the numeric(12,2) bind
+ * shape instead of what a human types. These assertions pin the two halves together: the
+ * forms of money the CRON reads are exactly the forms the FORM reads, and the output is
+ * always a string 024's CHECK accepts.
+ */
+test('normalizeAmountInput accepts the money forms an operator actually types', () => {
+  assert.equal(normalizeAmountInput('50,000'), '50000.00');
+  assert.equal(normalizeAmountInput('$50,000'), '50000.00');
+  assert.equal(normalizeAmountInput('$ 50,000.00'), '50000.00');
+  assert.equal(normalizeAmountInput('  4200  '), '4200.00');
+  assert.equal(normalizeAmountInput('4200.5'), '4200.50'); // one decimal digit pads
+  assert.equal(normalizeAmountInput('4200.50'), '4200.50');
+});
+
+test('normalizeAmountInput REJECTS what the three layers below it reject', () => {
+  // Zero and negatives: 024 CHECKs amount > 0. Junk and bad grouping: not money at all.
+  for (const v of ['', '0', '$0.00', '$ -', '-10', '($10.00)', '1,23.00', '12.345', 'abc']) {
+    assert.equal(normalizeAmountInput(v), null, v);
+  }
+});
+
+test('normalizeAmountInput output always satisfies the storage shape AMOUNT_RE gates on', () => {
+  const storageShape = /^\d{1,10}(\.\d{1,2})?$/;
+  for (const v of ['50,000', '$1', '$ 9,999,999,999.99', '0.01', '1234.5']) {
+    const out = normalizeAmountInput(v);
+    assert.ok(out !== null && storageShape.test(out), `${v} -> ${out}`);
+  }
+  // One digit past numeric(12,2)'s ten-digit whole part is a rejection, not a truncation.
+  assert.equal(normalizeAmountInput('10,000,000,000'), null);
 });

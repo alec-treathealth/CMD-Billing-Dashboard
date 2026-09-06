@@ -73,6 +73,10 @@ import type {
   UpcomingOverrideSummary,
 } from '../../../src/veris/upcomingOverride.js';
 import {
+  AMOUNT_INPUT_PATTERN,
+  normalizeAmountInput,
+} from '../../../src/veris/upcomingOverrideSheet.js';
+import {
   resolveForecast,
   suggestLandedMatches,
   type HiddenForecastRow,
@@ -337,8 +341,23 @@ export interface ForecastFacilityOption {
   label: string;
 }
 
-/** The amount shape 024 accepts: up to 10 digits, at most 2 decimals, positive. */
-const AMOUNT_RE = /^\d{1,10}(\.\d{1,2})?$/;
+/**
+ * Settle a money box to the exact string that will be SAVED, the moment focus leaves it.
+ *
+ * Not cosmetic. `50,000` and `$50,000` are now accepted, which means what the operator typed
+ * and what lands in numeric(12,2) are no longer the same characters — on a field that files a
+ * dollar figure into somebody's book, that gap has to be shown BEFORE the click, not inferred
+ * from the tile afterwards. Unparseable text is left exactly as typed so the browser's own
+ * `pattern` message stays pointed at what the operator wrote.
+ */
+function settleAmountBox(el: HTMLInputElement): void {
+  const settled = normalizeAmountInput(el.value);
+  if (settled !== null) el.value = settled;
+}
+
+/** Human-readable statement of what `AMOUNT_INPUT_PATTERN` accepts. Shown as the field's tooltip
+ * AND as the browser's validation message, so it must read as an instruction, not a regex. */
+const AMOUNT_HINT = 'Dollars — 4200, 4200.50, 50,000 and $50,000 all work';
 
 /**
  * Small pill marking a leaf's epistemic class. Text-labelled, never color-only.
@@ -1409,15 +1428,20 @@ function ForecastRowControls({
             e.preventDefault();
             const input = e.currentTarget.elements.namedItem('amount');
             const raw = input instanceof HTMLInputElement ? input.value.trim() : '';
-            // SECOND LAYER, not the user-facing one. `required` + `pattern` below mean the
-            // browser blocks a malformed amount before submit and announces it ON THE FIELD,
-            // which is the accessible place for it and the idiom AddForecastForm already uses.
-            // This guard used to be the ONLY check, and a bare `return` here was a silent
-            // no-op — the exact class of dead control this whole change exists to remove.
-            // It survives as defence for a programmatic submit, where there is no operator to
-            // tell. The Server Action validates independently; 024's CHECK is the third layer.
-            if (!AMOUNT_RE.test(raw)) return;
-            onEdit?.({ op: 'correct', ...target, amount: raw });
+            // NORMALIZE, then check. `pattern` below is deliberately looser than this parser
+            // (it cannot express "> 0" or the ten-digit ceiling), so the browser having let the
+            // value through is not a verdict — it only means an operator got a message on the
+            // field, which is the accessible place for it.
+            //
+            // The null branch stays as defence for a programmatic submit, where there is no
+            // operator to tell. It is not the user-facing layer and must never be the only
+            // check: a bare `return` here was once exactly that, and a silent no-op on a money
+            // control is the class of dead control this form has already had to remove once.
+            // The Server Action validates the CANONICAL string independently; 024's CHECK is
+            // the third layer. Normalizing here loosens neither of them.
+            const amount = normalizeAmountInput(raw);
+            if (amount === null) return;
+            onEdit?.({ op: 'correct', ...target, amount });
           }}
         >
           <input
@@ -1425,12 +1449,18 @@ function ForecastRowControls({
             inputMode="decimal"
             name="amount"
             defaultValue={item.amount ?? ''}
+            // Left at 9 DELIBERATELY. `.ths-num` sets only the font, so `size` really is this
+            // box's width, and widening it for `$ 50,000.00` is a layout change to a tile row
+            // that has had no browser pass. The value SETTLES on blur to the shorter canonical
+            // string, which is the one that has to be readable; the longer typed form scrolls
+            // within the box the way any text input does.
             size={9}
             required
-            // Mirrors AMOUNT_RE. Kept as a literal because the `pattern` attribute takes a
-            // string, not a RegExp — if you change one, change both.
-            pattern="\d{1,10}(\.\d{1,2})?"
-            title="Dollars, up to two decimals — e.g. 4200 or 4200.50"
+            // Shared with the parser that reads it — see AMOUNT_INPUT_PATTERN's docblock for
+            // why this is the LOOSER of the two and must stay that way.
+            pattern={AMOUNT_INPUT_PATTERN}
+            title={AMOUNT_HINT}
+            onBlur={(e) => settleAmountBox(e.currentTarget)}
             className="ths-input ths-num"
             aria-label={`Correct amount: ${label}`}
           />
@@ -1576,11 +1606,12 @@ export function AddForecastForm({
           const payerLabel = read('payerLabel');
           const expectedDate = read('expectedDate');
           const methodLabel = read('methodLabel');
-          const amount = read('amount');
-          // Mirrors the Server Action's validator and 024's per-kind CHECK. A silent no-op is
-          // better than a submitted-and-rejected round trip; the required/pattern attributes
-          // mean the browser has already blocked the common cases before we get here.
-          if (!facilityCode || !payerLabel || !AMOUNT_RE.test(amount)) return;
+          // Normalized to the canonical fixed-2 string the Server Action's validator and 024's
+          // per-kind CHECK both expect. A silent no-op is better than a submitted-and-rejected
+          // round trip; the required/pattern attributes have already told the operator about
+          // the common cases before we get here.
+          const amount = normalizeAmountInput(read('amount'));
+          if (!facilityCode || !payerLabel || amount === null) return;
           if (!/^\d{4}-\d{2}-\d{2}$/.test(expectedDate)) return;
           if (methodLabel !== 'EFT' && methodLabel !== 'Check') return;
           onEdit?.({ op: 'add', facilityCode, payerLabel, expectedDate, methodLabel, amount });
@@ -1635,10 +1666,12 @@ export function AddForecastForm({
             name="amount"
             className="ths-input ths-num"
             inputMode="decimal"
-            // pattern mirrors AMOUNT_RE so the browser blocks a bad value before submit and
-            // announces it on the field, which is the accessible place for the message.
-            pattern="\d{1,10}(\.\d{1,2})?"
-            title="Dollars, up to two decimals — e.g. 4200 or 4200.50"
+            // Looser than normalizeAmountInput on purpose: the browser announces a malformed
+            // amount on the field, which is the accessible place for the message, and the
+            // parser above makes the actual decision.
+            pattern={AMOUNT_INPUT_PATTERN}
+            title={AMOUNT_HINT}
+            onBlur={(e) => settleAmountBox(e.currentTarget)}
             required
             placeholder="4200.00"
           />
