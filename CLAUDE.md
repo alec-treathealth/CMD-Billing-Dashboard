@@ -54,10 +54,29 @@ cardinality is not subset.
 | Product orientation — what this app actually is | `README.md` | 7 |
 | AR build plan — the current CMD AR Automation work | `CMD AR Automation — Build Doc v2.md` | 8 |
 | Kipu API recon — endpoints, signing scheme, and how to read a 403 | `docs/KIPU-CLAIMS-DESK-RECON-2026-08-20.md` | 9 |
+| Claims Desk work-queue design — a PROPOSAL awaiting rulings, not shipped behaviour | `docs/CLAIMS-DESK-QUEUE-DESIGN-2026-09-03.md` | 10 |
 
 Read-order is a cold-start sequence, not a priority ranking. Path-scoped rules in
 `.claude/rules/` load automatically and are not listed here — see
 [Where the detail lives](#where-the-detail-lives).
+
+> **Read-order 10 is a DESIGN PROPOSAL, and every other row is not — do not read it as
+> state.** `docs/CLAIMS-DESK-QUEUE-DESIGN-2026-09-03.md` describes a Claims Desk claim-grain
+> work queue that **does not exist**: as of 2026-09-05 there is no migration 0108, no
+> `claims.desk_item` / `desk_note` / `desk_event` / `desk_lane_rule`, no
+> `src/billingAudit/deskClassifier.ts`, and no `claims-desk-*` cron route. The Flag Queue
+> subtab still renders the hardcoded `PHASE 3 · NOT YET ACTIVATED` placeholder
+> (`app/components/billing-audit/workbench.tsx:194`) and `auditRowMap.ts:683` still hardcodes
+> `last_fu_note: null`. Its §9 decisions (a)–(g) are **unruled**, and §9(c) in particular asks
+> to reverse a recorded PHI-surface reduction — nothing in it is authorised by being
+> registered here.
+>
+> Its **measurements** are a different matter and are what earn it the row: the CLP01 ↔ CMD-key
+> join rates, the `audit_row` / 835 / `ref.carc_code` population counts, the AR-report note
+> sweep, and the CARC group-split figures were measured against the live database and CMD on
+> 2026-09-03 and are re-derivable from the provenance appendix. Registered so a later session
+> does not re-run that recon from scratch. **One item has already rotted:** its risk 7 says
+> local `origin/main` is behind at `dba1e90..40c98f9` — `40c98f9` is on `origin/main` now.
 
 ### Artifact-kind rules — ask this SEPARATELY from the path globs
 
