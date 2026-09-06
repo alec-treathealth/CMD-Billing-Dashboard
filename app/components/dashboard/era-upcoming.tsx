@@ -359,6 +359,40 @@ function settleAmountBox(el: HTMLInputElement): void {
  * AND as the browser's validation message, so it must read as an instruction, not a regex. */
 const AMOUNT_HINT = 'Dollars — 4200, 4200.50, 50,000 and $50,000 all work';
 
+/** What the PARSER rejects but the pattern cannot express: `> 0` (024's CHECK) and the ten-digit
+ *  numeric(12,2) ceiling. Stated as the bound, not as "invalid", so it tells the operator what
+ *  to do next. */
+const AMOUNT_REJECT_HINT = 'Enter a dollar amount above 0 and below 10,000,000,000';
+
+/**
+ * Announce a PARSER rejection on the field itself, and stop.
+ *
+ * ⚠️ THIS EXISTS BECAUSE WIDENING `pattern` REOPENED A HOLE UNDER IT (Qodo #329, 2026-09-05).
+ * The pattern is deliberately looser than `normalizeAmountInput` — a regex cannot express "> 0"
+ * or the ten-digit ceiling — which means values like `0` and `10,000,000,000` now sail past the
+ * browser and die in the parser. Before this change BOTH were visibly refused: `0` reached the
+ * Server Action and came back as a failed write (024 CHECKs `amount > 0`), and `10,000,000,000`
+ * was blocked by the old ten-digit `pattern` with a message on the field. A bare `return` here
+ * would have regressed both into silence — the exact dead-control failure the docblock in
+ * ForecastRowControls warns about, reintroduced by the change that cites it.
+ *
+ * `setCustomValidity` + `reportValidity` keeps the message in the SAME place the native
+ * constraints put theirs, which is the accessible one, instead of inventing a second channel.
+ * Cleared on the next keystroke by `clearAmountRejection` — a stale custom validity would make
+ * the field permanently unsubmittable.
+ */
+function rejectAmountBox(el: HTMLInputElement | null): void {
+  if (el === null) return;
+  el.setCustomValidity(AMOUNT_REJECT_HINT);
+  el.reportValidity();
+}
+
+/** Drop any parser rejection so the operator's correction can submit. Native `required` /
+ *  `pattern` are untouched — clearing the CUSTOM message never clears those. */
+function clearAmountRejection(el: HTMLInputElement): void {
+  if (el.validationMessage !== '') el.setCustomValidity('');
+}
+
 /**
  * Small pill marking a leaf's epistemic class. Text-labelled, never color-only.
  *
@@ -1440,7 +1474,10 @@ function ForecastRowControls({
             // The Server Action validates the CANONICAL string independently; 024's CHECK is
             // the third layer. Normalizing here loosens neither of them.
             const amount = normalizeAmountInput(raw);
-            if (amount === null) return;
+            if (amount === null) {
+              rejectAmountBox(input instanceof HTMLInputElement ? input : null);
+              return;
+            }
             onEdit?.({ op: 'correct', ...target, amount });
           }}
         >
@@ -1460,6 +1497,7 @@ function ForecastRowControls({
             // why this is the LOOSER of the two and must stay that way.
             pattern={AMOUNT_INPUT_PATTERN}
             title={AMOUNT_HINT}
+            onInput={(e) => clearAmountRejection(e.currentTarget)}
             onBlur={(e) => settleAmountBox(e.currentTarget)}
             className="ths-input ths-num"
             aria-label={`Correct amount: ${label}`}
@@ -1596,22 +1634,25 @@ export function AddForecastForm({
         onSubmit={(e) => {
           e.preventDefault();
           const f = e.currentTarget;
-          const read = (name: string): string => {
+          const field = (name: string): HTMLInputElement | HTMLSelectElement | null => {
             const el = f.elements.namedItem(name);
-            return el instanceof HTMLInputElement || el instanceof HTMLSelectElement
-              ? el.value.trim()
-              : '';
+            return el instanceof HTMLInputElement || el instanceof HTMLSelectElement ? el : null;
           };
+          const read = (name: string): string => field(name)?.value.trim() ?? '';
           const facilityCode = read('facilityCode');
           const payerLabel = read('payerLabel');
           const expectedDate = read('expectedDate');
           const methodLabel = read('methodLabel');
           // Normalized to the canonical fixed-2 string the Server Action's validator and 024's
-          // per-kind CHECK both expect. A silent no-op is better than a submitted-and-rejected
-          // round trip; the required/pattern attributes have already told the operator about
-          // the common cases before we get here.
+          // per-kind CHECK both expect. A parser rejection is ANNOUNCED, not swallowed — see
+          // rejectAmountBox for why a bare `return` here would have been a regression.
+          if (!facilityCode || !payerLabel) return;
+          const amountEl = field('amount');
           const amount = normalizeAmountInput(read('amount'));
-          if (!facilityCode || !payerLabel || amount === null) return;
+          if (amount === null) {
+            rejectAmountBox(amountEl instanceof HTMLInputElement ? amountEl : null);
+            return;
+          }
           if (!/^\d{4}-\d{2}-\d{2}$/.test(expectedDate)) return;
           if (methodLabel !== 'EFT' && methodLabel !== 'Check') return;
           onEdit?.({ op: 'add', facilityCode, payerLabel, expectedDate, methodLabel, amount });
@@ -1671,6 +1712,7 @@ export function AddForecastForm({
             // parser above makes the actual decision.
             pattern={AMOUNT_INPUT_PATTERN}
             title={AMOUNT_HINT}
+            onInput={(e) => clearAmountRejection(e.currentTarget)}
             onBlur={(e) => settleAmountBox(e.currentTarget)}
             required
             placeholder="4200.00"

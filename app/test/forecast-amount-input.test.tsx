@@ -151,6 +151,67 @@ test('a value the parser rejects emits NOTHING — normalization did not widen t
   }
 });
 
+test('a parser rejection is ANNOUNCED on the field, not swallowed by a bare return', async (t) => {
+  /*
+   * THE REGRESSION THIS PINS (Qodo #329). Widening `pattern` let values through that the parser
+   * still refuses, and both of these were VISIBLY refused before the change:
+   *   - `0` matched the old pattern AND the old AMOUNT_RE, reached the Server Action, and came
+   *     back as a failed write — 024 CHECKs `amount > 0`.
+   *   - `10,000,000,000` is eleven digits, so the old `\d{1,10}` pattern blocked it with a
+   *     message on the field.
+   * A bare `return` would have turned both into silence, which is the dead-control failure the
+   * component's own docblock warns about. The message has to land on the FIELD — the same place
+   * `required` and `pattern` put theirs — not in a second channel of our own invention.
+   */
+  for (const rejected of ['0', '$0.00', '10,000,000,000']) {
+    const { intents, form, field } = await mountForm(t);
+    fillNonAmount(field);
+    const amount = field('amount') as HTMLInputElement;
+    amount.value = rejected;
+    await submit(form);
+    assert.equal(intents.length, 0, `"${rejected}" filed nothing`);
+    assert.notEqual(amount.validationMessage, '', `"${rejected}" says why on the field`);
+    assert.match(amount.validationMessage, /above 0 and below/, 'and names the bound');
+  }
+});
+
+test('the next keystroke clears the rejection, so a correction can actually submit', async (t) => {
+  // Without this the custom validity STICKS and the field is permanently unsubmittable — a
+  // worse dead control than the one being fixed.
+  const { intents, form, field } = await mountForm(t);
+  fillNonAmount(field);
+  const amount = field('amount') as HTMLInputElement;
+  amount.value = '0';
+  await submit(form);
+  assert.notEqual(amount.validationMessage, '', 'rejected first');
+
+  await React.act(async () => {
+    amount.value = '50,000';
+    amount.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  assert.equal(amount.validationMessage, '', 'the rejection is gone');
+
+  await submit(form);
+  const intent = intents[0];
+  assert.ok(intent !== undefined && intent.op === 'add', 'and the corrected value submits');
+  assert.equal(intent.amount, '50000.00');
+});
+
+test('clearing a REJECTION never clears the native constraints underneath it', async (t) => {
+  // setCustomValidity('') drops only our message. `required` still has to hold, or this helper
+  // would quietly turn the amount box into an optional field.
+  const { field } = await mountForm(t);
+  const amount = field('amount') as HTMLInputElement;
+  amount.value = '0';
+  amount.setCustomValidity('rejected');
+  await React.act(async () => {
+    amount.value = '';
+    amount.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  assert.equal(amount.checkValidity(), false, 'still invalid — `required` is untouched');
+  assert.equal(amount.validity.valueMissing, true, 'and for the RIGHT reason');
+});
+
 test('leaving the box settles it to the exact string that will be saved', async (t) => {
   // WHY THIS IS NOT COSMETIC: now that what you type and what is stored can differ, the
   // operator has to see the resolved figure BEFORE clicking Save, not infer it from the tile

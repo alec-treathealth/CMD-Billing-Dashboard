@@ -166,17 +166,40 @@ fresh clone and in CI, not only on Alec's machine.
 - **Tests stay hermetic** — `node:test` only, no new test-runner deps, no live
   LLM/DB in `npm test`. `src/liveProbe.ts` is the separate manual live probe.
   **`jsdom` is the ONE sanctioned exception** (app devDependency, added
-  2026-08-15): `node:test` is still the runner, and jsdom exists solely so
-  FOCUS and KEYBOARD behaviour can be executed rather than asserted as markup —
-  `useDialog`'s effect is SSR-inert, so a `renderToStaticMarkup` test can prove
-  `role="dialog"` is present but never that focus moved, that Escape closed, or
-  that Tab was trapped. Those are WCAG 2.1.1 / 2.4.3 claims and a compliance PR
-  should not assert them untested. **Scope it hard:** jsdom has no layout engine
+  2026-08-15): `node:test` is still the runner, and jsdom exists so EXECUTED
+  BEHAVIOUR — anything that needs a real event dispatched or an effect actually
+  run — can be proven rather than asserted as markup. `useDialog`'s effect is
+  SSR-inert, so a `renderToStaticMarkup` test can prove `role="dialog"` is
+  present but never that focus moved, that Escape closed, or that Tab was
+  trapped. Those are WCAG 2.1.1 / 2.4.3 claims and a compliance PR should not
+  assert them untested.
+
+  ⚠ **THE LINE IS EVENT DISPATCH vs. LAYOUT — NOT "focus and keyboard" (widened
+  2026-09-05, ruled by Alec).** This bullet read "solely so FOCUS and KEYBOARD
+  behaviour can be executed" until PR #329, and Qodo correctly flagged a submit
+  test as outside the letter of it. The letter was wrong, not the test: the
+  prohibition immediately below has always been about layout and paint, and a
+  `submit`/`input`/`blur` handler is the same KIND of claim as a keydown
+  handler — a string render cannot observe any of them. The rule now says what
+  it always enforced. **What this does NOT license is testing pure logic through
+  the DOM**: if a function can be tested directly, test it directly (this
+  change's parser lives in `test/upcomingOverrideSheet.test.ts` for exactly that
+  reason). jsdom earns its keep only where the claim is that the COMPONENT IS
+  WIRED to that logic — the failure a pure test structurally cannot see.
+
+  **Scope it hard:** jsdom has no layout engine
   and no paint, so it must NEVER be used for contrast, target size
   (`getBoundingClientRect()` returns zeros), sticky-header overlap, or what a
   screen reader actually announces — those stay browser-verified. See
   `app/test/helpers/dom.tsx` for the full boundary and
-  `app/test/dialog-focus.test.tsx` for the pattern.
+  `app/test/dialog-focus.test.tsx` for the focus/keyboard pattern,
+  `app/test/forecast-amount-input.test.tsx` for the wired-handler one.
+
+  ⚠ **`installDom()` REFUSES to run if `react-dom/client` was already imported**
+  (added 2026-09-05). ES imports hoist above it, so a static import makes
+  react-dom cache `canUseDOM === false` and arm an IE polyfill that throws on
+  the first focused text input — silently skipping your handlers. Load the
+  client renderer LAZILY, after `installDom()`.
 - **Never add a `Co-Authored-By` trailer** to a commit or PR.
 - **Gate outward-facing actions.** Show results and HOLD before applying a
   migration, committing, pushing, or deploying. Don't add or alter SQL query
