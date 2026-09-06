@@ -19,20 +19,32 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import * as React from 'react';
-import { createRoot } from 'react-dom/client';
 import { installDom, pressKey } from './helpers/dom';
 import { VobModal } from '../components/qualify/vob-modal';
 
-// INSTALLED AT MODULE SCOPE, BEFORE ANY TEST RUNS — but AFTER the imports above, which is safe here
-// and worth stating because it looks fragile: neither `react-dom/client` nor anything in the
-// vob-modal chain (`react`, `lucide-react`, `useDialog`) touches `document` at import time. They
-// read it lazily, inside render and inside effects, both of which happen in `mount()` below. If a
-// future component under test DOES reach for `document` at module scope, this file will fail loudly
-// at import rather than silently — and the fix is a dynamic import, not a global setup file.
+// INSTALLED AT MODULE SCOPE, BEFORE ANY TEST RUNS. The static imports above are safe to hoist past
+// it: nothing in the vob-modal chain (`react`, `lucide-react`, `useDialog`) touches `document` at
+// import time — they read it lazily, inside render and inside effects, both of which happen in
+// `mount()` below.
 //
-// (Top-level `await import(...)` would be the more obviously-correct ordering, but tsx compiles
-// these tests to CJS, where top-level await is a syntax error.)
+// ⚠️ `react-dom/client` USED TO BE UP THERE WITH THEM, AND IT WAS NOT SAFE — corrected 2026-09-05.
+// react-dom caches `canUseDOM` at module-evaluation time, so hoisting it above `installDom()` made
+// it conclude "not a browser" and arm an Internet Explorer polyfill that throws on the first
+// focused TEXT INPUT. This file passed anyway, purely because `VobModal` renders no input, select
+// or textarea and its four `.focus()` calls all land on buttons — safe by accident, not by
+// construction. `installDom()` now REFUSES to run if the client renderer is already loaded, so the
+// mistake cannot be made silently again; see `assertReactDomNotYetLoaded` in helpers/dom.tsx.
+//
+// (Top-level `await import(...)` would read better, but tsx compiles these tests to CJS, where
+// top-level await is a syntax error — hence the lazy loader below.)
 installDom();
+
+/** react-dom's client renderer, loaded on first use so it evaluates AFTER installDom(). */
+let clientRenderer: typeof import('react-dom/client') | null = null;
+async function reactDomClient() {
+  clientRenderer ??= await import('react-dom/client');
+  return clientRenderer;
+}
 
 /**
  * Mount into a fresh container, and register teardown on the TEST CONTEXT rather than returning an
@@ -53,6 +65,7 @@ installDom();
  * that is a follow-up, deliberately not folded into this PR.
  */
 async function mount(t: TestContext, ui: React.ReactElement) {
+  const { createRoot } = await reactDomClient();
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);

@@ -43,7 +43,57 @@ import { JSDOM } from 'jsdom';
 
 /** The globals React 18's DOM renderer and our components touch. Assigned onto `globalThis` because
  *  that is what `react-dom/client` reads; jsdom's own window object is returned for direct use. */
+/**
+ * The one module react-dom loads for CLIENT rendering. `react-dom/server` does NOT pull it in
+ * (verified: server.node.js loads only the two server bundles), so matching on it distinguishes
+ * "a jsdom test imported the client renderer too early" from "a string-render suite is loaded",
+ * with no false positive on the ~1200 tests that use renderToStaticMarkup.
+ */
+const REACT_DOM_CLIENT_BUNDLE = /react-dom[\\/]cjs[\\/]react-dom\.(development|production\.min)\.js$/;
+
+/**
+ * Fail LOUDLY if react-dom's client renderer was evaluated before the DOM existed.
+ *
+ * ── THE FAILURE THIS REPLACES ────────────────────────────────────────────────────────────────
+ * react-dom decides ONCE, at module-evaluation time, whether it is running in a browser:
+ * `canUseDOM = typeof window !== 'undefined' && ...`. A static `import { createRoot } from
+ * 'react-dom/client'` is HOISTED above the `installDom()` call in the test file, so react-dom
+ * evaluates while `window` is still undefined, concludes `canUseDOM === false`, and permanently
+ * arms its Internet Explorer value-change polyfill.
+ *
+ * That polyfill only engages for TEXT INPUTS (`isTextInputElement`), so a suite testing buttons
+ * and dialogs passes happily and the trap stays invisible. The first test that focuses an
+ * `<input>` gets `activeElement.detachEvent is not a function` thrown INSIDE React's event
+ * dispatch, which aborts the plugin chain before any `onBlur`/`onChange` handler runs. The
+ * visible symptom is a handler that "didn't fire" and an assertion that fails with no error
+ * connecting it to the import order 200 lines away. It cost a full debugging cycle on
+ * 2026-09-05, which is why this guard exists rather than another comment.
+ *
+ * The fix at the call site is a LAZY import — `await import('react-dom/client')` inside the
+ * mount helper — not a reordering, because ES imports hoist regardless of where you write them.
+ */
+function assertReactDomNotYetLoaded(): void {
+  // `require.cache` is available because tsx compiles these tests to CJS. Guarded anyway: under a
+  // future native-ESM runner the cache is simply unreadable, and a harness guard must never be the
+  // thing that breaks the suite it protects.
+  const cache = (globalThis as { require?: { cache?: Record<string, unknown> } }).require?.cache
+    ?? (typeof require !== 'undefined' ? require.cache : undefined);
+  if (cache === undefined) return;
+  const loaded = Object.keys(cache).filter((k) => REACT_DOM_CLIENT_BUNDLE.test(k));
+  if (loaded.length === 0) return;
+  throw new Error(
+    'installDom(): react-dom client renderer was already loaded, so it has cached ' +
+      'canUseDOM === false and its IE input polyfill is armed. Focus and change events on text ' +
+      'inputs will throw inside React and silently skip your handlers.\n' +
+      'Fix: remove the static `import ... from \'react-dom/client\'` and load it lazily AFTER ' +
+      'installDom() — e.g. `const { createRoot } = await import(\'react-dom/client\')` inside ' +
+      'your mount helper. See app/test/forecast-amount-input.test.tsx for the pattern.\n' +
+      `Already loaded: ${loaded.join(', ')}`,
+  );
+}
+
 export function installDom(): JSDOM {
+  assertReactDomNotYetLoaded();
   const dom = new JSDOM('<!doctype html><html><body></body></html>', {
     // Gives us rAF + a visual-ish environment; React logs warnings without it.
     pretendToBeVisual: true,
@@ -68,6 +118,15 @@ export function installDom(): JSDOM {
     'HTMLElement',
     'HTMLInputElement',
     'HTMLButtonElement',
+    // ⚠ ADDED 2026-09-05, and the omission was not harmless. Client code guards element types with
+    // `el instanceof HTMLSelectElement` before reading `.value`; with the constructor missing from
+    // globalThis that guard throws ReferenceError INSIDE a React event handler, where React reports
+    // it and continues — so a form submit silently did nothing and the test read as "the handler
+    // chose not to fire". If you test a component that touches a new element type, add it here.
+    'HTMLSelectElement',
+    'HTMLFormElement',
+    'HTMLTextAreaElement',
+    'FocusEvent',
     'Event',
     'CustomEvent',
     'KeyboardEvent',
