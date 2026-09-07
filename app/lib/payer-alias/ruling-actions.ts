@@ -29,8 +29,13 @@
  *
  * ── PHI ──────────────────────────────────────────────────────────────────────────────────────────
  * `alias_norm` can hold an EMPLOYER NAME (`employer_self_funded` is a real relationship), and
- * employer_name stays in the PhiKey union even though display to an authenticated principal was
- * ruled acceptable 2026-08-14. It therefore:
+ * `employer_name` is in the PhiKey union though display to an authenticated principal was ruled
+ * acceptable 2026-08-14.
+ *
+ * ⚠️ THE HANDLING BELOW IS A PRECAUTION WE CHOSE, NOT A CONVENTION WE INHERITED. No repo rule covers
+ * `alias_norm`: the PHI denylist in `pr_compliance_checklist.yaml` names patient_name / member_id /
+ * dob and stops there. Treating this column like `employer_name` is our inference, enforced by the
+ * tests in this repo and nothing else. Codifying it is a named follow-up. It therefore:
  *   · travels only as a bound `$n` parameter, never interpolated into SQL;
  *   · never enters a URL, a redirect target, or browser storage;
  *   · NEVER enters the recordAccess detail blob — see the detail construction below;

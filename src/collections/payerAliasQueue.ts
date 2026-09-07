@@ -19,13 +19,25 @@
  * This surface is non-PHI by construction: payer names, payer identifiers, canonical `pi_*` slugs,
  * and prose notes. No member, no patient, no dollars.
  *
- * ⚠️ ONE CAUTION THAT SHAPES THE API: `alias_norm` CAN hold an employer name. The relationship
- * vocabulary includes `employer_self_funded`, so a self-funded employer's own name is a legitimate
- * alias string. `employer_name` was ruled non-PHI for display to an authenticated principal
- * (2026-08-14) but it STAYS in the PhiKey union — it must never reach a URL, a query string,
- * browser storage, or an LLM prompt. Consequently `alias_norm` is only ever a BOUND PARAMETER here
- * and is never accepted as, or emitted into, a route value. Page position is an integer offset for
- * exactly this reason: a keyset cursor would have to carry `alias_norm` through the URL.
+ * ⚠️ ONE CAUTION THAT SHAPES THE API — AND IT IS A PRECAUTION, NOT A REPO CONVENTION. Read the
+ * provenance before treating it as a rule:
+ *   · OBSERVED — `employer_name` is in the PhiKey union (`app/lib/phi.ts`) and was ruled display-
+ *     permissible to an authenticated principal (2026-08-14).
+ *   · INFERRED — `alias_norm` can therefore CONTAIN an employer name, because `employer_self_funded`
+ *     is a live value in the `payer_alias_map_relationship` CHECK.
+ *   · ASSUMED — that the employer convention transfers to this column. NOTHING SAYS IT DOES.
+ *     `pr_compliance_checklist.yaml`'s PHI denylist enumerates patient_name / member_id / dob and
+ *     does not mention employer_name, alias_norm, or any payer field.
+ *
+ * So the handling below is a deliberate over-caution, chosen because the cost is near zero (offset
+ * paging instead of a keyset cursor) and the downside of being wrong is a payer-adjacent employer
+ * string in a URL. It is enforced by the tests in this repo and by nothing else. If it should be a
+ * convention, it needs a line in `pr_compliance_checklist.yaml` — that is a named follow-up, not
+ * something this file can grant itself.
+ *
+ * The handling: `alias_norm` is only ever a BOUND PARAMETER here, and is never accepted as, or
+ * emitted into, a route value. Page position is an integer offset for exactly this reason — a keyset
+ * cursor would have to carry `alias_norm` through the URL.
  *
  * ── CROSS-TENANT BY RATIFIED DESIGN ──────────────────────────────────────────────────────────────
  * There is no `business_entity_id` predicate in this file and that is deliberate, not an omission:
