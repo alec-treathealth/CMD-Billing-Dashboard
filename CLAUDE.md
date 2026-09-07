@@ -677,7 +677,8 @@ predated `indigo-era-835`, and 21/19 predated `pipeline-tick`):
 | Route | Cadence |
 |---|---|
 | `pipeline-tick` | every 5 min — **INERT** until `ETL_PIPELINE_ENABLED` is set |
-| `cmd-explorer` · `indigo-explorer` | hourly, :00 / :30 |
+| `cmd-explorer` | hourly, :00 |
+| `indigo-explorer` | **every 2 hours, :30** (even hours) — was hourly until 2026-09-07 |
 | `cmd-census` · `indigo-census` | hourly, :15 / :35 |
 | `refresh-charge-rollup` | hourly, :45 |
 | `qualify-census` | hourly, :22 |
