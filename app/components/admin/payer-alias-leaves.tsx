@@ -11,11 +11,13 @@
  * CSS-hidden either (pr_compliance_checklist.yaml:41 fails a PR that hides a value with a class
  * while leaving it in the markup; the rule bites on values that exist, and none do).
  *
- * ⚠️ `alias_norm` CAN BE AN EMPLOYER NAME — `employer_self_funded` is a real relationship, so a
- * self-funded employer's own name is a legitimate alias string. It is rendered (ruled non-PHI for
- * display to an authenticated principal, 2026-08-14) but it must never reach a URL. NOTHING in this
- * file puts `alias_norm` into an href, a form action, or a data attribute that a link consumes:
- * `vocabTabHref` and `pageHref` build from the vocabulary enum and an integer only.
+ * ⚠️ `alias_norm` IS KEPT OUT OF URLS AS A PRECAUTION — not because a repo rule says to. It CAN be
+ * an employer name (`employer_self_funded` is a real relationship), and `employer_name` is in the
+ * PhiKey union though ruled display-permissible to an authenticated principal (2026-08-14). That the
+ * employer rule extends to this column is an ASSUMPTION of ours; no checklist or rule file covers
+ * `alias_norm`. Kept anyway because it costs nothing and the downside of being wrong is bad.
+ * NOTHING in this file puts `alias_norm` into an href, a form action, or a data attribute a link
+ * consumes: `vocabTabHref` and `pageHref` build from the vocabulary enum and an integer only.
  *
  * READ-ONLY. Artifact 2 has no controls that mutate — no confirm button, no relationship picker.
  * Those arrive with the write chain in Artifact 3.
