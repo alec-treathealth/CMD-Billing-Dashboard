@@ -3803,6 +3803,18 @@ type CollectionsAi = ReturnType<typeof useCollectionsAi>;
  */
 function AiTrigger({ ai }: { ai: CollectionsAi }) {
   const { state, sufficient, mode, busy } = ai;
+  // THE PUMP RUNS ONLY WHILE THIS IS AN ACTIONABLE INVITATION — the same wash + breathing glow the
+  // two collapsed panels carry (`.ths-pump` / `.ths-pump-halo`, app/globals.css; Alec, 2026-09-06:
+  // *"a green moving translucent on brand green colloring … a pumping sort of effect"*). Three
+  // states deliberately DON'T pump, because in each of them the motion would be saying something
+  // untrue:
+  //   · gated (`!sufficient`) — the button is disabled and the sentence beside it explains why.
+  //     Animating a control nobody can press is the "reads as broken" failure that sentence exists
+  //     to prevent, made louder.
+  //   · busy — the label is already "Generating…" and `aria-busy` is set. A call-to-action pulse is
+  //     not a progress indicator and must not be mistaken for one.
+  //   · ready — the label is "Regenerate". The analysis is on screen; the invitation has been taken.
+  const pumping = sufficient && !busy && state.kind !== 'ready';
   return (
     <div className="flex flex-wrap items-center justify-end gap-2">
       {!sufficient && <span className="text-xs text-muted-foreground">{INSUFFICIENT_COPY[mode]}</span>}
@@ -3813,7 +3825,9 @@ function AiTrigger({ ai }: { ai: CollectionsAi }) {
         disabled={!sufficient || busy}
         aria-busy={busy}
         onClick={ai.generate}
-        className="border-line bg-[var(--brand-soft-a50)] text-ink900 hover:bg-[var(--brand-soft)]"
+        className={`border-line bg-[var(--brand-soft-a50)] text-ink900 hover:bg-[var(--brand-soft)]${
+          pumping ? ' ths-pump ths-pump-halo' : ''
+        }`}
       >
         <Sparkles className="h-4 w-4" aria-hidden />
         {state.kind === 'ready' ? 'Regenerate' : busy ? 'Generating…' : 'Generate AI Analysis'}
@@ -4143,9 +4157,13 @@ function SelectionYieldPanel({ state, label, ai }: { state: SummaryState; label:
  *     duplicates the button's action for pointer users and contributes no semantics, so the "a real
  *     <button>, never a div+onClick" rule those panels state is not being bent — that rule is about
  *     a div being the ONLY control, which would be unreachable by keyboard. Here one is not.
- *   · `.ths-fold` paints the affordance — a static accent ring plus a three-pulse glow, both on an
- *     `::after` (app/globals.css owns it; see the note there for why it is neither a Tailwind
- *     arbitrary-alpha class nor a box-shadow on the card, and why it pulses three times not forever).
+ *   · `.ths-fold` + `.ths-pump` paint the affordance — a static accent ring and a breathing glow on
+ *     an `::after`, plus a translucent accent wash that travels across the card (app/globals.css
+ *     owns both; see the note there for why the colour is neither a Tailwind arbitrary-alpha class
+ *     nor a box-shadow on the card, why the wash is the card's own background-image rather than a
+ *     second pseudo-element, and why the pulse is continuous as of 2026-09-06 — it used to stop
+ *     after three). The same two-part effect is on the Generate-AI-Analysis button (AiTrigger),
+ *     which is the point: one invitation, painted the same way in both places.
  *
  * TWO GUARDS, both of which are the difference between a convenience and a trap:
  *   · a click that lands on anything interactive is left alone. Today that is only the disclosure
@@ -4202,7 +4220,9 @@ const foldCardClass = (collapsed: boolean, refreshing: boolean): string =>
   [
     'relative rounded-xl border border-line bg-card p-4 shadow-ths transition-opacity duration-150',
     refreshing ? 'opacity-60' : '',
-    collapsed ? 'ths-fold' : '',
+    // `ths-fold` is the ring, `ths-pump` the travelling wash inside it. Both collapsed-only: an
+    // expanded panel is being READ, and the affordance has already done its job.
+    collapsed ? 'ths-fold ths-pump' : '',
   ]
     .filter(Boolean)
     .join(' ');
