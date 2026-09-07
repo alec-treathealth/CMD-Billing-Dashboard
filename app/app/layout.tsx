@@ -1,6 +1,5 @@
 import type { Metadata } from 'next';
 import { Suspense } from 'react';
-import { SpeedInsights } from '@vercel/speed-insights/next';
 import { NavLinks } from '@/components/nav-links';
 import { SwitcherTenantLogo } from '@/components/dashboard/switcher-tenant-logo';
 import { TenantLogo } from '@/components/tenant-logo';
@@ -8,6 +7,7 @@ import { UserMenu } from '@/components/user-menu';
 import { BrandTheme } from '@/components/brand-theme';
 import { HeaderGate } from '@/components/header-gate';
 import { NavRail } from '@/components/shell/nav-rail';
+import { SpeedInsights } from '@/components/speed-insights';
 import { ContentInset } from '@/components/shell/content-inset';
 import { dashboardAccess } from '@/lib/access';
 import { isAlecOwnerEmail } from '@/lib/alec-only';
@@ -144,6 +144,11 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         </HeaderGate>
         {children}
         </ContentInset>
+        {/* Core Web Vitals. Our own wrapper, never @vercel/speed-insights/next directly — the
+            vitals beacon carries the full href, so the wrapper strips the query string before
+            egress (?facility=/?payer=/?actor= must not leave). See components/speed-insights.tsx
+            for the payload contract and the P0-4 ruling it inherits. It needs no Suspense here:
+            the package wraps its own useSearchParams() reader. Renders null. */}
         <SpeedInsights />
       </body>
     </html>
