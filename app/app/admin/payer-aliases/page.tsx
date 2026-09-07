@@ -108,6 +108,7 @@ export default async function PayerAliasesPage({
             <PayerAliasRulingForm
               vocabulary={vocabulary}
               alias={row.alias_norm}
+              proposedRelationship={row.relationship}
               proposedCanonicalId={row.canonical_payer_id}
               identities={identities}
             />

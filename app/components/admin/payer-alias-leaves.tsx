@@ -24,6 +24,7 @@
  */
 import type { ReactNode } from 'react';
 import {
+  defaultRulingRelationship,
   PAYER_ALIAS_RELATIONSHIPS,
   PAYER_ALIAS_VOCABULARIES,
   RELATIONSHIP_REQUIRES_CANONICAL,
@@ -408,6 +409,27 @@ export interface RulingFormState {
   relationship: PayerAliasRelationship;
   canonicalPayerId: string;
   reviewNote: string;
+}
+
+/**
+ * The state a ruling form OPENS on for a given queue row — pure, so it is testable without a router.
+ *
+ * ⚠️ THE RELATIONSHIP IS THE ROW'S OWN PROPOSAL, NOT A CONSTANT (Qodo #335 finding 1). The form used
+ * to hard-code `same_payer` while the page passed only the proposed canonical, so a `carve_out`
+ * proposal confirmed as `same_payer` for any reviewer who accepted the pre-selected payer without
+ * touching the relationship control. Both halves of the proposal have to survive to the form or the
+ * pre-selection is a trap.
+ */
+export function initialRulingState(
+  proposedRelationship: string,
+  proposedCanonicalId: string | null,
+): RulingFormState {
+  return {
+    action: 'confirm',
+    relationship: defaultRulingRelationship(proposedRelationship),
+    canonicalPayerId: proposedCanonicalId ?? '',
+    reviewNote: '',
+  };
 }
 
 export function RulingFormFields({

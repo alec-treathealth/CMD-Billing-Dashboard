@@ -100,6 +100,31 @@ export const RELATIONSHIP_REQUIRES_CANONICAL: Readonly<Record<PayerAliasRelation
   unmapped: false,
 };
 
+export function isPayerAliasRelationship(value: unknown): value is PayerAliasRelationship {
+  return typeof value === 'string' && (PAYER_ALIAS_RELATIONSHIPS as readonly string[]).includes(value);
+}
+
+/**
+ * The relationship a ruling form should OPEN on for a queue row.
+ *
+ * ⚠️ IT IS THE ROW'S OWN PROPOSED RELATIONSHIP, NOT A CONSTANT (Qodo #335 finding 1). The form used
+ * to hard-code `same_payer`, while the page passed only the proposed CANONICAL — so a row proposing
+ * `carve_out`, `tpa` or `employer_self_funded` would be confirmed as `same_payer` by a reviewer who
+ * accepted the pre-selected payer without noticing the relationship control. That writes a permanent
+ * falsehood into a row whose entire purpose is attributed truth.
+ *
+ * Unreachable with today's queue — measured 2026-09-07, the 990 unruled rows are 730 `same_payer`
+ * (all with a canonical) and 260 `unmapped` (none with one). But 36 CONFIRMED rows carry `carve_out`,
+ * so the value is live in this dataset and a proposer emitting one is not hypothetical.
+ *
+ * Falls back to `same_payer` only when the stored value is not a member of the union — which the
+ * `payer_alias_map_relationship` CHECK should make impossible, so the fallback is for a column that
+ * has drifted, not for a normal row.
+ */
+export function defaultRulingRelationship(rowRelationship: unknown): PayerAliasRelationship {
+  return isPayerAliasRelationship(rowRelationship) ? rowRelationship : 'same_payer';
+}
+
 export function isPayerAliasVocabulary(value: unknown): value is PayerAliasVocabulary {
   return typeof value === 'string' && (PAYER_ALIAS_VOCABULARIES as readonly string[]).includes(value);
 }

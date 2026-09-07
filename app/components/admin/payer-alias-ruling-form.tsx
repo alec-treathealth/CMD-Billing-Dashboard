@@ -18,11 +18,8 @@
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { rulePayerAlias, type RulingFormInput } from '@/lib/payer-alias/ruling-actions';
-import { RulingFormFields, type RulingFormState } from './payer-alias-leaves';
-import type {
-  PayerAliasRelationship,
-  PayerAliasVocabulary,
-} from '../../../src/collections/payerAliasQueue';
+import { RulingFormFields, initialRulingState, type RulingFormState } from './payer-alias-leaves';
+import type { PayerAliasVocabulary } from '../../../src/collections/payerAliasQueue';
 
 export interface RulingIdentityOption {
   canonical_payer_id: string;
@@ -33,11 +30,19 @@ export interface RulingIdentityOption {
 export function PayerAliasRulingForm({
   vocabulary,
   alias,
+  proposedRelationship,
   proposedCanonicalId,
   identities,
 }: {
   vocabulary: PayerAliasVocabulary;
   alias: string;
+  /**
+   * The row's OWN proposed relationship, straight from `ref.payer_alias_map`. Pre-selecting it is
+   * what stops a `carve_out` proposal being confirmed as `same_payer` by a reviewer who accepted the
+   * pre-selected canonical without touching the relationship control (Qodo #335 finding 1). The
+   * control stays fully editable — this is a default, not a lock.
+   */
+  proposedRelationship: string;
   /** Pre-selects the machine's proposal so accepting it is one click, not a search. */
   proposedCanonicalId: string | null;
   identities: readonly RulingIdentityOption[];
@@ -46,12 +51,12 @@ export function PayerAliasRulingForm({
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [errorField, setErrorField] = useState<string | null>(null);
-  const [state, setState] = useState<RulingFormState>({
-    action: 'confirm',
-    relationship: 'same_payer' as PayerAliasRelationship,
-    canonicalPayerId: proposedCanonicalId ?? '',
-    reviewNote: '',
-  });
+  // ⚠️ The opening state is computed by initialRulingState, NOT inlined here. Inlining is how the
+  // relationship got hard-coded to same_payer in the first place (Qodo #335 finding 1); keeping it in
+  // one pure named function is what lets a test pin the behaviour without mounting a router.
+  const [state, setState] = useState<RulingFormState>(
+    initialRulingState(proposedRelationship, proposedCanonicalId),
+  );
 
   const onChange = (patch: Partial<RulingFormState>) => {
     setState((prev) => ({ ...prev, ...patch }));
