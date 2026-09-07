@@ -94,13 +94,14 @@ test('the disclosure BUTTON keeps every semantic it had — the row click is add
 
 test('the glow is COLLAPSED-ONLY and layout-neutral', () => {
   const card = explorerCode.slice(explorerCode.indexOf('const foldCardClass'), explorerCode.indexOf('function SearchDrillPanel'));
-  assert.match(card, /collapsed \? 'ths-fold' : ''/, 'the glow paints only while folded');
+  assert.match(card, /collapsed \? 'ths-fold ths-pump' : ''/, 'ring AND wash paint only while folded');
   assert.match(card, /rounded-xl border border-line bg-card p-4 shadow-ths/, 'the card itself is unchanged');
   // `relative` is what the ::after ring positions against.
   assert.match(card, /'relative rounded-xl/, 'the card stays a positioning context');
   // ⚠ THE HEIGHT BUDGET. Both panels are fixed blocks in a viewport-bounded column measured to the
   // pixel. `-m-1 p-1` cancels out, and the ring is an absolutely-positioned ::after, so neither
-  // costs layout — measured: the collapsed Drill in card is 58px with and without `ths-fold`.
+  // costs layout — measured: the collapsed Drill in card is 58px with and without `ths-fold`. The
+  // wash is the card's own background-image, which is a paint, not a box.
   assert.match(explorerCode, /FOLD_ROW_CLASS =[\s\S]{0,400}?-m-1 rounded-lg p-1/, 'padding is cancelled by a negative margin');
   assert.doesNotMatch(explorerCode, /FOLD_ROW_CLASS =[^;]*\bp-2\b/, 'no uncancelled padding on the row');
   // Both panels must go through the helper, or one of them keeps the old always-plain card.
@@ -132,8 +133,19 @@ test('the fold ring gets its translucent accent from color-mix, not from a Tailw
   assert.doesNotMatch(card, /\[var\(--brand-accent[^\]]*\)\]/, 'the collapsed styling is a class name, not inline colour');
 });
 
-test('the glow ring is a pseudo-element, and the pulse stops on its own', () => {
-  assert.match(globalsCss, /@keyframes ths-fold-glow/, 'the keyframes exist');
+/*
+ * ⚠ THIS TEST USED TO ASSERT THE OPPOSITE, AND THE REVERSAL IS THE RULING — NOT DRIFT. It read
+ * "three iterations, not infinite" / "never infinite" until 2026-09-06, when Alec asked for a
+ * *"pumping sort of effect"* on these two panels and on the Generate-AI-Analysis button. The WCAG
+ * 2.2.2 reasoning behind the old assertion survives in globals.css as the reason the AMPLITUDE and
+ * cadence are what they are (one crest per 2s, a long decay, 16% wash); it is no longer the reason
+ * the animation stops, because it no longer does. Re-tightening it is a one-token change in two
+ * places (`infinite` → `3`) if it reads as a distraction in use.
+ */
+test('the glow ring is a pseudo-element and it pumps; the wash rests off-canvas', () => {
+  assert.match(globalsCss, /@keyframes ths-pump-glow/, 'the shared glow keyframes exist');
+  assert.match(globalsCss, /@keyframes ths-pump-sweep/, 'the travelling-wash keyframes exist');
+  assert.doesNotMatch(globalsCss, /ths-fold-glow/, 'the old single-consumer keyframe name is gone, not orphaned');
   const ruleFrom = globalsCss.indexOf('.ths-fold::after {');
   assert.ok(ruleFrom > 0, 'the ring is an ::after, not a class on the card');
   const rule = globalsCss.slice(ruleFrom, globalsCss.indexOf('}', ruleFrom));
@@ -142,15 +154,57 @@ test('the glow ring is a pseudo-element, and the pulse stops on its own', () => 
   // pseudo-element has its own box-shadow to spend.
   assert.match(rule, /position: absolute/, 'absolutely positioned, so it costs no layout');
   assert.match(rule, /pointer-events: none/, 'and it must never intercept the header click');
-  // ⚠ FINITE. A permanent pulse on two cards is a distraction with no off switch (WCAG 2.2.2); a
-  // finite one settles into the static ring the base rule leaves behind. It re-fires per search for
-  // free, because SearchResultPanels is keyed on the search signature and a remount restarts a CSS
-  // animation — no timer, no effect, no state.
-  assert.match(rule, /animation: ths-fold-glow [\d.]+s ease-in-out 3;/, 'three iterations, not infinite');
-  assert.doesNotMatch(rule, /animation:[^;]*infinite/, 'never infinite');
-  // Reduced motion is inherited from the universal reset, so there must be no per-component opt-out
-  // that could disagree with it.
+  assert.match(rule, /animation: ths-pump-glow [\d.]+s ease-in-out infinite;/, 'the ring pumps, and off the SHARED keyframe');
+
+  /*
+   * ⚠ THE WASH IS THE ELEMENT'S OWN background-image, WHICH IS THE ONLY PLACE IT CAN GO. It must
+   * paint ABOVE the card background and BELOW the header text. An absolutely-positioned ::before
+   * paints in the positioned layer — on top of the text — and un-doing that costs `z-index: -1`
+   * plus `isolation: isolate`, i.e. a stacking context on a card whose subtree we do not control.
+   * `::after` is already spent on the ring. Also asserted: background-COLOR is untouched, so
+   * `bg-card` and `bg-[var(--brand-soft-a50)]` keep their own property.
+   */
+  const pumpFrom = globalsCss.indexOf('.ths-pump {');
+  assert.ok(pumpFrom > 0, 'the wash is a class of its own, shared with the button');
+  const pump = globalsCss.slice(pumpFrom, globalsCss.indexOf('}', globalsCss.indexOf('background-position: -30%', pumpFrom)));
+  assert.match(pump, /background-image: linear-gradient\(/, 'the wash is a background-image on the element');
+  assert.doesNotMatch(pump, /background-color|z-index|isolation/, 'no background-color, no stacking-context games');
+  assert.match(pump, /color-mix\(in srgb, var\(--brand-accent\) 16%, transparent\)/, 'translucent accent, from color-mix');
+  assert.match(pump, /animation: ths-pump-sweep [\d.]+s ease-in-out infinite;/, 'and it travels');
+
+  /*
+   * ⚠ REDUCED MOTION MUST LEAVE THE WASH INVISIBLE, NOT FROZEN MID-CARD. The universal reset sets
+   * iteration-count 1 + duration 0.01ms, so the animation lands on its LAST keyframe and then the
+   * element falls back to its un-animated value. Both have to be the resting, off-canvas position
+   * or a reader with reduce-motion on gets a permanent teal smear across two cards and a button.
+   */
+  assert.match(pump, /background-position: -30% 0;/, 'the un-animated base position is off-canvas');
+  const sweep = globalsCss.slice(globalsCss.indexOf('@keyframes ths-pump-sweep'), globalsCss.indexOf('.ths-pump {'));
+  assert.match(sweep, /100% \{\s*background-position: -30% 0;/, 'the sweep ENDS off-canvas too');
   assert.match(globalsCss, /animation-iteration-count: 1 !important/, 'the global reduced-motion reset still exists');
+
+  /*
+   * ⚠ THE BUTTON'S GLOW CARRIES NO RING, and that is an a11y constraint rather than a taste call:
+   * a 2px accent ring just outside a button is visually the same object as
+   * `focus-visible:ring-2 ring-ring` — the SAME colour under the default palette — so a permanent
+   * one would make the keyboard focus indicator ambiguous on the one control here that takes focus.
+   */
+  const haloFrom = globalsCss.indexOf('.ths-pump-halo::after {');
+  assert.ok(haloFrom > 0, 'the button glow is its own rule');
+  const halo = globalsCss.slice(haloFrom, globalsCss.indexOf('}', haloFrom));
+  assert.match(halo, /border: 0;/, 'glow only — never something that reads as a focus ring');
+  assert.match(halo, /pointer-events: none/, 'and it never eats the click');
+  assert.match(halo, /animation: ths-pump-glow [\d.]+s ease-in-out infinite;/, 'same keyframes as the ring, so the two cannot drift');
+
+  /*
+   * ⚠ ALL THREE DURATIONS MUST BE EQUAL OR THE EFFECT COMES APART. The glow crests at 30% of its
+   * cycle because that is the midpoint of the wash's travel (which finishes at 60%) — the two are
+   * phase-locked by nothing but sharing a duration. Tune the cadence by changing all three (Alec
+   * asked for 2.8s → 2s on 2026-09-06); change one and the glow starts cresting on an empty card.
+   */
+  const durations = [...globalsCss.matchAll(/animation: ths-pump-(?:glow|sweep) ([\d.]+)s/g)].map((m) => m[1]);
+  assert.equal(durations.length, 3, 'the wash, the ring and the halo — three declarations');
+  assert.equal(new Set(durations).size, 1, `all three share one duration, got ${durations.join(', ')}`);
 });
 
 /* ── 2. Clear search ─────────────────────────────────────────────────────────────────────────── */

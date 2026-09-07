@@ -121,6 +121,35 @@ test('the AI trigger lives in the yield card header; the insufficient sentence m
   assert.match(outputSrc, /ai\.state\.kind|state\.kind === 'error'/, 'output card renders the streamed states');
 });
 
+/*
+ * The pump on the trigger (Alec, 2026-09-06: *"a green moving translucent on brand green colloring
+ * … a pumping sort of effect"*) — the same `.ths-pump` wash + breathing glow the two collapsed
+ * panels carry, so the button and the panels read as one invitation. What this test is really
+ * guarding is the GATE, because each excluded state is a different lie:
+ *   · gated  — animating a disabled control is the "reads as broken" failure the insufficient
+ *              sentence exists to prevent, made louder.
+ *   · busy   — the label already says "Generating…" and aria-busy is set; a call-to-action pulse is
+ *              not a progress indicator.
+ *   · ready  — the label is "Regenerate"; the analysis is on screen and the invitation was taken.
+ * The halo (not the panels' ring) is asserted in collections-fold-and-clear.test.tsx, with the
+ * focus-indicator reasoning.
+ */
+test('the AI trigger pumps ONLY while it is an actionable idle invitation', () => {
+  assert.match(
+    triggerSrc,
+    /const pumping = sufficient && !busy && state\.kind !== 'ready';/,
+    'one predicate, and it excludes gated, busy and ready',
+  );
+  assert.match(triggerSrc, /pumping \? ' ths-pump ths-pump-halo' : ''/, 'wash + ringless glow, conditionally');
+  // The classes must be on the BUTTON, not the wrapper — the wrapper also holds the insufficient
+  // sentence, which would then pulse along with it.
+  const wrapper = slice('<div className="flex flex-wrap items-center justify-end gap-2">', '<Button', triggerSrc);
+  assert.doesNotMatch(wrapper, /ths-pump/, 'the wrapper never pumps — the sentence beside the button would too');
+  // Colour comes from the class, never from a Tailwind arbitrary-alpha value (which emits nothing —
+  // see brand-token-alpha.test.tsx).
+  assert.doesNotMatch(triggerSrc, /\[var\(--brand-accent\)[^\]]*\]\//, 'no dead /alpha on an arbitrary var()');
+});
+
 test('PROSE CUT: sub-heading, chip and explainer are gone; the write-off footnote stays as ONE text-xs line', () => {
   assert.doesNotMatch(cardsSrc, /Selection payer behavior — all filtered charge lines/, 'sub-heading cut');
   assert.doesNotMatch(cardsSrc, /matches the \{[^}]*\} charge lines/, 'count chip cut — it only restated total_count');
