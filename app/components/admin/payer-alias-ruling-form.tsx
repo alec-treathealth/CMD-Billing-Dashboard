@@ -34,12 +34,14 @@ export function PayerAliasRulingForm({
   vocabulary,
   alias,
   proposedCanonicalId,
+  proposedRelationship,
   identities,
 }: {
   vocabulary: PayerAliasVocabulary;
   alias: string;
   /** Pre-selects the machine's proposal so accepting it is one click, not a search. */
   proposedCanonicalId: string | null;
+  proposedRelationship: string;
   identities: readonly RulingIdentityOption[];
 }) {
   const router = useRouter();
@@ -48,7 +50,11 @@ export function PayerAliasRulingForm({
   const [errorField, setErrorField] = useState<string | null>(null);
   const [state, setState] = useState<RulingFormState>({
     action: 'confirm',
-    relationship: 'same_payer' as PayerAliasRelationship,
+    relationship: (['same_payer', 'carve_out', 'tpa', 'employer_self_funded'] as const).includes(
+      proposedRelationship as any,
+    )
+      ? (proposedRelationship as PayerAliasRelationship)
+      : 'same_payer',
     canonicalPayerId: proposedCanonicalId ?? '',
     reviewNote: '',
   });

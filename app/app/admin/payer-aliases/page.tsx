@@ -109,6 +109,7 @@ export default async function PayerAliasesPage({
               vocabulary={vocabulary}
               alias={row.alias_norm}
               proposedCanonicalId={row.canonical_payer_id}
+                proposedRelationship={row.relationship}
               identities={identities}
             />
           )}
