@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { Suspense } from 'react';
+import { SpeedInsights } from '@vercel/speed-insights/next';
 import { NavLinks } from '@/components/nav-links';
 import { SwitcherTenantLogo } from '@/components/dashboard/switcher-tenant-logo';
 import { TenantLogo } from '@/components/tenant-logo';
@@ -143,6 +144,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         </HeaderGate>
         {children}
         </ContentInset>
+        <SpeedInsights />
       </body>
     </html>
   );
