@@ -18,6 +18,7 @@ import {
   buildPayerAliasQueueQuery,
   buildPayerAliasRulingCall,
   buildPayerAliasSiblingsQuery,
+  buildPayerAliasVobNamesQuery,
   buildPayerIdentityOptionsQuery,
   clampPage,
   clampVocabulary,
@@ -25,9 +26,11 @@ import {
   PAYER_ALIAS_RELATIONSHIPS,
   PAYER_ALIAS_RULING_AUDIT_ACTION,
   PAYER_ALIAS_RULING_FN,
+  PAYER_ALIAS_VOB_SOURCE,
   PAYER_ALIAS_VOCABULARIES,
   QUEUE_PAGE_SIZE,
   RELATIONSHIP_REQUIRES_CANONICAL,
+  VOB_NAMES_PER_ID,
   validateRulingContainment,
   validateRulingShape,
   type PayerAliasRelationship,
@@ -54,6 +57,7 @@ const READ_BUILDERS = () => [
   buildPayerAliasNeighboursQuery(['CIGNA']),
   buildPayerIdentityOptionsQuery(),
   buildPayerAliasContainmentQuery('vob_insurance_co', 'CIGNA', 'pi_cigna'),
+  buildPayerAliasVobNamesQuery(['62308']),
 ];
 
 const WRITE_BUILDERS = () => [
@@ -102,17 +106,23 @@ test('no builder uses SELECT * — columns are projected explicitly', () => {
   }
 });
 
-test('scope: only ref.payer_alias_map and ref.payer_identity are touched', () => {
+test('scope: only ref.payer_alias_map, ref.payer_identity and the ONE read-only VOB source are touched', () => {
+  // ⚠️ WIDENED BY NAME, NOT LOOSENED (2026-09-08). `vob.member_benefits_latest` is the matview Veris
+  // 026 §8c seeded the vob_payer_id rows FROM; the names builder re-reads it so a card can show the
+  // evidence behind an id. It is a SELECT on a claims_reader-granted relation (0063) and nothing
+  // else. A fourth relation — above all `claims.payer_alias` — still fails here.
+  const ALLOWED = ['ref.payer_alias_map', 'ref.payer_identity', PAYER_ALIAS_VOB_SOURCE];
+  assert.equal(PAYER_ALIAS_VOB_SOURCE, 'vob.member_benefits_latest');
   for (const q of ALL_BUILDERS()) {
     // claims.payer_alias is a DIFFERENT table, deferred to Phase 3 — it must never appear here.
     assert.equal(q.sql.includes('claims.payer_alias'), false, q.sql);
     for (const m of q.sql.matchAll(/\b(?:from|join)\s+([a-z_]+\.[a-z_]+)/gi)) {
-      assert.ok(
-        ['ref.payer_alias_map', 'ref.payer_identity'].includes(m[1] ?? ''),
-        `unexpected relation ${m[1]}`,
-      );
+      assert.ok(ALLOWED.includes(m[1] ?? ''), `unexpected relation ${m[1]}`);
     }
   }
+  // The VOB source is read by exactly ONE builder — the exception is scoped to a function, not the file.
+  const readers = ALL_BUILDERS().filter((q) => q.sql.includes(PAYER_ALIAS_VOB_SOURCE));
+  assert.equal(readers.length, 1, 'a second VOB-reading builder widens the scope; say so, do not slip it in');
 });
 
 test('cross-tenant by ratified design — no builder filters on business_entity_id', () => {
@@ -226,6 +236,72 @@ test('counts query covers every vocabulary without a WHERE on vocabulary', () =>
   const q = buildPayerAliasQueueCountsQuery();
   assert.ok(q.sql.includes('where needs_review group by vocabulary'));
   assert.deepEqual(q.params, []);
+});
+
+/* ── VOB names behind a payer id ─────────────────────────────────────────────────────────────────── */
+
+test('vob names query: payer ids are a BOUND ARRAY PARAM, joined by BARE equality', () => {
+  // `'01260` is the live first card on the vob_payer_id tab — leading apostrophe and all. It must
+  // travel as a value, never as SQL text, and the join must not be "helped" for it.
+  const q = buildPayerAliasVobNamesQuery(["'01260", '62308']);
+  assert.ok(q.sql.includes('from unnest($1::text[]) as q(alias_norm)'), q.sql);
+  assert.ok(q.sql.includes(`join ${PAYER_ALIAS_VOB_SOURCE} v on v.payer_id = q.alias_norm`), q.sql);
+  assert.equal(q.sql.includes('01260'), false, 'a payer id leaked into the SQL text');
+  assert.deepEqual(q.params[0], ["'01260", '62308']);
+  // Measured 2026-09-07: bare equality matches 23,979 of 23,992 VOB rows (99.95%) with zero
+  // fan-out; ltrim adds no coverage and fans out 1,103 rows. So the join key is NEVER wrapped.
+  assert.equal(q.sql.includes('ltrim('), false, 'ltrim on the join was measured and rejected');
+  assert.equal(
+    /on\s+(?:upper|lower|btrim|ltrim|rtrim|trim)\(\s*v\.payer_id/i.test(q.sql),
+    false,
+    'the join key must be bare — see the builder docblock before changing this',
+  );
+  assert.equal(
+    /=\s*(?:upper|lower|btrim|ltrim|rtrim|trim)\(\s*q\.alias_norm/i.test(q.sql),
+    false,
+    'the alias side of the join must be bare too',
+  );
+});
+
+test('vob names query: the per-id cap is a bound param, defaults to 12, and clamps', () => {
+  assert.equal(VOB_NAMES_PER_ID, 12);
+  assert.ok(buildPayerAliasVobNamesQuery(['A']).sql.includes('where r.rn <= $2'));
+  assert.equal(buildPayerAliasVobNamesQuery(['A']).params[1], 12);
+  assert.equal(buildPayerAliasVobNamesQuery(['A'], 99).params[1], 50);
+  assert.equal(buildPayerAliasVobNamesQuery(['A'], 0).params[1], 1);
+  assert.equal(buildPayerAliasVobNamesQuery(['A'], Number.NaN).params[1], 12);
+  // The cap is applied per id (a window), not to the whole result set — one id with 369 names must
+  // not starve the other 24 cards on the page.
+  assert.ok(buildPayerAliasVobNamesQuery(['A']).sql.includes('row_number() over (partition by n.payer_id'));
+});
+
+test('vob names query projects a payer id, a payer name and a COUNT — never a member identifier', () => {
+  const q = buildPayerAliasVobNamesQuery(['A']);
+  assert.ok(q.sql.includes('count(*)::int as members'), q.sql);
+  assert.ok(q.sql.includes('as total_names'), q.sql);
+  assert.ok(q.sql.includes('as total_members'), q.sql);
+  // The matview carries blind-index columns; none may be read here.
+  for (const phi of ['member_id', 'bidx', 'group_number', 'employer']) {
+    assert.equal(q.sql.includes(phi), false, `${phi} must not appear in the VOB names query`);
+  }
+  assert.equal(q.params.length, 2, 'exactly the id array and the cap');
+});
+
+test('vob names query groups names the way the vob_insurance_co vocabulary normalises them', () => {
+  // 026 §8c's id_names CTE: upper(btrim(insurance_co)). A name shown on the vob_payer_id card is the
+  // same string a reviewer would find on the VOB-insurance-co tab.
+  const q = buildPayerAliasVobNamesQuery(['A']);
+  assert.ok(q.sql.includes('upper(btrim(v.insurance_co)) as name'), q.sql);
+  assert.ok(q.sql.includes('group by q.alias_norm, upper(btrim(v.insurance_co))'), q.sql);
+  assert.ok(q.sql.includes("nullif(btrim(v.insurance_co), '') is not null"), 'an unnamed VOB row cannot be a name');
+  assert.ok(q.sql.includes('order by r.payer_id, r.members desc, r.name'), 'heaviest name first, deterministic');
+});
+
+test('vob names query copies its input array — a later caller mutation cannot alter the params', () => {
+  const input = ['62308'];
+  const q = buildPayerAliasVobNamesQuery(input);
+  input.push('MUTATED');
+  assert.deepEqual(q.params[0], ['62308']);
 });
 
 test('all six relationships are exposed — the four in live use are not the whole vocabulary', () => {

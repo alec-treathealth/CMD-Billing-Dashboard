@@ -6,9 +6,12 @@
  * may grow an INSERT/UPDATE/DELETE. Reads run as claims_reader, which holds SELECT on all three
  * `ref.*` tables and nothing else.
  *
- * SCOPE: `ref.payer_alias_map` + `ref.payer_identity` ONLY. `claims.payer_alias` is a DIFFERENT,
- * unrelated table in the product plane (Billing Audit's facility-scoped matcher) and is deferred
- * until Phase 3 — do not join, reference, or "unify" the two here.
+ * SCOPE: `ref.payer_alias_map` + `ref.payer_identity`, plus ONE read-only evidence source —
+ * `vob.member_benefits_latest`, read by `buildPayerAliasVobNamesQuery` alone so the vob_payer_id
+ * tab can show the VOB names behind an id (2026-09-08; test/payerAliasQueue.test.ts names the
+ * relation in its scope guard rather than loosening the guard). `claims.payer_alias` is a
+ * DIFFERENT, unrelated table in the product plane (Billing Audit's facility-scoped matcher) and is
+ * deferred until Phase 3 — do not join, reference, or "unify" the two here.
  *
  * PARAMETERIZED ONLY. Table, column and operator names are fixed string literals; only VALUES are
  * `$n` bound params. No `SELECT *` — columns are projected explicitly so a column added upstream
@@ -300,6 +303,95 @@ export function buildPayerIdentityOptionsQuery(): { sql: string; params: unknown
       'select canonical_payer_id, display_name, entity_kind ' +
       `from ${PAYER_IDENTITY_TABLE} where is_active order by display_name`,
     params: [],
+  };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════════
+ * VOB NAMES BEHIND A PAYER ID — the one read on this surface that leaves the two `ref.*` tables.
+ *
+ * `vob_payer_id` rows are IDENTIFIERS, not names (see VOCAB_HINTS): a reviewer cannot judge `62308`
+ * by reading it. What they CAN judge is the set of insurance-company names that VOBs filed under
+ * that id — which is exactly what Veris 026 §8c read to seed these rows in the first place. This
+ * builder re-reads the same source (`vob.member_benefits_latest`, one row per member, claims_reader
+ * SELECT granted by product migration 0063) so the card can show the evidence the machine saw.
+ *
+ * ── BARE EQUALITY JOIN, MEASURED 2026-09-07 ──────────────────────────────────────────────────────
+ * `v.payer_id = q.alias_norm` — no upper(), no btrim(), no ltrim(). Against the live matview that
+ * matches 23,979 of 23,992 VOB rows carrying a payer_id (99.95%) with ZERO fan-out: one VOB row
+ * joins one alias. `ltrim` was tried and REJECTED — it adds no coverage and creates a 1,103-row
+ * fan-out. The 13 unmatched rows are not a normalisation gap worth a fan-out to close.
+ *
+ * ── THE APOSTROPHE FINDING — "first row on the page" is not "representative row" ─────────────────
+ * The vob_payer_id tab is alphabetical (there is no confidence to sort by), and its FIRST card is
+ * `'01260` — a leading apostrophe, the spreadsheet text-marker artefact. It is the top card ONLY
+ * because `'` (0x27) sorts before every digit, and it is 1 of exactly 2 apostrophe rows in 359.
+ * Anyone eyeballing the page for a "typical" row meets the least typical one first: the sort key
+ * decides which row is first, and nothing about being first makes a row representative. The
+ * bare-equality join handles it correctly anyway (the raw payer_id carries the same apostrophe), so
+ * this note exists to stop a later reader from "fixing" the join for a 2-row case.
+ *
+ * ── SHAPE ────────────────────────────────────────────────────────────────────────────────────────
+ * ONE query for the whole page, batched by the page's alias set — never per card. Per id: the top
+ * `perId` names by member count (cap 12, a bound param), plus `total_names` and `total_members`
+ * over ALL names for that id, so the UI can say "showing 12 of 47 · 1,204 members" without a second
+ * query. Names are grouped as `upper(btrim(insurance_co))` because that is the `vob_insurance_co`
+ * alias_norm normalisation (026 §8c's `id_names` CTE): a name shown here is the string a reviewer
+ * would find on the VOB-insurance-co tab, not a casing variant of it. A VOB row with an empty
+ * insurance_co cannot be named and is not counted.
+ *
+ * Written as nested subqueries rather than a CTE so it starts with `select`, which is what the
+ * read-only guard asserts of every read builder.
+ *
+ * NON-PHI: a payer id, a payer name, and a COUNT of members. No member_id_bidx, no prefix, no group
+ * number is projected — the matview's blind-index columns are never read.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
+
+export const PAYER_ALIAS_VOB_SOURCE = 'vob.member_benefits_latest';
+
+/**
+ * Names returned per payer id. Chosen against the measured distribution of names-per-id over the
+ * 359 vob_payer_id rows (2026-09-07): median 2, mean 9.36, p90 13.2, max 369. Twelve shows every
+ * name whole on roughly nine cards in ten; the tail beyond it is what `total_names` is for.
+ */
+export const VOB_NAMES_PER_ID = 12;
+
+export interface PayerAliasVobNameRow {
+  /** The `vob_payer_id` alias_norm this name was filed under — the loader's grouping key. */
+  payer_id: string;
+  /** `upper(btrim(insurance_co))` — the vob_insurance_co alias_norm form. */
+  name: string;
+  /** Members whose latest VOB carries this id AND this name. `count(*)::int`, so a number. */
+  members: number;
+  /** Distinct names under this id, over ALL names — not only the `perId` returned. */
+  total_names: number;
+  /** Members under this id, over ALL names. */
+  total_members: number;
+}
+
+export function buildPayerAliasVobNamesQuery(
+  payerIds: readonly string[],
+  perId: number = VOB_NAMES_PER_ID,
+): { sql: string; params: unknown[] } {
+  const limit = clampInt(perId, 1, 50, VOB_NAMES_PER_ID);
+  return {
+    sql:
+      'select r.payer_id, r.name, r.members, r.total_names, r.total_members ' +
+      'from ( ' +
+      '  select n.payer_id, n.name, n.members, ' +
+      '         row_number() over (partition by n.payer_id order by n.members desc, n.name) as rn, ' +
+      '         (count(*) over (partition by n.payer_id))::int as total_names, ' +
+      '         (sum(n.members) over (partition by n.payer_id))::int as total_members ' +
+      '  from ( ' +
+      '    select q.alias_norm as payer_id, upper(btrim(v.insurance_co)) as name, count(*)::int as members ' +
+      '    from unnest($1::text[]) as q(alias_norm) ' +
+      `    join ${PAYER_ALIAS_VOB_SOURCE} v on v.payer_id = q.alias_norm ` +
+      "    where nullif(btrim(v.insurance_co), '') is not null " +
+      '    group by q.alias_norm, upper(btrim(v.insurance_co)) ' +
+      '  ) n ' +
+      ') r ' +
+      'where r.rn <= $2 ' +
+      'order by r.payer_id, r.members desc, r.name',
+    params: [[...payerIds], limit],
   };
 }
 

@@ -23,10 +23,13 @@ export function UserMenu({
   email,
   canManageUsers = false,
   canViewUserLogs = false,
+  canRulePayerAliases = false,
 }: {
   email: string;
   canManageUsers?: boolean;
   canViewUserLogs?: boolean;
+  /** super_admin with a real principal — resolved server-side in the layout, NOT canManageUsers. */
+  canRulePayerAliases?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -90,6 +93,16 @@ export function UserMenu({
               className="block border-b border-line px-3 py-2 text-left text-sm text-ink900 transition-colors hover:bg-teal50"
             >
               User logs
+            </Link>
+          )}
+          {canRulePayerAliases && (
+            <Link
+              href="/admin/payer-aliases"
+              role="menuitem"
+              onClick={() => setOpen(false)}
+              className="block border-b border-line px-3 py-2 text-left text-sm text-ink900 transition-colors hover:bg-teal50"
+            >
+              Payer aliases
             </Link>
           )}
           <form action={signOut}>

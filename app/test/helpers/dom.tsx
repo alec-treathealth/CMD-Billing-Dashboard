@@ -111,6 +111,11 @@ export function installDom(): JSDOM {
   };
   for (const key of [
     'window',
+    // ⚠ ADDED 2026-09-08. `next/link`'s client bundle reads the browser global `self` on render
+    // (it is `window` in a browser). Without it the first client-mounted <Link> throws
+    // "ReferenceError: self is not defined" INSIDE React's render, which the runner reports against
+    // the test that clicked, not the import that lacked the global. jsdom's window.self === window.
+    'self',
     'document',
     'navigator',
     'Node',
