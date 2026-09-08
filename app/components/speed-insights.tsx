@@ -14,10 +14,12 @@ import { SpeedInsights as VercelSpeedInsights } from '@vercel/speed-insights/nex
  * │ optional. So reading computeRoute and concluding "the query string never leaves" is reading    │
  * │ the wrong half of the transmit path.                                                           │
  * │                                                                                                │
- * │ This app's URLs carry ?facility=<rehab>&payer=<carrier> (Qualify) and ?actor=<staff email>     │
- * │ (admin/user-logs). lib/qualify/urlState.ts's P0-4 header rules exactly that facility+payer     │
- * │ combination out of "history/Referer/edge logs" as a re-identification vector on an OON book.   │
- * │ Speed Insights is a NEW egress channel for it, so the same ruling applies here.                │
+ * │ This app's URLs carry ?actor=<staff email> (admin/user-logs — staff PII, the clear-cut item)   │
+ * │ and ?facility=<rehab>&payer=<carrier> (Qualify). lib/qualify/urlState.ts's P0-4 header         │
+ * │ classes facility+payer as NON-PHI compose selections and keeps EMPLOYER out of the URL         │
+ * │ because the employer+facility+payer TRIPLE is the re-identification vector on an OON book.     │
+ * │ Speed Insights is a second, RETAINED copy of the URL in a vendor dataset — Vercel-as-host      │
+ * │ already sees it in edge logs — so the same discipline applies: strip before egress.            │
  * │                                                                                                │
  * │ beforeSend is the only lever we control over that remote script. Strip the WHOLE search + hash │
  * │ rather than allowlisting keys — an allowlist rots the moment someone adds a param, and the     │
