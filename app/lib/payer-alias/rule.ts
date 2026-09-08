@@ -23,6 +23,7 @@
  * principal and never from client input; `RulingInputSchema` has no `ruledBy` key and `.strict()`
  * rejects a payload that invents one.
  */
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   buildPayerAliasContainmentQuery,
@@ -41,6 +42,58 @@ import {
 import type { PayerAliasDb } from './db';
 
 const GENERIC_ERROR = 'The ruling could not be saved right now.';
+
+/**
+ * ⚠️⚠️ TEMPORARY DIAGNOSTIC INSTRUMENTATION — PREVIEW ONLY. DO NOT MERGE TO main. ⚠️⚠️
+ *
+ * Production raised `sqlstate=42601` (`syntax error at or near "select"`) on the first real ruling,
+ * 2026-09-08 00:50:01, and wrote nothing. The same SQL, built by the same builders, executes cleanly
+ * as `claims_reader` against the SAME project on the SAME port-6543 Supavisor pooler from a laptop.
+ * The one thing never observed is the string production actually SENT — the catch below logs only
+ * `err.code` by design, so "the text is the same" has always been an assumption, never a measurement.
+ *
+ * ── WHY THESE FIELDS AND NOT err.message ─────────────────────────────────────────────────────────
+ * `err.message` is still NEVER logged, and that restriction is not being relaxed: Postgres echoes
+ * offending literals into syntax-error messages, and `alias_norm` can hold an employer name. Every
+ * field below is structurally incapable of containing a bound parameter:
+ *   · position  — an integer character offset into the statement
+ *   · routine   — the C function that raised (e.g. `scanner_yyerror`), a fixed symbol
+ *   · sqlLen    — an integer
+ *   · sqlSha256 — a one-way digest; it can only ever CONFIRM or DENY a match against a known hash
+ *   · paramCount— an integer. Parameter VALUES are never touched.
+ *
+ * Expected hashes for the defer path, measured locally 2026-09-08 against the live database:
+ *   containment   len=214 params=3 sha256=9e167f1f46661267c78d23cdc59233587a6ae5ac5c7fd45f4cc6a384e4a3dde8
+ *   definer-call  len=68  params=7 sha256=5532ef59037a263dcc5f1d77ae3627578a4bc602b6c628608a64c2b8b17855a6
+ * A MATCH means the bundle sent exactly what the source builds, and the fault is in transport or
+ * the pooler. A MISMATCH means the deployed bundle builds a different string, and `position` says
+ * where it breaks.
+ *
+ * `stage` is what makes this decisive rather than suggestive: it names WHICH of the two statements
+ * was in flight. Everything so far has had to INFER that from pg_stat_statements call counts.
+ */
+interface InFlight {
+  label: 'containment' | 'definer-call';
+  sql: string;
+  paramCount: number;
+}
+
+function diagnosticSuffix(err: unknown, inFlight: InFlight | null): string {
+  if (inFlight === null) return ' stage=none';
+  const e = (typeof err === 'object' && err !== null ? err : {}) as {
+    position?: unknown;
+    routine?: unknown;
+  };
+  const sha = createHash('sha256').update(inFlight.sql, 'utf8').digest('hex');
+  return (
+    ` stage=${inFlight.label}` +
+    ` position=${e.position === undefined ? 'n/a' : String(e.position)}` +
+    ` routine=${e.routine === undefined ? 'n/a' : String(e.routine)}` +
+    ` sqlLen=${inFlight.sql.length}` +
+    ` sqlSha256=${sha}` +
+    ` paramCount=${inFlight.paramCount}`
+  );
+}
 
 const RULING_FIELDS = ['alias', 'action', 'relationship', 'canonicalPayerId', 'reviewNote', 'ruledBy'] as const;
 function isRulingField(value: string): value is RulingFieldError['field'] {
@@ -138,10 +191,16 @@ export async function executeRuling(
   const shapeError = validateRulingShape(input);
   if (shapeError) return { ok: false, error: shapeError.message, field: shapeError.field };
 
+  // ⚠️ DIAGNOSTIC ONLY (see diagnosticSuffix). Names the statement in flight so the catch can say
+  // WHICH one raised instead of leaving it to be inferred. Function-local, never module state — two
+  // concurrent rulings must not overwrite each other's context.
+  let inFlight: InFlight | null = null;
+
   try {
     // ── Containment read: does the row exist and is it still unruled; is the canonical live. ──
     // This is for the MESSAGE, not the safety — the definer re-checks needs_review under FOR UPDATE.
     const cq = buildPayerAliasContainmentQuery(input.vocabulary, input.aliasNorm, input.canonicalPayerId);
+    inFlight = { label: 'containment', sql: cq.sql, paramCount: cq.params.length };
     const cres = await deps.db.query<RulingContainmentFacts>(cq.sql, cq.params);
     const facts: RulingContainmentFacts = cres.rows[0] ?? { rowNeedsReview: null, canonicalActive: null };
 
@@ -152,6 +211,7 @@ export async function executeRuling(
 
     // ── THE ONE WRITE. ──
     const wq = buildPayerAliasRulingCall(input);
+    inFlight = { label: 'definer-call', sql: wq.sql, paramCount: wq.params.length };
     const wres = await deps.db.query<{ ruling_id: string }>(wq.sql, wq.params);
     const rulingId = wres.rows[0]?.ruling_id;
     if (rulingId === undefined || rulingId === null) {
@@ -203,7 +263,9 @@ export async function executeRuling(
   } catch (err) {
     // sqlstate only to the server log; never the driver message, which can echo bound parameters.
     const code = typeof err === 'object' && err !== null ? String((err as { code?: unknown }).code) : 'unknown';
-    console.error(`rulePayerAlias failed: sqlstate=${code}`);
+    // ⚠️ TEMPORARY — the diagnosticSuffix half comes OUT before this reaches main. err.message is
+    // still absent and stays absent; every appended field is an integer, a fixed symbol, or a digest.
+    console.error(`rulePayerAlias failed: sqlstate=${code}${diagnosticSuffix(err, inFlight)}`);
     // P0002 here means the row was ruled between our containment read and the definer call — a real
     // race, and the definer's guard is what caught it. Say so rather than showing a generic failure.
     if (code === 'P0002') {
