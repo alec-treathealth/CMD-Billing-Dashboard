@@ -54,6 +54,67 @@
 set role claims_admin;
 
 -- ════════════════════════════════════════════════════════════════════════════════════════════
+-- QODO REVIEW, ROUND 1 (PR #340, 2026-09-08) — four findings, dispositions recorded here so the
+-- file explains its own shape.
+--   1 REJECTED  "writer lacks USAGE on the identity sequences". Measured live: all three sibling
+--               sequences carry owner-only ACLs, has_sequence_privilege(cmd_rollup_writer, USAGE)
+--               is false, and the writer has inserted 3,217 payment rows through them. 013:690
+--               says it: identity PKs are GENERATED ALWAYS, INSERT needs no sequence privilege.
+--   2 FIXED     the service-line fingerprint omitted payment_date, so a claim re-issued on a
+--               later remit collided at line grain and ON CONFLICT DO NOTHING dropped the
+--               corrected line — 013's inflation defect inverted into a deletion defect. The
+--               claim recipe and era835Fingerprint (#15) both carry payment_date; the line
+--               recipe now does too, plus the line money (see the recipe note).
+--   3 FIXED     surrogate FKs validated existence, not tenant. Composite tenant-qualified FKs
+--               below make cross-tenant and claim/payment-inconsistent references unwritable.
+--               ⚠ THIS IS 037's ONE TOUCH ON A LIVE TABLE: a unique index on
+--               era_835_payment (business_entity_id, id), required by Postgres as the target of a
+--               composite FK. 2,869 rows; instant; dropped by the rollback.
+--   4 FIXED     CREATE TABLE IF NOT EXISTS had no shape guard. The DO block below is 013 §0's
+--               pattern: a stale or hand-made table with the same name RAISES instead of
+--               silently receiving indexes, policies and grants. The rollback gained 013's
+--               populated-table guard (GUC opt-in) in the same pass.
+-- ════════════════════════════════════════════════════════════════════════════════════════════
+
+-- ── 0. ACTIVE SHAPE GUARD (a comment is not a guard — 013 §0, 016 §1) ───────────────────────
+-- Neither table exists today (verified 2026-09-08). This protects a RE-RUN against a drifted or
+-- hand-created table: CREATE TABLE IF NOT EXISTS would keep it and everything below would report
+-- success against the wrong shape. 017 forbids FORCE ROW LEVEL SECURITY on staging (owner-path
+-- writes rely on bypass), so a forced table is rejected too.
+do $$
+declare t text;
+begin
+  foreach t in array array['era_835_claim','era_835_service_line'] loop
+    if to_regclass('staging.' || t) is not null then
+      if exists (select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                  where n.nspname = 'staging' and c.relname = t and c.relforcerowsecurity) then
+        raise exception '037 shape guard: staging.% already exists WITH FORCE ROW LEVEL SECURITY. 017 forbids that on staging. Resolve deliberately before re-running 037.', t;
+      end if;
+      if not exists (select 1 from information_schema.columns
+                      where table_schema = 'staging' and table_name = t and column_name = 'row_fingerprint') then
+        raise exception '037 shape guard: staging.% already exists without row_fingerprint — a stale or hand-made table. CREATE TABLE IF NOT EXISTS would silently keep it. Drop it (empty by record) or migrate it deliberately before re-running 037.', t;
+      end if;
+    end if;
+  end loop;
+  if to_regclass('staging.era_835_claim') is not null and not exists (
+       select 1 from information_schema.columns
+        where table_schema = 'staging' and table_name = 'era_835_claim' and column_name = 'member_id_bidx') then
+    raise exception '037 shape guard: staging.era_835_claim exists without member_id_bidx — not the 037 shape.';
+  end if;
+  if to_regclass('staging.era_835_service_line') is not null and not exists (
+       select 1 from information_schema.columns
+        where table_schema = 'staging' and table_name = 'era_835_service_line' and column_name = 'remark_codes') then
+    raise exception '037 shape guard: staging.era_835_service_line exists without remark_codes — not the 037 shape.';
+  end if;
+end $$;
+
+-- ── FIX 3 prerequisite: Postgres requires a UNIQUE index matching the referenced columns of a
+-- composite FK. (id) alone is the PK, so (business_entity_id, id) is trivially unique — this index
+-- exists only to be a legal FK target. ⚠ The one statement in 037 that touches a LIVE table.
+create unique index if not exists era_835_payment_entity_id
+  on staging.era_835_payment (business_entity_id, id);
+
+-- ════════════════════════════════════════════════════════════════════════════════════════════
 -- 1. staging.era_835_claim — one row per CLP loop (Loop 2100)
 -- ════════════════════════════════════════════════════════════════════════════════════════════
 create table if not exists staging.era_835_claim (
@@ -65,8 +126,14 @@ create table if not exists staging.era_835_claim (
   business_entity_id             uuid not null
                                    references core.business_entity(id) on delete restrict,
 
-  payment_id                     bigint not null
-                                   references staging.era_835_payment(id) on delete restrict,
+  -- Tenant-QUALIFIED remit FK (Qodo #340 finding 3): the referenced payment must belong to
+  -- THIS row's tenant, or the insert fails. A bare `references era_835_payment(id)` checks only
+  -- that some payment exists; RLS checks only this row's business_entity_id — neither proves the
+  -- parent is the same tenant. The composite FK does.
+  payment_id                     bigint not null,
+  constraint era_835_claim_payment_fk
+    foreign key (business_entity_id, payment_id)
+    references staging.era_835_payment (business_entity_id, id) on delete restrict,
 
   facility_code                  text not null check (char_length(facility_code) <= 50),
   cmd_customer_id                text not null check (char_length(cmd_customer_id) <= 50),
@@ -153,12 +220,17 @@ create table if not exists staging.era_835_claim (
   ingested_by                    text not null check (char_length(ingested_by) <= 100)
 );
 
--- ── business_entity_id LEADS every non-FK index, shown rather than asserted. ────────────────
+-- FK target for the service-line composite FK: pins a line to (tenant, claim, remit) at once, so
+-- a line cannot name a different remit than its parent claim does.
+create unique index if not exists era_835_claim_entity_id_payment
+  on staging.era_835_claim (business_entity_id, id, payment_id);
+
+-- ── business_entity_id LEADS EVERY index, shown rather than asserted — no exceptions now. ────
 -- The RLS policy below filters on business_entity_id before anything else, so an index that
--- does not lead with it cannot serve the policy's own predicate. The FK-only indexes are the
--- deliberate exception and match era_835_payment_id / era_835_claim_line on the sibling table:
--- point lookups by surrogate id, carrying no tenant predicate.
-create index if not exists era_835_claim_payment         on staging.era_835_claim (payment_id);
+-- does not lead with it cannot serve the policy's own predicate. The earlier draft carved out the
+-- FK lookups as single-column exceptions; with composite tenant-qualified FKs the FK lookups are
+-- themselves tenant-led, so the exception is gone.
+create index if not exists era_835_claim_payment         on staging.era_835_claim (business_entity_id, payment_id);
 create index if not exists era_835_claim_facility_entity on staging.era_835_claim (business_entity_id, facility_code);
 create index if not exists era_835_claim_patient_control on staging.era_835_claim (business_entity_id, patient_control_number);
 create index if not exists era_835_claim_payer_control   on staging.era_835_claim (business_entity_id, payer_claim_control_number);
@@ -175,13 +247,19 @@ create table if not exists staging.era_835_service_line (
   -- ⚠ claim_id here is a BIGINT SURROGATE pointing at staging.era_835_claim above. It is NOT
   -- DB 2's text claim_id, and NOT staging.claim_line. Naming follows the sibling convention
   -- (era_835_adjustment.payment_id → era_835_payment.id).
-  claim_id                 bigint not null
-                             references staging.era_835_claim(id) on delete restrict,
+  claim_id                 bigint not null,
+  -- (tenant, claim, remit) in one FK (Qodo #340 finding 3): the parent claim must be this tenant's
+  -- AND must sit on the same remit this line names below. Existence alone proves neither.
+  constraint era_835_line_claim_fk
+    foreign key (business_entity_id, claim_id, payment_id)
+    references staging.era_835_claim (business_entity_id, id, payment_id) on delete restrict,
 
   -- Denormalised the way era_835_adjustment carries payment_id directly: a line must be
   -- attributable to its remit without a two-hop join, and the ingest already holds the id.
-  payment_id               bigint not null
-                             references staging.era_835_payment(id) on delete restrict,
+  payment_id               bigint not null,
+  constraint era_835_line_payment_fk
+    foreign key (business_entity_id, payment_id)
+    references staging.era_835_payment (business_entity_id, id) on delete restrict,
 
   facility_code            text not null check (char_length(facility_code) <= 50),
   cmd_customer_id          text not null check (char_length(cmd_customer_id) <= 50),
@@ -210,8 +288,8 @@ create table if not exists staging.era_835_service_line (
                              check (char_length(source) <= 30),
 
   -- ── THE NATURAL KEY ───────────────────────────────────────────────────────────────────────
-  -- RECIPE (8) — literally era835Fingerprint with the CAS-triplet ingredients removed, which is
-  -- the correct relationship: an adjustment IS a line plus a triplet. Stability, per ingredient:
+  -- RECIPE (11) — era835Fingerprint with the CAS-triplet ingredients removed, PLUS the line
+  -- money the way the claim recipe carries CLP03/04. Stability, per ingredient:
   --   1 cmd_customer_id             our roster constant; never parsed from the EDI
   --   2 payer_claim_control_number  CLP07 — ties the line to its claim by NATURAL key, so the
   --                                 line's identity never depends on the parent's surrogate id
@@ -222,6 +300,21 @@ create table if not exists staging.era_835_service_line (
   --   6 line_item_control_number    REF*6R, our own 837 service-line id echoed back (#5)
   --   7 procedure_code              SVC01, what was adjudicated (#14)
   --   8 service_date                DTM*472, a clinical fact (#13)
+  --   9 payment_date                BPR16 — REMIT IDENTITY. era835Fingerprint #15, and the claim
+  --                                 recipe #7. ⚠ Qodo #340 finding 2: an earlier draft omitted it,
+  --                                 so a claim RE-ISSUED on a later remit (takeback + re-adjudication
+  --                                 is a normal 835 pattern) with the same control numbers, line
+  --                                 position, procedure and service date produced an IDENTICAL line
+  --                                 fingerprint, and ON CONFLICT DO NOTHING silently dropped the
+  --                                 corrected line. That is 013's defect class: a wrong fingerprint
+  --                                 that fails silently and expensively.
+  --  10 line_charge_amount          SVC02, adjudicated money, NORMALISED fixed-2 — mirrors CLP03 on
+  --                                 the claim recipe; a corrected amount on the same remit is its
+  --                                 own history row, not a collision
+  --  11 line_paid_amount            SVC03, same
+  -- NOT payment_id: a surrogate assigned at insert, and the ruling against DB 2's synthetic
+  -- claim_id applies to any surrogate in a hash. payment_date is the natural remit identity and is
+  -- what the precedent already uses.
   -- EXCLUDED for the same reasons as the claim table: era_source_file (CMD regenerates the
   -- archive per request) and era_control_number (per-file sequence; the child precedent omits
   -- it). Both are stored columns above.
@@ -231,8 +324,8 @@ create table if not exists staging.era_835_service_line (
   ingested_by              text not null check (char_length(ingested_by) <= 100)
 );
 
-create index if not exists era_835_line_claim     on staging.era_835_service_line (claim_id);
-create index if not exists era_835_line_payment   on staging.era_835_service_line (payment_id);
+create index if not exists era_835_line_claim     on staging.era_835_service_line (business_entity_id, claim_id);
+create index if not exists era_835_line_payment   on staging.era_835_service_line (business_entity_id, payment_id);
 create index if not exists era_835_line_facility  on staging.era_835_service_line (business_entity_id, facility_code, service_date);
 create index if not exists era_835_line_procedure on staging.era_835_service_line (business_entity_id, procedure_code);
 
