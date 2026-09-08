@@ -56,6 +56,11 @@ set role claims_admin;
 -- ════════════════════════════════════════════════════════════════════════════════════════════
 -- 1. staging.era_835_claim — one row per CLP loop (Loop 2100)
 -- ════════════════════════════════════════════════════════════════════════════════════════════
+-- Surrogate ids are only tenant-safe when paired with the tenant key.  These supporting
+-- uniqueness constraints make the composite FKs below enforce that invariant.
+create unique index if not exists era_835_payment_entity_id
+  on staging.era_835_payment (business_entity_id, id);
+
 create table if not exists staging.era_835_claim (
   id                             bigint generated always as identity primary key,
 
@@ -65,8 +70,12 @@ create table if not exists staging.era_835_claim (
   business_entity_id             uuid not null
                                    references core.business_entity(id) on delete restrict,
 
-  payment_id                     bigint not null
-                                   references staging.era_835_payment(id) on delete restrict,
+  payment_id                     bigint not null,
+
+    -- Tenant-qualified remit relationship; the payment must belong to this claim's tenant.
+    constraint era_835_claim_payment_fk
+      foreign key (business_entity_id, payment_id)
+      references staging.era_835_payment(business_entity_id, id) on delete restrict,
 
   facility_code                  text not null check (char_length(facility_code) <= 50),
   cmd_customer_id                text not null check (char_length(cmd_customer_id) <= 50),
@@ -153,6 +162,9 @@ create table if not exists staging.era_835_claim (
   ingested_by                    text not null check (char_length(ingested_by) <= 100)
 );
 
+  create unique index if not exists era_835_claim_entity_id_payment
+    on staging.era_835_claim (business_entity_id, id, payment_id);
+
 -- ── business_entity_id LEADS every non-FK index, shown rather than asserted. ────────────────
 -- The RLS policy below filters on business_entity_id before anything else, so an index that
 -- does not lead with it cannot serve the policy's own predicate. The FK-only indexes are the
@@ -175,14 +187,21 @@ create table if not exists staging.era_835_service_line (
   -- ⚠ claim_id here is a BIGINT SURROGATE pointing at staging.era_835_claim above. It is NOT
   -- DB 2's text claim_id, and NOT staging.claim_line. Naming follows the sibling convention
   -- (era_835_adjustment.payment_id → era_835_payment.id).
-  claim_id                 bigint not null
-                             references staging.era_835_claim(id) on delete restrict,
+  claim_id                 bigint not null,
 
+    -- Tenant-qualified and payment-consistent parent relationship.
+    constraint era_835_line_claim_fk
+      foreign key (business_entity_id, claim_id, payment_id)
+      references staging.era_835_claim(business_entity_id, id, payment_id) on delete restrict,
+                             
   -- Denormalised the way era_835_adjustment carries payment_id directly: a line must be
   -- attributable to its remit without a two-hop join, and the ingest already holds the id.
-  payment_id               bigint not null
-                             references staging.era_835_payment(id) on delete restrict,
+  payment_id               bigint not null,
 
+    constraint era_835_line_payment_fk
+      foreign key (business_entity_id, payment_id)
+      references staging.era_835_payment(business_entity_id, id) on delete restrict,
+                             
   facility_code            text not null check (char_length(facility_code) <= 50),
   cmd_customer_id          text not null check (char_length(cmd_customer_id) <= 50),
   claim_index              integer not null default 0,
@@ -222,7 +241,11 @@ create table if not exists staging.era_835_service_line (
   --   6 line_item_control_number    REF*6R, our own 837 service-line id echoed back (#5)
   --   7 procedure_code              SVC01, what was adjudicated (#14)
   --   8 service_date                DTM*472, a clinical fact (#13)
-  -- EXCLUDED for the same reasons as the claim table: era_source_file (CMD regenerates the
+  --   9 payment_id                  remit identity; prevents corrected-remit collisions
+--  10 payment_date                remit identity, matching the adjustment precedent
+--  11 line_charge_amount          adjudicated line value
+--  12 line_paid_amount            adjudicated line value
+-- EXCLUDED for the same reasons as the claim table: era_source_file (CMD regenerates the
   -- archive per request) and era_control_number (per-file sequence; the child precedent omits
   -- it). Both are stored columns above.
   row_fingerprint          text not null unique,
