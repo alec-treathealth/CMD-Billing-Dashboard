@@ -286,6 +286,8 @@ const fmtInt = (n: number): string => n.toLocaleString('en-US');
  *   · 13–24    — one <details>, the 12 heaviest, plus an overflow line naming what is not shown.
  *   · ≥ 25     — one line saying the list cannot help, and no list. See VOB_NAMES_UNHELPFUL_FROM.
  *   · 0        — one line stating the absence (the bare-equality join found no VOB row for this id).
+ *   · members, no names — one line saying so. NOT the 0 case: rows exist, none carries a company
+ *                name. total_members counts them; nothing is listed (Qodo #343 finding 2).
  *
  * ⚠️ COLLAPSE IS PRESENTATION, NOT CONTAINMENT. A closed <details> still serialises its children:
  * every name in the 2–24 renderings is in the HTML whether or not the reader has opened it. That is
@@ -301,6 +303,25 @@ export function VobNameList({ names }: { names: readonly PayerAliasVobNameRow[] 
   }
   const totalNames = first.total_names;
   const totalMembers = first.total_members;
+  // Qodo #343 finding 2: total_members counts EVERY member under the id, named or not. A blank
+  // insurance_co is a member without a name, not a missing member, so the figure the card calls
+  // "members" must not shrink because a VOB left the company field empty — and when some did, the
+  // card says how many, so a reviewer knows the list below does not account for all of them.
+  const unnamed = Math.max(0, totalMembers - first.named_members);
+  const unnamedNote = unnamed > 0 ? ` · ${fmtInt(unnamed)} without a name` : '';
+
+  if (totalNames === 0) {
+    // The MARKER row: members exist under this id but none carries an insurance-company name.
+    // This is not "no VOB row" — the id is in use — and there is nothing to list.
+    return (
+      <p className="mt-2 text-xs text-ink600">
+        <span className="font-medium">
+          {fmtInt(totalMembers)} VOB {totalMembers === 1 ? 'member carries' : 'members carry'} this payer id
+        </span>
+        , but none records an insurance-company name — nothing to list.
+      </p>
+    );
+  }
 
   if (totalNames === 1) {
     return (
@@ -309,6 +330,7 @@ export function VobNameList({ names }: { names: readonly PayerAliasVobNameRow[] 
         <span className="font-mono text-ink900">{first.name}</span>
         <span className="ml-2 tabular-nums">
           · {fmtInt(first.members)} {first.members === 1 ? 'member' : 'members'}
+          {unnamedNote}
         </span>
       </p>
     );
@@ -318,7 +340,7 @@ export function VobNameList({ names }: { names: readonly PayerAliasVobNameRow[] 
     return (
       <p className="mt-2 text-xs text-ink600">
         <span className="font-medium text-status-warn">{fmtInt(totalNames)} VOB names</span> share this
-        id across {fmtInt(totalMembers)} members — too many for a name list to help, so none is shown.
+        id across {fmtInt(totalMembers)} members{unnamedNote} — too many for a name list to help, so none is shown.
       </p>
     );
   }
@@ -326,11 +348,11 @@ export function VobNameList({ names }: { names: readonly PayerAliasVobNameRow[] 
   return (
     <details className="mt-2 rounded-lg border border-line bg-surface px-3 py-2">
       <summary className="cursor-pointer text-xs font-semibold text-ink900">
-        {fmtInt(totalNames)} VOB names · {fmtInt(totalMembers)} members
+        {fmtInt(totalNames)} VOB names · {fmtInt(totalMembers)} members{unnamedNote}
       </summary>
       <ul className="mt-2 space-y-0.5">
         {names.map((n) => (
-          <li key={n.name} className="text-xs text-ink600">
+          <li key={n.name ?? ''} className="text-xs text-ink600">
             <span className="font-mono text-ink900">{n.name}</span>
             <span className="ml-2 tabular-nums">
               <span className="sr-only">members </span>
@@ -341,7 +363,7 @@ export function VobNameList({ names }: { names: readonly PayerAliasVobNameRow[] 
       </ul>
       {totalNames > names.length ? (
         <p className="mt-2 text-xs tabular-nums text-ink400">
-          showing {names.length} of {fmtInt(totalNames)} · {fmtInt(totalMembers)} members
+          showing {names.length} of {fmtInt(totalNames)} · {fmtInt(totalMembers)} members{unnamedNote}
         </p>
       ) : null}
     </details>

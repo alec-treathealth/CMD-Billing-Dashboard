@@ -358,14 +358,24 @@ export const VOB_NAMES_PER_ID = 12;
 export interface PayerAliasVobNameRow {
   /** The `vob_payer_id` alias_norm this name was filed under — the loader's grouping key. */
   payer_id: string;
-  /** `upper(btrim(insurance_co))` — the vob_insurance_co alias_norm form. */
-  name: string;
-  /** Members whose latest VOB carries this id AND this name. `count(*)::int`, so a number. */
+  /**
+   * `upper(btrim(insurance_co))` — the vob_insurance_co alias_norm form. NULL on exactly one kind
+   * of row: the MARKER the query emits for an id that has members but no named ones, so the card
+   * can say that instead of "no VOB row" (Qodo #343 finding 2).
+   */
+  name: string | null;
+  /** Members whose latest VOB carries this id AND this name. `count(*)::int`, so a number. 0 on a marker. */
   members: number;
-  /** Distinct names under this id, over ALL names — not only the `perId` returned. */
+  /** Distinct NAMED entries under this id, over ALL names — not only the `perId` returned. 0 on a marker. */
   total_names: number;
-  /** Members under this id, over ALL names. */
+  /**
+   * EVERY member whose latest VOB carries this id, named or not. A blank insurance_co is a member
+   * without a name, not a missing member — this figure must not shrink because a VOB left the
+   * company field empty. Measured 2026-09-07: 0 blank rows today; this guards the drift.
+   */
   total_members: number;
+  /** Of total_members, how many carry a name. total_members − named_members = unnamed. */
+  named_members: number;
 }
 
 export function buildPayerAliasVobNamesQuery(
@@ -373,21 +383,37 @@ export function buildPayerAliasVobNamesQuery(
   perId: number = VOB_NAMES_PER_ID,
 ): { sql: string; params: unknown[] } {
   const limit = clampInt(perId, 1, 50, VOB_NAMES_PER_ID);
+  // Two aggregates over the same bare-equality join (Qodo #343 finding 2):
+  //   n — the POPULATION: every member under the id, named or not (total_members), and how many
+  //       carry a name (named_members). Aliased `n` so the per-id cap window stays
+  //       `partition by n.payer_id`, which the root suite pins as the proof the cap is per id.
+  //   x — the NAMED subset the list is built from, unchanged from the first version.
+  // LEFT JOIN n→x: an id whose members are all unnamed yields ONE row with x.* null — name null,
+  // members 0, total_names 0 — which is the MARKER the card renders as "N members, none named"
+  // instead of the false "No VOB row carries this payer id". No CTE and no UNION: the read-only
+  // guard requires every read builder to START with `select`, and this one does.
   return {
     sql:
-      'select r.payer_id, r.name, r.members, r.total_names, r.total_members ' +
+      'select r.payer_id, r.name, r.members, r.total_names, r.total_members, r.named_members ' +
       'from ( ' +
-      '  select n.payer_id, n.name, n.members, ' +
-      '         row_number() over (partition by n.payer_id order by n.members desc, n.name) as rn, ' +
-      '         (count(*) over (partition by n.payer_id))::int as total_names, ' +
-      '         (sum(n.members) over (partition by n.payer_id))::int as total_members ' +
+      '  select n.payer_id, x.name, coalesce(x.members, 0) as members, ' +
+      '         row_number() over (partition by n.payer_id order by x.members desc nulls last, x.name) as rn, ' +
+      '         (count(x.name) over (partition by n.payer_id))::int as total_names, ' +
+      '         n.total_members, n.named_members ' +
       '  from ( ' +
+      '    select q.alias_norm as payer_id, count(*)::int as total_members, ' +
+      "           count(nullif(btrim(v.insurance_co), ''))::int as named_members " +
+      '    from unnest($1::text[]) as q(alias_norm) ' +
+      `    join ${PAYER_ALIAS_VOB_SOURCE} v on v.payer_id = q.alias_norm ` +
+      '    group by q.alias_norm ' +
+      '  ) n ' +
+      '  left join ( ' +
       '    select q.alias_norm as payer_id, upper(btrim(v.insurance_co)) as name, count(*)::int as members ' +
       '    from unnest($1::text[]) as q(alias_norm) ' +
       `    join ${PAYER_ALIAS_VOB_SOURCE} v on v.payer_id = q.alias_norm ` +
       "    where nullif(btrim(v.insurance_co), '') is not null " +
       '    group by q.alias_norm, upper(btrim(v.insurance_co)) ' +
-      '  ) n ' +
+      '  ) x on x.payer_id = n.payer_id ' +
       ') r ' +
       'where r.rn <= $2 ' +
       'order by r.payer_id, r.members desc, r.name',

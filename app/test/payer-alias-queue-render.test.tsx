@@ -85,12 +85,14 @@ const COUNTS = { vob_insurance_co: 646, claims_primary_payer: 145, vob_payer_id:
 
 /** One VOB name under payer id 62308. */
 const vname = (
-  name: string,
+  name: string | null,
   members: number,
   total_names: number,
   total_members: number,
   payer_id = '62308',
-): PayerAliasVobNameRow => ({ payer_id, name, members, total_names, total_members });
+  // Qodo #343 finding 2: defaults to "everyone is named" so every existing call keeps its meaning.
+  named_members = total_members,
+): PayerAliasVobNameRow => ({ payer_id, name, members, total_names, total_members, named_members });
 
 /** N distinct names under one id, heaviest first, capped at 12 exactly the way the SQL caps them. */
 const vnames = (totalNames: number, totalMembers = totalNames * 10): PayerAliasVobNameRow[] =>
@@ -474,7 +476,12 @@ test('a closed <details> is NOT a boundary — every name is in the markup wheth
   const names = vnames(7);
   const html = renderId(names);
   assert.equal(/<details[^>]*\sopen/.test(html), false, 'rendered closed');
-  for (const n of names) assert.ok(html.includes(n.name), `${n.name} must be in the serialised markup`);
+  for (const n of names) {
+    // `name` is nullable only on the marker row (Qodo #343 finding 2); vnames() builds named rows.
+    const name = n.name;
+    assert.ok(name !== null, 'vnames() must build named rows — a null here is a fixture bug');
+    assert.ok(html.includes(name), `${name} must be in the serialised markup`);
+  }
 });
 
 test('VOB names never reach an href', () => {
@@ -623,4 +630,33 @@ test('pending disables the controls rather than hiding them', () => {
   const html = renderForm({}, { pending: true });
   assert.ok(html.includes('disabled'), 'controls must be disabled while a ruling is in flight');
   assert.ok(html.includes('Saving'), 'the submit control should say what is happening');
+});
+
+/* ── 7b. Members without a name — Qodo #343 finding 2 ────────────────────────────────────────── */
+
+test('members but NO named ones: the marker row renders ONE line, not "No VOB row", and no <details>', () => {
+  // total_names 0 with total_members 7: the id is in use by seven members, none of whose latest VOB
+  // records an insurance-company name. An earlier version of the query dropped these before counting,
+  // so the card said "No VOB row carries this payer id verbatim" — false, seven rows carry it.
+  const html = renderToStaticMarkup(<VobNameList names={[vname(null, 0, 0, 7, 'X', 0)]} />);
+  assert.ok(html.includes('7 VOB members carry this payer id'), html);
+  assert.ok(html.includes('none records an insurance-company name'), html);
+  assert.equal(html.includes('No VOB row'), false, 'rows exist — the absence copy is the wrong claim');
+  assert.equal(html.includes('<details'), false, 'nothing to list, so nothing to collapse');
+});
+
+test('some members unnamed: total_members is the WHOLE population and the gap is stated', () => {
+  // 8 members carry the id; 5 have a name (all the same one). The list accounts for 5 of 8 and says so.
+  const one = renderToStaticMarkup(<VobNameList names={[vname('AETNA', 5, 1, 8, 'X', 5)]} />);
+  assert.ok(one.includes('5 members'), one);
+  assert.ok(one.includes('3 without a name'), one);
+  const many = renderToStaticMarkup(
+    <VobNameList names={[vname('AETNA', 6, 2, 10, 'Y', 9), vname('CIGNA', 3, 2, 10, 'Y', 9)]} />,
+  );
+  assert.ok(many.includes('2 VOB names · 10 members · 1 without a name'), many);
+});
+
+test('fully named ids render exactly as before — no unnamed note when named_members == total_members', () => {
+  const html = renderToStaticMarkup(<VobNameList names={[vname('AETNA', 4, 1, 4)]} />);
+  assert.equal(html.includes('without a name'), false, html);
 });

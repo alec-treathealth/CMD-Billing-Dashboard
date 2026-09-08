@@ -6,8 +6,16 @@
  * global header. The email is passed from the server layout (session read server-side);
  * this component holds no secret and makes no data call — Sign out posts the existing
  * `signOut` server action. Closes on outside-click or Escape.
+ *
+ * ── SPLIT (Qodo #343 finding 1) ──────────────────────────────────────────────────────────────────
+ * The menu BODY is a pure leaf, `UserMenuItems`, and the client shell only owns `open`. Which
+ * entries render for which flags is a MARKUP question and is asserted by string render in
+ * app/test/user-menu.test.tsx — the same leaf/island split payer-alias-leaves.tsx uses. It used to
+ * be asserted through jsdom (mount, click, read the DOM); CLAUDE.md sanctions jsdom for FOCUS and
+ * KEYBOARD claims only, and that use forced a `self` global into the shared jsdom helper for every
+ * test that will ever mount a <Link>. The leaf removes the reason for both.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { signOut } from '@/lib/auth-actions';
 
@@ -19,18 +27,74 @@ function initialsFromEmail(email: string): string {
   return local.slice(0, 2).toUpperCase() || '?';
 }
 
+const ITEM_CLASS =
+  'block border-b border-line px-3 py-2 text-left text-sm text-ink900 transition-colors hover:bg-teal50';
+
+export interface UserMenuFlags {
+  canManageUsers?: boolean;
+  canViewUserLogs?: boolean;
+  /** super_admin with a real principal — resolved server-side in the layout, NOT canManageUsers. */
+  canRulePayerAliases?: boolean;
+}
+
+/**
+ * The menu body — header, the role-dependent entries, and a footer slot for the Sign out form.
+ * PURE: no state, no effects, no data access. Renders identically under renderToStaticMarkup and
+ * in the browser, which is what lets the entry set be locked by the hermetic suite without jsdom.
+ *
+ * Entry ORDER is part of the contract (asserted): Manage users · User logs · Payer aliases.
+ */
+export function UserMenuItems({
+  email,
+  canManageUsers = false,
+  canViewUserLogs = false,
+  canRulePayerAliases = false,
+  onNavigate,
+  footer,
+}: UserMenuFlags & {
+  email: string;
+  /** Called when an entry is chosen — the shell uses it to close the menu. Ignored by string render. */
+  onNavigate?: () => void;
+  /** The Sign out form, owned by the shell so the leaf stays free of server-action references. */
+  footer?: ReactNode;
+}): ReactNode {
+  return (
+    <div
+      role="menu"
+      className="absolute right-0 z-50 mt-2 w-56 overflow-hidden rounded-md border border-line bg-surface text-ink900 shadow-ths-lg"
+    >
+      <div className="border-b border-line px-3 py-2">
+        <div className="text-[11px] uppercase tracking-wide text-ink400">Signed in as</div>
+        <div className="truncate text-sm text-ink900" title={email}>
+          {email}
+        </div>
+      </div>
+      {canManageUsers && (
+        <Link href="/admin/users" role="menuitem" onClick={onNavigate} className={ITEM_CLASS}>
+          Manage users
+        </Link>
+      )}
+      {canViewUserLogs && (
+        <Link href="/admin/user-logs" role="menuitem" onClick={onNavigate} className={ITEM_CLASS}>
+          User logs
+        </Link>
+      )}
+      {canRulePayerAliases && (
+        <Link href="/admin/payer-aliases" role="menuitem" onClick={onNavigate} className={ITEM_CLASS}>
+          Payer aliases
+        </Link>
+      )}
+      {footer}
+    </div>
+  );
+}
+
 export function UserMenu({
   email,
   canManageUsers = false,
   canViewUserLogs = false,
   canRulePayerAliases = false,
-}: {
-  email: string;
-  canManageUsers?: boolean;
-  canViewUserLogs?: boolean;
-  /** super_admin with a real principal — resolved server-side in the layout, NOT canManageUsers. */
-  canRulePayerAliases?: boolean;
-}) {
+}: UserMenuFlags & { email: string }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -65,56 +129,24 @@ export function UserMenu({
       </button>
 
       {open && (
-        <div
-          role="menu"
-          className="absolute right-0 z-50 mt-2 w-56 overflow-hidden rounded-md border border-line bg-surface text-ink900 shadow-ths-lg"
-        >
-          <div className="border-b border-line px-3 py-2">
-            <div className="text-[11px] uppercase tracking-wide text-ink400">Signed in as</div>
-            <div className="truncate text-sm text-ink900" title={email}>
-              {email}
-            </div>
-          </div>
-          {canManageUsers && (
-            <Link
-              href="/admin/users"
-              role="menuitem"
-              onClick={() => setOpen(false)}
-              className="block border-b border-line px-3 py-2 text-left text-sm text-ink900 transition-colors hover:bg-teal50"
-            >
-              Manage users
-            </Link>
-          )}
-          {canViewUserLogs && (
-            <Link
-              href="/admin/user-logs"
-              role="menuitem"
-              onClick={() => setOpen(false)}
-              className="block border-b border-line px-3 py-2 text-left text-sm text-ink900 transition-colors hover:bg-teal50"
-            >
-              User logs
-            </Link>
-          )}
-          {canRulePayerAliases && (
-            <Link
-              href="/admin/payer-aliases"
-              role="menuitem"
-              onClick={() => setOpen(false)}
-              className="block border-b border-line px-3 py-2 text-left text-sm text-ink900 transition-colors hover:bg-teal50"
-            >
-              Payer aliases
-            </Link>
-          )}
-          <form action={signOut}>
-            <button
-              type="submit"
-              role="menuitem"
-              className="block w-full px-3 py-2 text-left text-sm text-ink900 transition-colors hover:bg-teal50"
-            >
-              Sign out
-            </button>
-          </form>
-        </div>
+        <UserMenuItems
+          email={email}
+          canManageUsers={canManageUsers}
+          canViewUserLogs={canViewUserLogs}
+          canRulePayerAliases={canRulePayerAliases}
+          onNavigate={() => setOpen(false)}
+          footer={
+            <form action={signOut}>
+              <button
+                type="submit"
+                role="menuitem"
+                className="block w-full px-3 py-2 text-left text-sm text-ink900 transition-colors hover:bg-teal50"
+              >
+                Sign out
+              </button>
+            </form>
+          }
+        />
       )}
     </div>
   );

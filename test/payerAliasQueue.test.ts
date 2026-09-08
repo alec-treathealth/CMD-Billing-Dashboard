@@ -482,3 +482,30 @@ test('the audit action name is defined on the src side, not exported from the us
   // require. The constant therefore lives here.
   assert.equal(PAYER_ALIAS_RULING_AUDIT_ACTION, 'payer_alias_ruling_write');
 });
+
+test('vob names query counts total_members over EVERY member, named or not — Qodo #343 finding 2', () => {
+  const q = buildPayerAliasVobNamesQuery(['A']);
+  // The POPULATION aggregate has NO name filter; the NAMED aggregate does. An earlier version applied
+  // the filter before the count, so a blank insurance_co silently shrank the "members" figure and an
+  // id whose members were all unnamed vanished from the result and read as "no VOB row".
+  const popStart = q.sql.indexOf('select q.alias_norm as payer_id, count(*)::int as total_members');
+  const popEnd = q.sql.indexOf(') n ');
+  assert.ok(popStart > 0 && popEnd > popStart, q.sql);
+  const population = q.sql.slice(popStart, popEnd);
+  assert.ok(population.includes("count(nullif(btrim(v.insurance_co), ''))::int as named_members"), population);
+  assert.equal(population.includes('is not null'), false, 'the population aggregate must not filter on the name');
+  assert.ok(q.sql.includes('as named_members'), q.sql);
+  // The marker: population LEFT JOIN named, so an all-unnamed id is one row with a null name, zero
+  // members and total_names 0 — the leaf renders "N members, none named", never the absence copy.
+  assert.ok(q.sql.includes('left join ('), q.sql);
+  assert.ok(q.sql.includes('coalesce(x.members, 0) as members'), q.sql);
+  assert.ok(q.sql.includes('(count(x.name) over (partition by n.payer_id))::int as total_names'), q.sql);
+  assert.ok(q.sql.includes('order by x.members desc nulls last, x.name'), 'a marker never displaces a real name');
+  // Still bare, still bound, still no member identifier, still a READ (starts with select).
+  assert.ok(q.sql.startsWith('select '), q.sql.slice(0, 40));
+  assert.equal(q.sql.includes('ltrim('), false);
+  for (const phi of ['member_id', 'bidx', 'group_number', 'employer']) {
+    assert.equal(q.sql.includes(phi), false, `${phi} must not appear`);
+  }
+  assert.equal(q.params.length, 2);
+});
