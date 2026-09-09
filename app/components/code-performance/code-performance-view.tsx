@@ -8,7 +8,7 @@
  * vars resolve to the tenant's colours (the bare-attribute rules in globals.css) for the KPI tiles
  * and MiniBars, so a BXR number never wears Indigo's colour.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Filter } from 'lucide-react';
 
 import { Skeleton } from '@/components/ui/skeleton';
@@ -49,8 +49,11 @@ export function CodePerformanceView({ tenants, defaultTenant }: { tenants: CodeP
   const [expanded, setExpanded] = useState<string | null>(null);
   const [details, setDetails] = useState<Record<string, DetailState>>({});
   const facilityKey = facilities.join(FACILITY_KEY_SEPARATOR);
+  const detailScope = `${tenant}:${window}:${facilityKey}`;
+  const detailScopeRef = useRef(detailScope);
 
   useEffect(() => {
+    detailScopeRef.current = detailScope;
     let live = true;
     setBoard({ status: 'loading' });
     setExpanded(null);
@@ -87,14 +90,21 @@ export function CodePerformanceView({ tenants, defaultTenant }: { tenants: CodeP
     const row = rowsByKey.get(key);
     if (!row) return;
     setDetails((d) => ({ ...d, [key]: { status: 'loading' } }));
-    getCodePerformancePairDetail({
+    const requestScope = detailScope;
+      getCodePerformancePairDetail({
       tenant,
       window,
       facilities: facilities.length ? facilities : null,
       pair: { hcpcs: row.hcpcs, locSuffix: row.loc_suffix, revcode: row.revcode },
     })
-      .then((r) => setDetails((d) => ({ ...d, [key]: r.ok ? { status: 'ready', detail: r.detail } : { status: 'error' } })))
-      .catch(() => setDetails((d) => ({ ...d, [key]: { status: 'error' } })));
+      .then((r) => {
+          if (detailScopeRef.current !== requestScope) return;
+          setDetails((d) => ({ ...d, [key]: r.ok ? { status: 'ready', detail: r.detail } : { status: 'error' } }));
+        })
+      .catch(() => {
+          if (detailScopeRef.current !== requestScope) return;
+          setDetails((d) => ({ ...d, [key]: { status: 'error' } }));
+        });
   }
 
   const facilityOptions: PickerOption[] = useMemo(() => {
