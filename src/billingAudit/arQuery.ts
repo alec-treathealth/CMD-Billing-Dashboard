@@ -377,10 +377,10 @@ export function buildArPayerOptionsQuery(entityIds: readonly string[]): { sql: s
 }
 
 /** Staff who can be assigned work — the PHI-capable roles (plain `user` cannot see what it would be assigned). */
-export function buildArAssigneeOptionsQuery(): { sql: string; params: unknown[] } {
+export function buildArAssigneeOptionsQuery(entityIds: readonly string[]): { sql: string; params: unknown[] } {
   return {
-    sql: `select user_id::text as user_id, email, role from claims.app_user where role in ('super_admin', 'admin') order by email`,
-    params: [],
+    sql: `select user_id::text as user_id, email, role from claims.app_user where role = 'super_admin' or (role = 'admin' and business_entity_id = any($1::uuid[])) order by email`,
+    params: [entityIdsOrThrow(entityIds)],
   };
 }
 

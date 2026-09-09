@@ -118,7 +118,7 @@ export const loadArOptions = unstable_cache(
     const exec = arExecutor();
     const f = buildArFacilityOptionsQuery(entityIds);
     const p = buildArPayerOptionsQuery(entityIds);
-    const a = buildArAssigneeOptionsQuery();
+    const a = buildArAssigneeOptionsQuery(entityIds);
     const fr = buildArFreshnessQuery(entityIds);
     const [fac, pay, asg, fresh] = await Promise.all([
       exec.query<Row>(f.sql, f.params),
