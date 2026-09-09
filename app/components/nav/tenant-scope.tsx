@@ -125,6 +125,12 @@ export function fullLabel(view: DashboardView): string {
 
 /** /billing-audit and its sub-routes — the screens whose plane set is narrower than RBAC. */
 export function isClaimsDeskRoute(pathname: string | null): boolean {
+  if (
+    pathname === '/billing-audit/facility-resolution' ||
+    pathname?.startsWith('/billing-audit/facility-resolution/')
+  ) {
+    return false;
+  }
   return pathname === '/billing-audit' || (pathname?.startsWith('/billing-audit/') ?? false);
 }
 
