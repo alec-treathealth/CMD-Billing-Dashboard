@@ -630,8 +630,8 @@ Top nav is built from `app/lib/nav-model.ts` — `nav-links.tsx` (bar) and
 `shell/nav-rail.tsx` (rail) both read it, so the two shells cannot disagree.
 The link set is role-dependent:
 
-- `admin` / `user` / unknown — Overview · Collections · Claims Audit (Beta) · Code Reference
-- `super_admin` — Overview · **Payer Intel** · Collections · Claims Desk · Code Reference
+- `admin` / `user` / unknown — Overview · Collections · Claims Audit (Beta) · Code Performance
+- `super_admin` — Overview · **Payer Intel** · Collections · Claims Desk · Code Performance
 - `admissions_seat` — **Payer Intel only** (single-surface persona)
 
 ⚠ **NO ROLE SEES QUALIFY.** These two bullets said "the above plus Qualify (Beta)"

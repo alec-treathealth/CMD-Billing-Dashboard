@@ -113,7 +113,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           )}
           {/* col 2: nav — centered. NavLinks reads ?view= (to forward it onto the Dashboard
               link) via useSearchParams, so it must be wrapped in Suspense for the static routes
-              (/, /code-reference) this shared layout also renders — same as the switcher below.
+              (/, /code-performance) this shared layout also renders — same as the switcher below.
               In rail mode the rail is the nav, so this is omitted rather than duplicated. */}
           {railMode ? null : (
             <Suspense fallback={null}>
@@ -130,7 +130,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               SwitcherTenantLogo STAYS: it is a read-only indicator of the active tenant (client,
               ?view=-driven; null on consolidated / off-dashboard), which is still useful in the
               chrome on every route. It reads ?view= via useSearchParams, so it keeps its Suspense
-              boundary for the static routes (/, /code-reference) this shared layout also renders.
+              boundary for the static routes (/, /code-performance) this shared layout also renders.
               The avatar needs a session email, so it stays conditional. */}
           <div className="flex items-center justify-end gap-3">
             <Suspense fallback={null}>

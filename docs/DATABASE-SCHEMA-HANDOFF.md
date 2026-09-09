@@ -280,7 +280,7 @@ before onboarding a third tenant.
 | Role | `entity` | Sees |
 |---|---|---|
 | `super_admin` | must be NULL | everything, including Consolidated + Qualify |
-| `admin` | `'bxr'` \| `'indigo'` | its entity's Overview, Collections, Claims Audit, Code Reference |
+| `admin` | `'bxr'` \| `'indigo'` | its entity's Overview, Collections, Claims Audit, Code Performance (renamed from Code Reference 2026-09-08) |
 | `user` | `'bxr'` \| `'indigo'` | same, minus admin controls |
 | `admissions_seat` | must be NULL | **Qualify only** — cross-tenant by design, and **server-stripped of every dollar field** |
 
