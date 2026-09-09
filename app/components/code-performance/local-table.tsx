@@ -71,7 +71,7 @@ export function LTh({
       {/* `whitespace-normal` + a width cap: the th is nowrap so the number never breaks, but an
           un-capped sub on a nowrap ancestor stretches the column to the width of a whole sentence,
           which is what made the table wider than any viewport. */}
-      {sub && <span className="max-w-[10rem] whitespace-normal text-[10px] font-normal normal-case leading-tight tracking-normal text-ink400">{sub}</span>}
+      {sub && <span className="whitespace-nowrap text-[10px] font-normal normal-case leading-tight tracking-normal text-ink400">{sub}</span>}
     </span>
   );
   return (
@@ -80,7 +80,7 @@ export function LTh({
       title={title}
       aria-sort={sortKey ? (active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none') : undefined}
       className={[
-        'whitespace-nowrap border-b border-line bg-teal50 px-2.5 py-1.5 text-left align-bottom text-xs uppercase tracking-wide text-ink600',
+        'whitespace-nowrap border-b border-line bg-teal50 px-2.5 py-1 text-left align-middle text-[11px] uppercase tracking-wide text-ink600',
         'sticky top-0',
         stick ? 'left-0 z-30' : 'z-20',
         align === 'right' ? 'text-right' : 'text-left',
@@ -92,7 +92,7 @@ export function LTh({
           type="button"
           onClick={() => onSort(sortKey)}
           className={[
-            'inline-flex min-h-[36px] items-center gap-1 rounded px-0.5 hover:text-teal700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal500',
+            'inline-flex min-h-[26px] items-center gap-1 rounded px-0.5 hover:text-teal700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal500',
             align === 'right' ? 'flex-row-reverse text-right' : '',
           ].join(' ')}
           aria-label={`Sort by ${typeof children === 'string' ? children : sortKey}`}
@@ -103,7 +103,7 @@ export function LTh({
           </span>
         </button>
       ) : (
-        <span className="inline-flex min-h-[36px] items-center">{content}</span>
+        <span className="inline-flex min-h-[26px] items-center">{content}</span>
       )}
     </th>
   );

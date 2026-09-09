@@ -165,7 +165,7 @@ export function PairingTable({
               dim={dimYield}
               sub={
                 summary.write_off_rate.state === 'suppressed' ? (
-                  <SuppressionReason metric={summary.write_off_rate} />
+                  <SuppressionReason metric={summary.write_off_rate} label="write-off rate" />
                 ) : (
                   'adjustments ÷ billed'
                 )
@@ -196,7 +196,7 @@ export function PairingTable({
               dim={dimYield}
               sub={
                 summary.patient_balance_rate.state === 'suppressed' ? (
-                  <SuppressionReason metric={summary.patient_balance_rate} />
+                  <SuppressionReason metric={summary.patient_balance_rate} label="patient balance" />
                 ) : (
                   'AR aging · share of billed'
                 )

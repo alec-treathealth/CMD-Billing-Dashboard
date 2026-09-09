@@ -109,6 +109,40 @@ test('a suppressed metric is a VISIBLE state — pill in the cell, reason in the
   }
 });
 
+/**
+ * REGRESSION (2026-09-09). The header `sub` used to render a suppressed metric's REASON inline. Those
+ * reasons run past 200 characters, so the cell wrapped to a dozen lines; a table row is as tall as its
+ * tallest cell, so ONE of them inflated the whole header to ~250px, and because the header is STICKY
+ * that slab was pinned over the top of the scroll area — reported as "a huge blue gap above the
+ * columns". Height is invisible to a string render, so this asserts the PROXY that actually caused it:
+ * how much text a header cell carries inline, excluding what is tucked inside a hidden hint.
+ */
+test('the sticky header stays short — no header cell carries a long inline caveat', () => {
+  for (const [name, summary] of [['indigo', indigoSummary], ['bxr', bxrSummary]] as const) {
+    const html = renderTable([row({})], summary);
+    for (const th of html.match(/<th[\s\S]*?<\/th>/g) ?? []) {
+      // Drop the hint panel first: it is `hidden`, so it occupies no height and may be long.
+      const visible = th
+        .replace(/<span[^>]*\bhidden\b[^>]*>[\s\S]*?<\/span>/g, '')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      assert.ok(visible.length <= 60, `${name}: header cell carries ${visible.length} chars inline: ${visible}`);
+    }
+  }
+});
+
+test('a suppressed column still carries its full reason, just not inline', () => {
+  // The hint keeps it in the DOM — `hidden` toggles visibility, not presence — so find-in-page and
+  // assistive tech still reach it while the header stays one line tall.
+  const indigo = renderTable([row({})], indigoSummary);
+  assert.ok(indigo.includes(CODE_PERF_SUPPRESSION_REASONS.indigoPatientBalance.slice(0, 40)));
+  assert.ok(indigo.includes('suppressed'), 'the header says the column is suppressed');
+  // The marker must NOT be the cell's data-state pill, which the per-row count depends on.
+  const headerBlock = indigo.slice(indigo.indexOf('<thead>'), indigo.indexOf('</thead>'));
+  assert.equal(headerBlock.includes('data-state="suppressed"'), false, 'the header must not carry the cell marker');
+});
+
 test('patient balance is labelled as AR aging and sits at the far right, apart from allowed rate', () => {
   const html = renderTable([row({})], indigoSummary);
   const headers = html.match(/<th[\s\S]*?<\/th>/g) ?? [];
