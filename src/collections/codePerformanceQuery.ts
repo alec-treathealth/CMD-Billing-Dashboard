@@ -206,9 +206,13 @@ function scopeParams(scope: CodePerfScope): unknown[] {
 // The shared base CTE — window + normalisation + tenant + facility filter. $1 entity, $2 days, $3 facilities.
 // ---------------------------------------------------------------------------------------------
 
+// ⚠ WINDOW ARITHMETIC — the same contract as src/businessWindow.ts's `trailing` kind: a trailing
+// N-day window is the N civil dates ENDING ON business-today, i.e. [today - N + 1, today]. Written as
+// `>= s and < e + 1` so both bounds are dates. The first draft used `today - N`, which is N + 1 dates:
+// every "30d" board covered 31 days while reporting windowDays = 30 (Qodo #346 finding 4).
 const BASE_CTE = `with win as (
-  select ${BUSINESS_TODAY_SQL} - $2::int as s,
-         ${BUSINESS_TODAY_SQL}           as e
+  select ${BUSINESS_TODAY_SQL} - $2::int + 1 as s,
+         ${BUSINESS_TODAY_SQL}               as e
 ), base as (
   select
     ${HCPCS_NORM_SQL}                          as hcpcs,
@@ -235,11 +239,20 @@ const PAIR_PREDICATE_SQL = `hcpcs is not distinct from $4::text
     and loc_suffix is not distinct from $5::text
     and revcode is not distinct from $6::text`;
 
-/** The metric block shared by every grouped aggregate. Sum-over-sum; no pct_allowed / pct_paid. */
+/**
+ * The metric block shared by every grouped aggregate. Sum-over-sum; no pct_allowed / pct_paid.
+ *
+ * Every count denominator is `nullif(count(*), 0)`. The window summary runs this block UNGROUPED, so
+ * an empty base — a facility filter with no charges in the window — must yield NULL ratios and the
+ * board's empty state, not a 22012 division-by-zero that the action reports as a failure (Qodo #346
+ * finding 3). `insurance_payments` is nullable and derived independently of `payment_received` in the
+ * rollup, so underpaid_dollars coalesces it to 0 exactly as pct_zero_paid already does: a posted
+ * charge with no payment total is FULLY underpaid, not silently dropped from the sum (finding 9).
+ */
 const METRICS_SQL = `count(*)::int                                                    as charges,
     sum(charge_amount)                                               as billed,
     sum(insurance_payments)                                          as collected,
-    round(100.0 * count(*) filter (where ${RELIABLE_TIER_SQL}) / count(*), 1)
+    round(100.0 * count(*) filter (where ${RELIABLE_TIER_SQL}) / nullif(count(*), 0), 1)
                                                                      as allowed_coverage,
     round(100.0 * sum(allowed_reliable) filter (where ${RELIABLE_TIER_SQL})
           / nullif(sum(charge_amount) filter (where ${RELIABLE_TIER_SQL}), 0), 2)
@@ -247,7 +260,7 @@ const METRICS_SQL = `count(*)::int                                              
     round(100.0 * sum(insurance_payments) filter (where ${RELIABLE_TIER_SQL} and allowed_reliable > 0)
           / nullif(sum(allowed_reliable) filter (where ${RELIABLE_TIER_SQL} and allowed_reliable > 0), 0), 2)
                                                                      as paid_of_allowed,
-    sum(greatest(allowed_reliable - insurance_payments, 0))
+    sum(greatest(allowed_reliable - coalesce(insurance_payments, 0), 0))
         filter (where ${RELIABLE_TIER_SQL} and payment_received is not null)
                                                                      as underpaid_dollars,
     percentile_cont(0.5) within group (
@@ -256,13 +269,13 @@ const METRICS_SQL = `count(*)::int                                              
     percentile_cont(0.9) within group (
       order by case when payment_received >= charge_date then payment_received - charge_date end)
                                                                      as days_p90,
-    round(100.0 * count(*) filter (where coalesce(insurance_payments, 0) = 0) / count(*), 1)
+    round(100.0 * count(*) filter (where coalesce(insurance_payments, 0) = 0) / nullif(count(*), 0), 1)
                                                                      as pct_zero_paid,
     round(100.0 * sum(adjustments) / nullif(sum(charge_amount), 0), 2)
                                                                      as write_off_rate,
     round(100.0 * sum(patient_balance_due) / nullif(sum(charge_amount), 0), 2)
                                                                      as patient_balance_rate,
-    round(100.0 * count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / count(*), 1)
+    round(100.0 * count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / nullif(count(*), 0), 1)
                                                                      as matured_share`;
 
 // ---------------------------------------------------------------------------------------------
@@ -276,9 +289,18 @@ export interface SqlQuery {
 
 /**
  * Pairing level: one row per (hcpcs, loc_suffix, revcode), billed desc. Adds payer_concentration and
- * facility_spread via two more grouped passes over the same base CTE (the spread only counts
- * facilities with >= CODE_PERF_FACILITY_MIN_CHARGES charges in the pairing). Joins are NULL-safe
+ * facility_spread via two more grouped passes over the same base CTE. Joins are NULL-safe
  * (`is not distinct from`) because a pairing key may be NULL on any part.
+ *
+ * payer_concentration = the largest IDENTIFIED payer's billed as a share of ALL billed in the pairing.
+ * Unknown-payer dollars (payer_raw NULL — blank in CMD) stay in the DENOMINATOR because they are real
+ * billed dollars, but can never be the NUMERATOR: missing attribution reads as LOW concentration, never
+ * as "the top payer" (Qodo #346 finding 10). NULL when no payer in the pairing is identified.
+ *
+ * facility_spread = max − min allowed_rate across facilities with >= CODE_PERF_FACILITY_MIN_CHARGES
+ * charges in the pairing, and NULL — unavailable, not zero — with fewer than TWO such facilities: one
+ * facility is not a variation (Qodo #346 finding 8). `facilities_rated` always rides along so the UI
+ * can say why the spread is absent.
  */
 export function buildCodePerfPairingQuery(scope: CodePerfScope): SqlQuery {
   const sql = `${BASE_CTE}, pair as (
@@ -297,7 +319,8 @@ export function buildCodePerfPairingQuery(scope: CodePerfScope): SqlQuery {
   group by hcpcs, loc_suffix, revcode, payer_raw
 ), payer_conc as (
   select hcpcs, loc_suffix, revcode,
-    round(100.0 * max(billed) / nullif(sum(billed), 0), 1)           as payer_concentration
+    round(100.0 * max(billed) filter (where payer_raw is not null)
+          / nullif(sum(billed), 0), 1)                               as payer_concentration
   from payer_billed
   group by hcpcs, loc_suffix, revcode
 ), fac as (
@@ -310,7 +333,8 @@ export function buildCodePerfPairingQuery(scope: CodePerfScope): SqlQuery {
 ), fac_spread as (
   select hcpcs, loc_suffix, revcode,
     count(*)::int                                                    as facilities_rated,
-    round(max(allowed_rate) - min(allowed_rate), 2)                  as facility_spread
+    case when count(*) >= 2 then round(max(allowed_rate) - min(allowed_rate), 2) end
+                                                                     as facility_spread
   from fac
   where allowed_rate is not null
   group by hcpcs, loc_suffix, revcode
@@ -373,9 +397,14 @@ order by billed desc, s.payer_raw nulls last`;
 }
 
 /**
- * Facility level for ONE pairing — the outlier view behind facility_spread. Only facilities with
- * >= CODE_PERF_FACILITY_MIN_CHARGES charges in the pairing; ordered by allowed_rate so the spread's
- * two ends are the first and last rows. `below_floor` reports how many facilities were excluded.
+ * Facility level for ONE pairing — the outlier view behind facility_spread. Returns EVERY facility in
+ * the pairing with a `rated` flag (charges >= CODE_PERF_FACILITY_MIN_CHARGES); the core splits rated
+ * rows from the rest and reports the unrated count as `belowFloor`. The first draft filtered to rated
+ * rows in SQL and rode the excluded count on them as a scalar subquery — so when NO facility reached
+ * the floor the result set was empty and the count vanished with it, and the drill-down said nothing
+ * over an empty table (Qodo #346 finding 7). A per-facility row is an aggregate over a bounded set
+ * (BXR 17 / Indigo 28 facilities), so returning them all costs nothing and keeps one query. Rated rows
+ * first, then by allowed_rate, so the spread's two ends are the first and last RATED rows.
  */
 export function buildCodePerfFacilityQuery(scope: CodePerfScope, pair: CodePerfPairKey): SqlQuery {
   const sql = `${BASE_CTE}, scoped as (
@@ -391,12 +420,9 @@ select
   facility, charges, billed, collected, allowed_coverage, allowed_rate, paid_of_allowed,
   underpaid_dollars, days_p50, days_p90, pct_zero_paid, write_off_rate, patient_balance_rate,
   matured_share,
-  (charges >= ${CODE_PERF_FACILITY_MIN_CHARGES})                     as rated,
-  (select count(*)::int from per_facility where charges < ${CODE_PERF_FACILITY_MIN_CHARGES})
-                                                                     as below_floor
+  (charges >= ${CODE_PERF_FACILITY_MIN_CHARGES})                     as rated
 from per_facility
-where charges >= ${CODE_PERF_FACILITY_MIN_CHARGES}
-order by allowed_rate desc nulls last, billed desc, facility nulls last`;
+order by rated desc, allowed_rate desc nulls last, billed desc, facility nulls last`;
   return { sql, params: [...scopeParams(scope), pair.hcpcs, pair.locSuffix, pair.revcode] };
 }
 
@@ -417,9 +443,9 @@ select
   round(100.0 * sum(allowed_reliable) filter (where ${RELIABLE_TIER_SQL})
         / nullif(sum(charge_amount) filter (where ${RELIABLE_TIER_SQL}), 0), 2)
                                                                      as allowed_rate,
-  round(100.0 * count(*) filter (where ${RELIABLE_TIER_SQL}) / count(*), 1)
+  round(100.0 * count(*) filter (where ${RELIABLE_TIER_SQL}) / nullif(count(*), 0), 1)
                                                                      as allowed_coverage,
-  round(100.0 * count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / count(*), 1)
+  round(100.0 * count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / nullif(count(*), 0), 1)
                                                                      as matured_share
 from base
 ${where}
@@ -439,7 +465,7 @@ export function buildCodePerfFacilityOptionsQuery(scope: CodePerfScope): SqlQuer
   const sql = `select r.facility, count(*)::int as charges, sum(r.charge_amount) as billed
 from collections.cmd_explorer_charge_rollup r
 where r.business_entity_id = $1::uuid
-  and r.charge_date >= ${BUSINESS_TODAY_SQL} - $2::int
+  and r.charge_date >= ${BUSINESS_TODAY_SQL} - $2::int + 1
   and r.charge_date <  ${BUSINESS_TODAY_SQL} + 1
 group by r.facility
 order by r.facility nulls last`;
@@ -447,14 +473,20 @@ order by r.facility nulls last`;
 }
 
 /**
- * Freshness, per tenant: max(ingested_at), max(charge_date), max(payment_received), and the count of
- * charges whose payment_received is in the future (Indigo EFT effective dates — 114 / BXR 0 on
+ * Freshness for ONE tenant: max(ingested_at), max(charge_date), max(payment_received), and the count
+ * of charges whose payment_received is in the future (Indigo EFT effective dates — 114 / BXR 0 on
  * 2026-09-08). Drives the per-tenant incomplete-month shading and the Indigo days-to-money notice.
  * Bounded to CODE_PERF_FRESHNESS_LOOKBACK_DAYS of charge_date so it never scans the full book; the
  * maxima are unaffected because a tenant with no charge in the last year has no freshness to show.
+ *
+ * Single-tenant BY INTERFACE. The first draft took `uuid[]` and read `= any($1::uuid[])` — the shape
+ * of a cross-tenant read without the reviewed-exception comment the compliance checklist requires
+ * ("Cross-tenant exception must be explicit, not incidental") — and nothing ever called it with more
+ * than one id. The board and the drill-down are each scoped to the ONE tenant the caller already
+ * clamped, so the builder now says so in its type (Qodo #346 rule finding 1).
  */
-export function buildCodePerfFreshnessQuery(entityIds: readonly string[]): SqlQuery {
-  const ids = assertEntityScope(entityIds, 'buildCodePerfFreshnessQuery');
+export function buildCodePerfFreshnessQuery(entityId: string): SqlQuery {
+  const [id] = assertEntityScope([entityId], 'buildCodePerfFreshnessQuery');
   const sql = `select
   r.business_entity_id,
   ${BUSINESS_TODAY_SQL}                                              as business_today,
@@ -465,11 +497,10 @@ export function buildCodePerfFreshnessQuery(entityIds: readonly string[]): SqlQu
                                                                      as future_payment_charges,
   count(*)::int                                                      as charges_in_lookback
 from collections.cmd_explorer_charge_rollup r
-where r.business_entity_id = any($1::uuid[])
+where r.business_entity_id = $1::uuid
   and r.charge_date >= ${BUSINESS_TODAY_SQL} - ${CODE_PERF_FRESHNESS_LOOKBACK_DAYS}
-group by r.business_entity_id
-order by r.business_entity_id`;
-  return { sql, params: [ids] };
+group by r.business_entity_id`;
+  return { sql, params: [id] };
 }
 
 /**

@@ -68,7 +68,7 @@ function allBuilderSql(): Array<[string, string]> {
     ['monthly', buildCodePerfMonthlyQuery(SCOPE).sql],
     ['monthly-pair', buildCodePerfMonthlyQuery(SCOPE, PAIR).sql],
     ['facility-options', buildCodePerfFacilityOptionsQuery(SCOPE).sql],
-    ['freshness', buildCodePerfFreshnessQuery([BXR, INDIGO]).sql],
+    ['freshness', buildCodePerfFreshnessQuery(BXR).sql],
     ['descriptions', buildCodeDescriptionQuery(BXR).sql],
   ];
 }
@@ -127,6 +127,20 @@ test('every builder: no select *, no avg(), never reads pct_allowed / pct_paid, 
     assert.ok(!/\bavg\s*\(/i.test(sql), `${name}: avg()`);
     assert.ok(!/pct_allowed|pct_paid/.test(sql), `${name}: reads a per-charge ratio column`);
     assert.ok(!/current_date|now\(\)::date|\bnow\(\)\s*-/.test(sql), `${name}: UTC-anchored date arithmetic`);
+    // An ungrouped aggregate over an EMPTY base divides by zero; every count denominator is guarded
+    // (Qodo #346 finding 3). `count(*)::int as charges` is not a division and does not match.
+    assert.ok(!/\/\s*count\(\*\)/.test(sql), `${name}: a bare count(*) denominator (22012 on an empty base)`);
+  }
+});
+
+test('window: a trailing N-day window is N civil dates ENDING today — [today − N + 1, today], the businessWindow.ts trailing contract', () => {
+  // src/businessWindow.ts: to = today + 1, from = to − days → exactly `days` dates including today.
+  // The first draft's `today − N` start was N + 1 dates: "30d" covered 31 days (Qodo #346 finding 4).
+  const windowed = allBuilderSql().filter(([n]) => !['freshness', 'descriptions'].includes(n));
+  assert.equal(windowed.length, 7, 'six base-CTE builders plus the facility vocabulary');
+  for (const [name, sql] of windowed) {
+    assert.ok(sql.includes(`${BUSINESS_TODAY} - $2::int + 1`), `${name}: start is today − N + 1`);
+    assert.ok(!/- \$2::int(?! \+ 1)/.test(sql), `${name}: no today − N start anywhere`);
   }
 });
 
@@ -138,7 +152,7 @@ test('every windowed builder: normalisation on read, tenant param, business-day 
     assert.ok(sql.includes(LOC_SUFFIX_SQL), `${name}: loc_suffix kept`);
     assert.ok(sql.includes(REVCODE_NORM_SQL), `${name}: revcode lpad`);
     assert.ok(sql.includes('r.business_entity_id = $1::uuid'), `${name}: tenant param`);
-    assert.ok(sql.includes(`${BUSINESS_TODAY} - $2::int as s`), `${name}: window start`);
+    assert.ok(sql.includes(`${BUSINESS_TODAY} - $2::int + 1 as s`), `${name}: window start (N dates ending today)`);
     assert.ok(sql.includes('r.charge_date >= w.s and r.charge_date < w.e + 1'), `${name}: half-open window`);
     assert.ok(sql.includes('($3::text[] is null or r.facility = any($3::text[]))'), `${name}: facility param`);
   }
@@ -159,24 +173,25 @@ test('metrics: sum-over-sum with the reliable-tier gate, unclamped paid_of_allow
   assert.deepEqual([...CODE_PERF_RELIABLE_TIERS], ['a', 'cd', 'e1']);
   assert.ok(sql.includes(`sum(allowed_reliable) filter (where ${TIER_GATE})`), 'allowed_rate numerator gated');
   assert.ok(sql.includes(`nullif(sum(charge_amount) filter (where ${TIER_GATE}), 0)`), 'allowed_rate denominator gated');
-  assert.ok(sql.includes(`count(*) filter (where ${TIER_GATE}) / count(*)`), 'allowed_coverage');
+  assert.ok(sql.includes(`count(*) filter (where ${TIER_GATE}) / nullif(count(*), 0)`), 'allowed_coverage, guarded denominator');
   assert.ok(
     sql.includes(`sum(insurance_payments) filter (where ${TIER_GATE} and allowed_reliable > 0)`),
     'paid_of_allowed numerator gated + allowed > 0',
   );
   assert.ok(!/least\s*\(\s*100/i.test(sql) && !/greatest\s*\(\s*100/i.test(sql), 'paid_of_allowed is NOT clamped');
   assert.ok(
-    sql.includes(`sum(greatest(allowed_reliable - insurance_payments, 0))\n        filter (where ${TIER_GATE} and payment_received is not null)`),
-    'underpaid_dollars over posted gated charges',
+    sql.includes(`sum(greatest(allowed_reliable - coalesce(insurance_payments, 0), 0))\n        filter (where ${TIER_GATE} and payment_received is not null)`),
+    'underpaid_dollars over posted gated charges; a NULL payment total is $0 paid, not an excluded row',
   );
+  assert.ok(!sql.includes('allowed_reliable - insurance_payments,'), 'no un-coalesced payment inside the underpaid arithmetic');
   assert.ok(sql.includes('percentile_cont(0.5) within group'), 'days_p50');
   assert.ok(sql.includes('percentile_cont(0.9) within group'), 'days_p90');
   assert.ok(sql.includes('case when payment_received >= charge_date then payment_received - charge_date end'));
-  assert.ok(sql.includes('count(*) filter (where coalesce(insurance_payments, 0) = 0) / count(*)'), 'pct_zero_paid');
+  assert.ok(sql.includes('count(*) filter (where coalesce(insurance_payments, 0) = 0) / nullif(count(*), 0)'), 'pct_zero_paid');
   assert.ok(sql.includes('sum(adjustments) / nullif(sum(charge_amount), 0)'), 'write_off_rate');
   assert.ok(sql.includes('sum(patient_balance_due) / nullif(sum(charge_amount), 0)'), 'patient_balance_rate');
   assert.equal(CODE_PERF_MATURITY_DAYS, 45);
-  assert.ok(sql.includes(`count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / count(*)`), 'matured_share');
+  assert.ok(sql.includes(`count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / nullif(count(*), 0)`), 'matured_share');
   assert.ok(!sql.includes('max(e) - 45'), 'the spec\'s aggregate-inside-FILTER shape is NOT emitted');
 });
 
@@ -186,10 +201,22 @@ test('pairing: grain, payer concentration, facility spread with the 30-charge fl
   assert.ok(q.sql.includes('group by hcpcs, loc_suffix, revcode'));
   assert.ok(q.sql.includes('count(distinct payer_raw)::int'));
   assert.ok(q.sql.includes('count(distinct facility)::int'));
-  assert.ok(q.sql.includes('round(100.0 * max(billed) / nullif(sum(billed), 0), 1)           as payer_concentration'));
+  // The top payer is an IDENTIFIED payer: the NULL bucket stays in the denominator (real dollars) but
+  // can never be the numerator, so missing attribution reads as LOW concentration (Qodo #346 f10).
+  assert.match(
+    q.sql,
+    /max\(billed\) filter \(where payer_raw is not null\)\s*\/ nullif\(sum\(billed\), 0\), 1\)\s+as payer_concentration/,
+    'payer_concentration numerator excludes the unknown-payer bucket',
+  );
   assert.equal(CODE_PERF_FACILITY_MIN_CHARGES, 30);
   assert.ok(q.sql.includes(`having count(*) >= ${CODE_PERF_FACILITY_MIN_CHARGES}`), 'facility floor');
-  assert.ok(q.sql.includes('round(max(allowed_rate) - min(allowed_rate), 2)                  as facility_spread'));
+  // One rated facility is not a variation: the spread is NULL (unavailable), never 0 (Qodo #346 f8).
+  assert.match(
+    q.sql,
+    /case when count\(\*\) >= 2 then round\(max\(allowed_rate\) - min\(allowed_rate\), 2\) end\s+as facility_spread/,
+    'facility_spread needs two rated facilities',
+  );
+  assert.ok(q.sql.includes('count(*)::int                                                    as facilities_rated'), 'facilities_rated rides along so the UI can say why');
   assert.equal((q.sql.match(/is not distinct from/g) ?? []).length, 6, 'both joins NULL-safe on all three keys');
   assert.ok(q.sql.includes('(max(e) - max(charge_date))::int                                 as days_idle'));
   assert.ok(q.sql.trimEnd().endsWith('order by p.billed desc, p.hcpcs nulls last, p.loc_suffix nulls last, p.revcode nulls last'));
@@ -232,11 +259,15 @@ test('payer level: grouped by the RAW payer string, share of the pairing\'s bill
   assert.ok(!/payer_alias|payer_identity/.test(sql), 'no alias resolution — out of scope, raw strings only');
 });
 
-test('facility level: 30-charge floor applied, excluded count reported, ordered by allowed_rate', () => {
+test('facility level: EVERY facility returned with a rated flag — the core splits and counts — rated first, then by allowed_rate', () => {
+  // The excluded count used to ride on the rated rows as a scalar subquery, so it vanished with them
+  // when no facility reached the floor (Qodo #346 f7). The rows carry `rated`; the count is derived
+  // from the same rows in core.ts (see app/test/codePerformanceCore.test.tsx).
   const { sql } = buildCodePerfFacilityQuery(SCOPE, PAIR);
-  assert.ok(sql.includes(`where charges >= ${CODE_PERF_FACILITY_MIN_CHARGES}`));
-  assert.ok(sql.includes(`(select count(*)::int from per_facility where charges < ${CODE_PERF_FACILITY_MIN_CHARGES})`));
-  assert.ok(sql.trimEnd().endsWith('order by allowed_rate desc nulls last, billed desc, facility nulls last'));
+  assert.ok(sql.includes(`(charges >= ${CODE_PERF_FACILITY_MIN_CHARGES})                     as rated`), 'rated flag on every row');
+  assert.ok(!/where charges >= /.test(sql), 'no SQL-side floor: the excluded count must survive an empty rated set');
+  assert.ok(!/below_floor/.test(sql), 'no scalar-subquery count riding on rows that may not exist');
+  assert.ok(sql.trimEnd().endsWith('order by rated desc, allowed_rate desc nulls last, billed desc, facility nulls last'));
 });
 
 test('monthly: date_trunc month series with allowed_rate + matured_share; pair filter is optional', () => {
@@ -260,17 +291,21 @@ test('facility options: tenant + window only, ignores the facility filter, keeps
   assert.ok(!/No Facility|where .*facility\s*<>/.test(q.sql), 'nothing is hardcoded or excluded');
 });
 
-test('freshness: per-tenant maxima + future-payment count, uuid[] param, bounded lookback', () => {
-  const q = buildCodePerfFreshnessQuery([BXR, INDIGO]);
-  assert.deepEqual(q.params, [[BXR, INDIGO]]);
-  assert.ok(q.sql.includes('r.business_entity_id = any($1::uuid[])'));
+test('freshness: ONE tenant by interface — a single uuid param, no any(uuid[]) — maxima + future-payment count, bounded lookback', () => {
+  // The first draft accepted uuid[] and read `= any($1::uuid[])`: a cross-tenant read shape with no
+  // reviewed-exception comment, and no caller ever passed more than one id (Qodo #346 rule f1). The
+  // interface now cannot express a multi-tenant read at all.
+  const q = buildCodePerfFreshnessQuery(BXR);
+  assert.deepEqual(q.params, [BXR]);
+  assert.ok(q.sql.includes('where r.business_entity_id = $1::uuid'), 'single-tenant predicate');
+  assert.ok(!/any\(\$1::uuid\[\]\)|uuid\[\]/.test(q.sql), 'no array predicate anywhere');
   assert.ok(q.sql.includes('max(r.ingested_at)'));
   assert.ok(q.sql.includes('max(r.charge_date)'));
   assert.ok(q.sql.includes(`count(*) filter (where r.payment_received > ${BUSINESS_TODAY})::int`));
   assert.ok(q.sql.includes(`r.charge_date >= ${BUSINESS_TODAY} - ${CODE_PERF_FRESHNESS_LOOKBACK_DAYS}`));
   assert.ok(q.sql.includes('group by r.business_entity_id'));
-  assert.throws(() => buildCodePerfFreshnessQuery([]), /entityIds required/);
-  assert.throws(() => buildCodePerfFreshnessQuery(['not-a-uuid']), /canonical business_entity_id/);
+  assert.throws(() => buildCodePerfFreshnessQuery(''), /canonical business_entity_id/);
+  assert.throws(() => buildCodePerfFreshnessQuery('not-a-uuid'), /canonical business_entity_id/);
 });
 
 test('descriptions: distinct-on precedence — tenant row wins, global falls back, no other tenant admitted', () => {

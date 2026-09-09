@@ -57,7 +57,7 @@ export async function getCodePerfBoardCore(
     run(buildCodePerfWindowSummaryQuery(scope)),
     run(buildCodePerfPairingQuery(scope)),
     run(buildCodePerfFacilityOptionsQuery(scope)),
-    run(buildCodePerfFreshnessQuery([entityId])),
+    run(buildCodePerfFreshnessQuery(entityId)),
     run(buildCodeDescriptionQuery(entityId)),
   ]);
   const summaryRow = summary.rows[0];
@@ -93,15 +93,20 @@ export async function getCodePerfPairDetailCore(
     run(buildCodePerfPayerQuery(scope, input.pair)),
     run(buildCodePerfFacilityQuery(scope, input.pair)),
     run(buildCodePerfMonthlyQuery(scope, input.pair)),
-    run(buildCodePerfFreshnessQuery([entityId])),
+    run(buildCodePerfFreshnessQuery(entityId)),
   ]);
   const fresh = shapeFreshness(freshness.rows[0]);
+  // The facility query returns EVERY facility in the pairing with a `rated` flag; the outlier table
+  // shows the rated ones and `belowFloor` counts the rest. Derived here from the same rows, so the
+  // count cannot vanish when the rated set is empty (Qodo #346 finding 7 — the first draft read it
+  // off `rows[0]`, which does not exist when nobody reaches the floor).
   const facilityRows = facilities.rows.map((r) => shapeFacilityRow(r, entityId));
+  const ratedRows = facilityRows.filter((r) => r.rated);
   return {
     pair: input.pair,
     payers: payers.rows.map((r) => shapePayerRow(r, entityId)),
-    facilities: facilityRows,
-    belowFloor: toNum(facilities.rows[0]?.below_floor) ?? 0,
+    facilities: ratedRows,
+    belowFloor: facilityRows.length - ratedRows.length,
     monthly: shapeMonthRows(monthly.rows, fresh.maxChargeDate),
   };
 }

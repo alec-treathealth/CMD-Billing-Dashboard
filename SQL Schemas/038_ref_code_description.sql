@@ -450,7 +450,13 @@ reset role;
 -- -- (c) the one conflict is S9475 and carries both texts:
 -- select code, short_label, prior_description from ref.code_description where description_conflict;
 --
--- -- (d) every live procedure-slot value resolves (join the trailing-180d rollup to the table):
+-- -- (d) every live procedure-slot value resolves (join the trailing-180d rollup to the table).
+-- --     ⚠ REVIEWED CROSS-TENANT EXCEPTION, deliberate (Qodo #346 rule finding 2): this check carries
+-- --     NO business_entity_id predicate because it verifies that the GLOBAL fallback rows
+-- --     (business_entity_id IS NULL) cover every procedure code billed by ANY tenant — a per-tenant
+-- --     read cannot answer that question. It reads procedure CODES only (no PHI), runs once as an
+-- --     operator post-apply check, and is never on the app path: the app reads descriptions through
+-- --     buildCodeDescriptionQuery, which is tenant-scoped. Comment-only; the applied DDL is unchanged.
 -- with live as (
 --   select distinct regexp_replace(nullif(btrim(cpt_code),''),'(IOP|PHP|RTC|UHC)$','') as hcpcs
 --     from collections.cmd_explorer_charge_rollup

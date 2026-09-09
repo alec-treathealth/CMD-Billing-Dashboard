@@ -8,7 +8,7 @@
  * vars resolve to the tenant's colours (the bare-attribute rules in globals.css) for the KPI tiles
  * and MiniBars, so a BXR number never wears Indigo's colour.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Filter } from 'lucide-react';
 
 import { Skeleton } from '@/components/ui/skeleton';
@@ -50,8 +50,16 @@ export function CodePerformanceView({ tenants, defaultTenant }: { tenants: CodeP
   const [details, setDetails] = useState<Record<string, DetailState>>({});
   const facilityKey = facilities.join(FACILITY_KEY_SEPARATOR);
 
+  // ⚠ SCOPE GENERATION — the drill-down cache is keyed by PAIRING ONLY, so a detail request that
+  // resolves AFTER the tenant / window / facilities changed would write the OLD scope's numbers into
+  // the NEW scope's cache under the same key, and the effect's `setDetails({})` below cannot stop a
+  // promise that is already in flight (Qodo #346 finding 5). Every scope change bumps the generation;
+  // a completion whose generation is stale is dropped, success and error alike.
+  const scopeGen = useRef(0);
+
   useEffect(() => {
     let live = true;
+    scopeGen.current += 1;
     setBoard({ status: 'loading' });
     setExpanded(null);
     setDetails({});
@@ -87,14 +95,33 @@ export function CodePerformanceView({ tenants, defaultTenant }: { tenants: CodeP
     const row = rowsByKey.get(key);
     if (!row) return;
     setDetails((d) => ({ ...d, [key]: { status: 'loading' } }));
+    const gen = scopeGen.current;
     getCodePerformancePairDetail({
       tenant,
       window,
       facilities: facilities.length ? facilities : null,
       pair: { hcpcs: row.hcpcs, locSuffix: row.loc_suffix, revcode: row.revcode },
     })
-      .then((r) => setDetails((d) => ({ ...d, [key]: r.ok ? { status: 'ready', detail: r.detail } : { status: 'error' } })))
-      .catch(() => setDetails((d) => ({ ...d, [key]: { status: 'error' } })));
+      .then((r) => {
+        if (gen !== scopeGen.current) return;
+        setDetails((d) => ({ ...d, [key]: r.ok ? { status: 'ready', detail: r.detail } : { status: 'error' } }));
+      })
+      .catch(() => {
+        if (gen !== scopeGen.current) return;
+        setDetails((d) => ({ ...d, [key]: { status: 'error' } }));
+      });
+  }
+
+  /**
+   * Facility names are TENANT vocabulary — the options come from that tenant's rollup — so a tenant
+   * change clears the selection in the SAME event. Otherwise the old names ride onto the new tenant,
+   * match nothing by exact equality, and the board reads as "No charges" until the user notices the
+   * stale tags (Qodo #346 finding 6). Same-tenant re-clicks are a no-op and keep the selection.
+   */
+  function selectTenant(next: CodePerfTenant) {
+    if (next === tenant) return;
+    setTenant(next);
+    setFacilities([]);
   }
 
   const facilityOptions: PickerOption[] = useMemo(() => {
@@ -111,7 +138,7 @@ export function CodePerformanceView({ tenants, defaultTenant }: { tenants: CodeP
   return (
     <div data-view={tenant} className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
-        <TenantToggle tenants={tenants} value={tenant} onChange={setTenant} />
+        <TenantToggle tenants={tenants} value={tenant} onChange={selectTenant} />
         <WindowSelector value={window} onChange={setWindow} />
         <div className="min-w-[18rem] flex-1">
           <MultiSelectTagPicker

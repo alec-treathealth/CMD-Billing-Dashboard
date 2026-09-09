@@ -62,7 +62,9 @@ Read-order is a cold-start sequence, not a priority ranking. Path-scoped rules i
 
 > **Read-order 10 is a DESIGN PROPOSAL, and every other row is not — do not read it as
 > state.** `docs/CLAIMS-DESK-QUEUE-DESIGN-2026-09-03.md` describes a Claims Desk claim-grain
-> work queue that **does not exist**: as of 2026-09-05 there is no migration 0108, no
+> work queue that **does not exist**: as of 2026-09-05 there was no migration 0108 (⚠ that number has
+> since been TAKEN — 0108 is now the charge-rollup `(business_entity_id, charge_date)` index, applied
+> 2026-09-08, so the desk tables, if ever built, take a NEW number from the live ledger), no
 > `claims.desk_item` / `desk_note` / `desk_event` / `desk_lane_rule`, no
 > `src/billingAudit/deskClassifier.ts`, and no `claims-desk-*` cron route. The Flag Queue
 > subtab still renders the hardcoded `PHASE 3 · NOT YET ACTIVATED` placeholder
