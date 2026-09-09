@@ -97,16 +97,14 @@ test('a super_admin is offered all three tenants on /dashboard, Consolidated act
   assert.deepEqual(s.offered.map(fullLabel), ['Consolidated', 'BXR Consulting', 'Indigo Billing']);
 });
 
-test('⚠ on the Claims Desk the SAME super_admin is offered two — the route narrows, via claimsDeskViews', () => {
+test('⚠ on the Claims Desk INDEX the SAME super_admin is offered two — the route narrows, via claimsDeskViews', () => {
   // The nav cannot know the route's plane set on its own; it calls the SAME helper the desk page
   // uses, so the two cannot disagree. Consolidated is absent because the desk has no cross-tenant
   // plane, and the default is BXR (route default first), exactly as lib/billing-audit/views.ts rules.
-  for (const p of ['/billing-audit', '/billing-audit/facility-resolution']) {
-    const s = scopeFor(p, [...ALL_VIEWS], undefined);
-    assert.deepEqual(s.offered, [...CLAIMS_DESK_VIEWS], `${p} offers the desk planes`);
-    assert.equal(s.active, 'bxr', `${p} defaults to BXR`);
-    assert.equal(s.interactive, true, `${p} reads ?view= (it canonicalises it), so the pill is a control`);
-  }
+  const s = scopeFor('/billing-audit', [...ALL_VIEWS], undefined);
+  assert.deepEqual(s.offered, [...CLAIMS_DESK_VIEWS], '/billing-audit offers the desk planes');
+  assert.equal(s.active, 'bxr', '/billing-audit defaults to BXR');
+  assert.equal(s.interactive, true, '/billing-audit reads ?view= (it canonicalises it), so the pill is a control');
   assert.equal(isClaimsDeskRoute('/dashboard'), false);
   assert.equal(isClaimsDeskRoute(null), false);
   // isViewScopedRoute is VIEW_SCOPED by exact path OR sub-route — the desk's sub-route must count.
@@ -114,6 +112,47 @@ test('⚠ on the Claims Desk the SAME super_admin is offered two — the route n
   assert.equal(isViewScopedRoute('/dashboard/collections/explorer'), true, 'sub-routes of a scoped route are scoped');
   for (const p of ['/payer-intel', '/admin', '/admin/users', '/account', '/code-reference', '/qualify', '/', null]) {
     assert.equal(isViewScopedRoute(p), false, `${p} does not read ?view=`);
+  }
+});
+
+test('⚠ Facility Resolution is NOT desk-narrowed: the pill offers exactly what that page scopes its data by', () => {
+  // /billing-audit/facility-resolution hangs under the Claims Desk tab, but its page runs
+  // clampView(resolveView(params), allowedViews) — Consolidated included, Consolidated the default.
+  // The first draft's prefix match offered ['bxr','indigo'] there and clamped an absent ?view= to
+  // BXR, so the pill and rail said BXR while the page queried BOTH tenants and its attribution
+  // writes ran Consolidated (Qodo #344 finding 3). The pill must state the scope the PAGE uses.
+  assert.equal(isClaimsDeskRoute('/billing-audit/facility-resolution'), false);
+  const s = scopeFor('/billing-audit/facility-resolution', [...ALL_VIEWS], undefined);
+  assert.deepEqual(s.offered, ['consolidated', 'bxr', 'indigo'], 'the generic offer, in viewOptions order');
+  assert.equal(s.active, 'consolidated', "absent ?view= → the page's DEFAULT_VIEW, which is what it queries");
+  assert.equal(s.interactive, true, 'still a control: the route reads ?view= (VIEW_SCOPED by sub-route)');
+  const explicit = scopeFor('/billing-audit/facility-resolution', [...ALL_VIEWS], 'consolidated');
+  assert.equal(explicit.active, 'consolidated', 'an explicit consolidated is honoured, not clamped to BXR');
+  const admin = scopeFor('/billing-audit/facility-resolution', ['indigo'], undefined);
+  assert.deepEqual(admin.offered, ['indigo'], 'an Indigo admin is offered their tenant and nothing else');
+});
+
+test('⚠ PARITY: a route is desk-narrowed in the nav IFF its page imports the desk resolver — classified by what the page IMPORTS', () => {
+  // The docblock's "the nav and the page cannot disagree" held only by coincidence of classification
+  // until this test. Every page.tsx under app/billing-audit is read: resolveClaimsDeskView → the nav
+  // must narrow; the generic resolveView → it must not. A new desk sub-route fails here on day one
+  // unless its resolver and its classification agree.
+  const pages: Array<[string, string]> = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) walk(p);
+      else if (name === 'page.tsx') pages.push(['/' + relative(join(appRoot, 'app'), dirname(p)), readFileSync(p, 'utf8')]);
+    }
+  };
+  walk(join(appRoot, 'app/billing-audit'));
+  assert.ok(pages.length >= 2, `found ${pages.length} desk pages; expected the index and facility-resolution at least`);
+  for (const [route, source] of pages) {
+    const code = strip(source);
+    const usesDesk = /\bresolveClaimsDeskView\b/.test(code);
+    const usesGeneric = /\bresolveView\(/.test(code);
+    assert.ok(usesDesk !== usesGeneric, `${route}: exactly one resolver (desk=${usesDesk}, generic=${usesGeneric})`);
+    assert.equal(isClaimsDeskRoute(route), usesDesk, `${route}: nav narrowing must match the page's resolver`);
   }
 });
 
@@ -245,6 +284,16 @@ test('menu semantics in source: role=menu, menuitemradio + aria-checked; the Esc
   for (const key of ['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'Home', 'End']) {
     assert.match(src, new RegExp(`e\\.key === '${key}'`), `${key} handled in the menu`);
   }
+  // Space activates a menuitemradio; a native anchor only activates on Enter (Qodo #344 f1). ONE path:
+  // `.click()` re-enters the same onClick + next/link handler a pointer uses — nothing is duplicated.
+  assert.match(
+    src,
+    /e\.key === ' '\) \{\s*e\.preventDefault\(\);\s*e\.currentTarget\.click\(\);\s*return;/,
+    'Space → preventDefault + click() on the focused option',
+  );
+  // A navigation the menu did not initiate (back/forward) closes it: the component lives in the
+  // persistent root layout, so `open` would otherwise survive the route change (Qodo #344 f2).
+  assert.match(src, /useEffect\(\(\) => \{\s*setOpen\(false\);\s*\}, \[pathname, search\]\);/, 'a pathname or query change closes the menu');
   assert.match(src, /\{checked \? <Check/, 'the active option carries a check');
   // The focus-on-open effect acts on the closed→open TRANSITION only (M1): offeredViews returns a
   // fresh array each render, so an unguarded effect would re-fire on every upstream re-render.

@@ -28,7 +28,10 @@
  * but it cannot know the ROUTE, and the Claims Desk offers two tenants where /dashboard offers
  * three. `offeredViews` makes that decision here from `usePathname()`, by calling the SAME
  * `claimsDeskViews` the desk page uses, so the nav and the page cannot disagree about what is on
- * offer. This component narrows; it never widens — a hand-edited `?view=` is clamped against the
+ * offer — for the desk INDEX only: its sub-route /billing-audit/facility-resolution resolves `?view=`
+ * with the GENERIC resolver (Consolidated included), so `isClaimsDeskRoute` is an EXACT match and the
+ * test binds that classification to each page's resolver import (Qodo #344 finding 3).
+ * This component narrows; it never widens — a hand-edited `?view=` is clamped against the
  * offered set, and the page re-clamps server-side and scopes its data by the CLAMPED value.
  * ⚠ THE CONTROL IS NOT THE GATE. Do not "simplify" by trusting this option list for anything.
  *
@@ -123,9 +126,21 @@ export function fullLabel(view: DashboardView): string {
   return viewOptions.find((o) => o.value === view)?.label ?? view;
 }
 
-/** /billing-audit and its sub-routes — the screens whose plane set is narrower than RBAC. */
+/**
+ * The Claims Desk INDEX — the one screen whose plane set is narrower than RBAC (two tenants, BXR
+ * default, via `resolveClaimsDeskView`). EXACT match, deliberately NOT a prefix: the desk's sub-route
+ * /billing-audit/facility-resolution hangs under the same nav tab but resolves `?view=` with the
+ * GENERIC `resolveView` + `clampView` against full RBAC, Consolidated included — it moved there from
+ * /dashboard/collections on 2026-08-17 for nav placement only ("nothing about the data, the RBAC, or
+ * the server actions changed", per its page header). The first draft matched the prefix, so on that
+ * workbench a super_admin with no `?view=` saw a BXR pill and a gold rail while the page queried BOTH
+ * tenants and its attribution writes ran Consolidated (Qodo #344 finding 3). "Lives under the Claims
+ * Desk tab" and "uses the Claims Desk resolver" are different predicates; this function is the second.
+ * tenant-scope.test.tsx binds this classification to each desk page's resolver import so the two
+ * cannot drift again.
+ */
 export function isClaimsDeskRoute(pathname: string | null): boolean {
-  return pathname === '/billing-audit' || (pathname?.startsWith('/billing-audit/') ?? false);
+  return pathname === '/billing-audit';
 }
 
 /**
@@ -239,6 +254,15 @@ export function TenantScopeView({ offered, active, pathname, search, interactive
     return () => document.removeEventListener('pointerdown', onDown);
   }, [open]);
 
+  // Close on ANY navigation the menu did not initiate — browser back/forward, a nav-bar link. `open`
+  // is local state in a component that lives in the persistent root layout, so without this a menu
+  // left open would ride into the next route: hidden behind the non-interactive label on an unscoped
+  // route, then reappearing open on return (Qodo #344 finding 2). Focus is left where the browser put
+  // it — yanking it to the trigger on a history navigation would be worse than the stale menu was.
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname, search]);
+
   // Escape: ONE handler, at document level while open (see FOCUS above). Closes AND returns focus
   // to the trigger, so a keyboard user is never stranded on a detached or non-focusable node.
   useEffect(() => {
@@ -296,6 +320,14 @@ export function TenantScopeView({ offered, active, pathname, search, interactive
     else if (e.key === 'Tab') {
       // Let focus leave naturally; just do not leave the menu open behind it.
       setOpen(false);
+      return;
+    } else if (e.key === ' ') {
+      // Space activates a menuitemradio (the APG menu pattern), but a native anchor activates on
+      // Enter only — Space would scroll the page instead (Qodo #344 finding 1). `.click()` dispatches
+      // a real click, so next/link's soft navigation AND onActivate run through the one path a
+      // pointer uses; nothing is duplicated and modified-click behaviour is untouched.
+      e.preventDefault();
+      e.currentTarget.click();
       return;
     }
     if (next === null) return;
