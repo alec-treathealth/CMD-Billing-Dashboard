@@ -12,11 +12,12 @@
  *
  * ⚠ THE CLAMP IS ROUTE-SCOPED HERE, WHICH IS THE ONE WAY THIS DIFFERS FROM COLLECTIONS. That
  * page clamps against the raw RBAC entitlement and defaults to `consolidated`; this desk has no
- * cross-tenant plane, so it offers BXR + Indigo only and defaults to BXR. The switcher itself is
- * `TenantTabs`, the same component both /dashboard routes use, given a narrowed option set — see
- * `lib/billing-audit/views.ts`. It landed on this route 2026-08-31; before that the route had no
- * in-place tenant control at all, and that absence was load-bearing for the Billable Days
- * override keys (`billable-days/overrides.ts`).
+ * cross-tenant plane, so it offers BXR + Indigo only and defaults to BXR. The switcher is the nav
+ * <TenantScope> pill (app/layout.tsx, since 2026-09-08), which narrows its own option set with the
+ * SAME `claimsDeskViews` this page uses — see `lib/billing-audit/views.ts`. An in-place tenant
+ * control first reached this route 2026-08-31 (as TenantTabs); before that its absence was
+ * load-bearing for the Billable Days override keys (`billable-days/overrides.ts`), and a same-route
+ * ?view= change is still a SOFT navigation for the same reason.
  *
  * Initial render: the server fetches the IP first page for the DEFAULT (YTD) window plus both
  * scopes' filter options, so the grid paints with data (and the client starts on the SAME window
@@ -33,7 +34,6 @@ import type { TagOption } from '@/components/billing-audit/tag-picker';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
 import { loadAuditRows, loadAuditFilterOptions, type AuditFilter } from '@/lib/actions';
-import { TenantTabs } from '@/components/dashboard/tenant-tabs';
 import { claimsDeskViews, resolveClaimsDeskView, urlView } from '@/lib/billing-audit/views';
 import { isQualifyOnlyRole, QUALIFY_HOME } from '@/lib/rbac';
 
@@ -94,12 +94,10 @@ export default async function BillingAuditPage({
 
   return (
     <main className="mx-auto max-w-[1800px] space-y-6 p-6 sm:p-10">
-      {/* Tenant tabs, above the title — the same control and placement as Overview and
-          Collections (Alec, 2026-08-18: "keep this consistent"). Offered set excludes
-          Consolidated: this desk is entity-scoped and has no cross-tenant plane. The component
-          renders NOTHING when only one tenant is on offer, so an entity-scoped admin sees no
-          chrome implying a choice they do not have. */}
-      <TenantTabs allowedViews={deskViews} />
+      {/* The tenant selector is in the top nav (<TenantScope>, app/layout.tsx) as of 2026-09-08. It
+          narrows to this desk's two planes via the same `claimsDeskViews` used below, so the nav and
+          the data scope cannot disagree. Nothing on this page writes ?view=; `deskViews` is kept
+          because the fail-closed empty check below still needs it. */}
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Claims Desk</h1>
         <p className="mt-1 text-sm text-muted-foreground">

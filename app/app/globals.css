@@ -60,6 +60,27 @@
     --brand-accent: #1c8b82; /* highlight: KPI top border, active underline, fills */
     --brand-soft: #eaf4f2; /* soft tint: tracks / subtle backgrounds */
 
+    /* ---- Entity NAV FILLS (2026-09-08) — the tenant-scope pill + the 4px rail under the nav ---
+       Three light chips for a dark bar, ONE dark foreground. These are not --brand-ink: that trio
+       measured 1.35-1.65:1 against the #0e3a3a bar and cannot sit on it. And they are constrained
+       harder than "clears the teal bar" — the bar is var(--brand-bar), which is ITSELF tenant-coloured
+       on /dashboard*, so each fill must clear >=3:1 against EVERY bar it can sit on and carry its
+       label at >=4.5:1. Measured (WCAG sRGB):
+                              ink900 label   #0e3a3a bar   own --brand-bar
+         consolidated #5FBFA8    6.67           5.64          (same bar)
+         bxr          #D4B36A    7.33           6.21          #1a1a2e  8.49
+         indigo       #C0A0F0    6.68           5.65          #5b2a9e  4.20
+       Every candidate that cleared all three floors in an 80-value sweep used a DARK foreground,
+       so --entity-on is ink900 and there is no white variant. #5FBFA8 is the existing "OS" accent
+       in the wordmark, not a new colour. #B08A3E (the mockup brass) was rejected at 4.60:1 on
+       ink900 — a 0.10 margin. --entity-fill is resolved per [data-view] below and is the ONLY
+       token the component reads; the three named fills exist so the palette is legible here. */
+    --entity-consolidated: #5fbfa8;
+    --entity-bxr: #d4b36a;
+    --entity-indigo: #c0a0f0;
+    --entity-on: #1b2b2a; /* ink900 */
+    --entity-fill: var(--entity-consolidated);
+
     /* ---- Brand ALPHA STEPS, and they exist because Tailwind cannot express them -------------
        ⚠ `bg-[var(--brand-accent)]/10` AND EVERY CLASS OF THAT SHAPE EMITS NO RULE AT ALL.
        Tailwind's `/<alpha>` modifier has to rewrite the colour into a channel form to insert an
@@ -116,6 +137,7 @@
     --brand-ink: #135e5a;
     --brand-accent: #1c8b82;
     --brand-soft: #eaf4f2;
+    --entity-fill: var(--entity-consolidated);
   }
 
   /* BXR Consulting — deep navy chrome, muted brass/gold accent, warm pale ground. */
@@ -124,6 +146,7 @@
     --brand-ink: #1a1a2e;
     --brand-accent: #c8a24b;
     --brand-soft: #f4efe3;
+    --entity-fill: var(--entity-bxr);
   }
 
   /* Indigo Billing — rich indigo chrome, bright violet accent, soft lavender ground. */
@@ -132,6 +155,7 @@
     --brand-ink: #5b2a9e;
     --brand-accent: #7c3aed;
     --brand-soft: #f3eefb;
+    --entity-fill: var(--entity-indigo);
   }
 
   * {

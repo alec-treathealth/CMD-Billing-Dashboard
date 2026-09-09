@@ -15,7 +15,6 @@ import { Suspense } from 'react';
 import { redirect } from 'next/navigation';
 import { Dashboard } from '@/components/dashboard';
 import { DataFreshness, FreshnessLinePlaceholder } from '@/components/dashboard/data-freshness';
-import { TenantTabs } from '@/components/dashboard/tenant-tabs';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
 import { clampView, resolveView } from '@/lib/views';
@@ -27,7 +26,7 @@ export default async function DashboardPage({
   searchParams,
 }: {
   // Next 15: searchParams is a Promise; resolve before reading `?view=`.
-  // The active view is shown by the on-page TenantTabs; here it only sets data scope.
+  // The active view is shown by the nav <TenantScope> pill (app/layout.tsx); here it only sets data scope.
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const access = await dashboardAccess();
@@ -51,12 +50,9 @@ export default async function DashboardPage({
 
   return (
     <main className="mx-auto max-w-7xl space-y-6 p-6 sm:p-10">
-      {/* Tenant tabs sit ABOVE the title, on the page rather than in the global top bar (Alec,
-          2026-08-18). Which tenant a number belongs to is the most consequential context here, and a
-          collapsed dropdown stated it in a label the reader had to go find. Identical control and
-          placement on Collections — the two pages share the `?view=` scope, so they must not differ
-          in how it is chosen. */}
-      <TenantTabs allowedViews={access.access.allowedViews} />
+      {/* The tenant selector is in the top nav (<TenantScope>, app/layout.tsx) as of 2026-09-08 —
+          Alec reversed the 2026-08-18 on-page placement; the ruling is recorded at its old site in
+          layout.tsx. Nothing on this page writes ?view=. */}
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
         <p className="mt-1 text-sm text-muted-foreground">

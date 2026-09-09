@@ -158,15 +158,19 @@ test('the BXR edit still works on its own scope — isolation is not achieved by
  * The two source-level pins that remain — claims rendering cannot observe.
  * ------------------------------------------------------------------------- */
 
-test('the tenant control IS on the Claims Desk route — the premise, stated positively', () => {
-  // The inverse of what this file asserted before 2026-08-31. Pinned positively so a reader who
-  // finds the header confusing can confirm which way round it is today, and so silently removing
-  // the control (which would make the entity keys harmless but the header wrong) is visible.
-  assert.match(
-    read('app/billing-audit/page.tsx'),
-    /from\s+['"][^'"]*tenant-tabs['"]/,
-    'the Claims Desk no longer renders TenantTabs — re-read this file’s header before trusting it',
-  );
+test('the tenant control REACHES the Claims Desk route from the nav — the premise, stated positively', () => {
+  // Third statement of this premise. Before 2026-08-31 the route had NO in-place tenant control;
+  // from 2026-08-31 it rendered TenantTabs on the page; from 2026-09-08 the control is the nav
+  // <TenantScope> pill in app/layout.tsx, which reaches /billing-audit like every route and
+  // narrows itself with claimsDeskViews. The entity half of the override key exists because a
+  // same-route ?view= change is reachable and SOFT — that is still true, so the keys stay.
+  // Pinned so silently removing the control from the nav (which would make the entity keys
+  // harmless but the header wrong) is visible, and so the page itself does not regrow one.
+  const layout = read('app/layout.tsx');
+  assert.match(layout, /from\s+['"]@\/components\/nav\/tenant-scope['"]/, 'the nav imports the scope control');
+  assert.match(layout, /<TenantScope allowedViews=\{allowedViews\} \/>/, 'and renders it');
+  assert.match(read('components/nav/tenant-scope.tsx'), /isClaimsDeskRoute/, 'and it knows about this route');
+  assert.doesNotMatch(read('app/billing-audit/page.tsx'), /from\s+['"][^'"]*tenant-tabs['"]/, 'the page no longer renders its own');
 });
 
 test('the grid derives its override scope from `view`, not from the week alone', () => {
