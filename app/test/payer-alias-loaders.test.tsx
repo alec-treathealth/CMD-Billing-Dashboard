@@ -35,6 +35,7 @@ interface FakeSpec {
   queue?: PayerAliasQueueRow[];
   siblings?: Array<Record<string, unknown>>;
   neighbours?: Array<Record<string, unknown>>;
+  vobNames?: Array<Record<string, unknown>>;
 }
 
 function fakeReader(spec: FakeSpec): { db: QueueReader; calls: Call[] } {
@@ -46,6 +47,7 @@ function fakeReader(spec: FakeSpec): { db: QueueReader; calls: Call[] } {
       // loader's queries cannot silently hand the wrong fixture to the wrong consumer.
       if (sql.includes('group by vocabulary')) return { rows: (spec.counts ?? []) as T[] };
       if (sql.includes('operator(claims.%)')) return { rows: (spec.neighbours ?? []) as T[] };
+      if (sql.includes('vob.member_benefits_latest')) return { rows: (spec.vobNames ?? []) as T[] };
       if (sql.includes('s.vocabulary <> $2')) return { rows: (spec.siblings ?? []) as T[] };
       if (sql.includes('where m.needs_review')) return { rows: (spec.queue ?? []) as T[] };
       throw new Error(`fakeReader: unrouted SQL: ${sql.slice(0, 80)}`);
@@ -90,6 +92,16 @@ const srow = (alias: string, vocab: string) => ({
   canonical_payer_id: 'pi_z',
   needs_review: false,
   display_name: 'Z',
+});
+
+/** A VOB name under a payer id. `payer_id` and `name` are ALWAYS different strings here, for the
+ *  same reason seed ≠ look-alike above: a key test that could pass under either keying is worthless. */
+const vrow = (payerId: string, name: string, members = 5) => ({
+  payer_id: payerId,
+  name,
+  members,
+  total_names: 2,
+  total_members: 10,
 });
 
 const COUNTS = [
@@ -189,6 +201,58 @@ test('context queries are SKIPPED entirely when the page is empty', async () => 
   assert.deepEqual(page.neighbours, {});
   assert.equal(calls.filter((c) => c.sql.includes('operator(claims.%)')).length, 0);
   assert.equal(calls.filter((c) => c.sql.includes('s.vocabulary <> $2')).length, 0);
+});
+
+/* ── 2b. VOB names — fetched on ONE tab, keyed on the id the card renders ─────────────────────────── */
+
+test('VOB names are fetched ONLY on the vob_payer_id tab, batched by the page aliases', async () => {
+  // A payer-id join is meaningless for a NAME vocabulary: no query, and an empty record — not
+  // undefined, so the card can index it without a guard.
+  for (const vocab of ['claims_primary_payer', 'vob_insurance_co'] as const) {
+    const { db, calls } = fakeReader({ counts: COUNTS, queue: [qrow('CIGNA'), qrow('AETNA')] });
+    const page = await loadPayerAliasQueue(vocab, 1, db);
+    assert.equal(calls.filter((c) => c.sql.includes('vob.member_benefits_latest')).length, 0, vocab);
+    assert.deepEqual(page.vobNames, {});
+  }
+
+  const { db, calls } = fakeReader({
+    counts: COUNTS,
+    queue: [qrow('62308', { vocabulary: 'vob_payer_id' }), qrow("'01260", { vocabulary: 'vob_payer_id' })],
+    vobNames: [vrow('62308', 'AETNA')],
+  });
+  await loadPayerAliasQueue('vob_payer_id', 1, db);
+  const vob = calls.filter((c) => c.sql.includes('vob.member_benefits_latest'));
+  assert.equal(vob.length, 1, 'exactly one batched query, never one per card');
+  assert.deepEqual(vob[0]!.params[0], ['62308', "'01260"], 'the whole page, apostrophe row included');
+});
+
+test('VOB names group by PAYER_ID — the alias the card renders — not by the name', async () => {
+  const { db } = fakeReader({
+    counts: COUNTS,
+    queue: [qrow('62308', { vocabulary: 'vob_payer_id' }), qrow('60054', { vocabulary: 'vob_payer_id' })],
+    vobNames: [vrow('62308', 'AETNA', 40), vrow('62308', 'AETNA BETTER HEALTH', 3), vrow('60054', 'CIGNA', 9)],
+  });
+  const page = await loadPayerAliasQueue('vob_payer_id', 1, db);
+  assert.equal(page.vobNames['62308']?.length, 2);
+  assert.equal(page.vobNames['60054']?.length, 1);
+  // THE FAILING HALF: under `name` keying these would exist and the two above would be undefined.
+  assert.equal(page.vobNames['AETNA'], undefined);
+  assert.equal(page.vobNames['CIGNA'], undefined);
+  // SQL order (heaviest first) survives grouping — the UI does not re-sort.
+  assert.deepEqual(page.vobNames['62308']!.map((r) => r.name), ['AETNA', 'AETNA BETTER HEALTH']);
+  for (const row of page.rows) {
+    for (const n of page.vobNames[row.alias_norm] ?? []) assert.equal(n.payer_id, row.alias_norm);
+  }
+});
+
+test('a vob_payer_id row with NO VOB names simply has no bucket — the leaf states the absence', async () => {
+  const { db } = fakeReader({
+    counts: COUNTS,
+    queue: [qrow('99999', { vocabulary: 'vob_payer_id' })],
+    vobNames: [],
+  });
+  const page = await loadPayerAliasQueue('vob_payer_id', 1, db);
+  assert.deepEqual(page.vobNames, {});
 });
 
 /* ── 3. hasMore agrees with the row count ────────────────────────────────────────────────────────── */
@@ -302,6 +366,15 @@ test('the loader is READ-ONLY — every SQL it issues is a select', async () => 
   });
   await loadPayerAliasQueue('claims_primary_payer', 1, db);
   assert.ok(calls.length >= 4, 'expected counts + queue + siblings + neighbours');
+  // The vob_payer_id tab adds the fifth query; it must be a select too.
+  const vobTab = fakeReader({
+    counts: COUNTS,
+    queue: [qrow('62308', { vocabulary: 'vob_payer_id' })],
+    vobNames: [vrow('62308', 'AETNA')],
+  });
+  await loadPayerAliasQueue('vob_payer_id', 1, vobTab.db);
+  assert.equal(vobTab.calls.length, 5, 'counts + queue + siblings + neighbours + VOB names');
+  calls.push(...vobTab.calls);
   for (const c of calls) {
     assert.ok(c.sql.trimStart().toLowerCase().startsWith('select'), c.sql.slice(0, 60));
     for (const verb of ['insert ', 'update ', 'delete ', 'truncate']) {

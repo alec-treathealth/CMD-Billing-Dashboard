@@ -8,7 +8,10 @@
  *  4. the 029 review note is IN FLOW — not a title= tooltip, not CSS-hidden;
  *  5. Artifact 2 is READ-ONLY: no form, no button, no confirm control anywhere in the markup;
  *  6. a11y: tabs carry aria-current, both nav landmarks are labelled, and screen-reader text
- *     names the bare numerics (confidence / similarity) that read as noise otherwise.
+ *     names the bare numerics (confidence / similarity) that read as noise otherwise;
+ *  7. VOB names behind a payer id render in the three measured shapes (1 inline · 2–12 all · 13–24
+ *     capped with an overflow line), say so in one line when the list cannot help, and are IN the
+ *     markup whether or not the <details> is open — collapse is presentation, not containment.
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -21,15 +24,19 @@ import {
   QueueList,
   ReviewNote,
   RulingFormFields,
+  VOB_NAMES_UNHELPFUL_FROM,
+  VobNameList,
   VocabularyTabs,
   pageHref,
   vocabTabHref,
   type RulingFormState,
 } from '../components/admin/payer-alias-leaves';
-import type {
-  PayerAliasNeighbourRow,
-  PayerAliasQueueRow,
-  PayerAliasSiblingRow,
+import {
+  VOB_NAMES_PER_ID,
+  type PayerAliasNeighbourRow,
+  type PayerAliasQueueRow,
+  type PayerAliasSiblingRow,
+  type PayerAliasVobNameRow,
 } from '../../src/collections/payerAliasQueue';
 
 /** An employer-shaped alias — the exact case that makes alias_norm URL-hostile. */
@@ -75,6 +82,23 @@ const neighbour = (over: Partial<PayerAliasNeighbourRow> = {}): PayerAliasNeighb
 });
 
 const COUNTS = { vob_insurance_co: 646, claims_primary_payer: 145, vob_payer_id: 199 };
+
+/** One VOB name under payer id 62308. */
+const vname = (
+  name: string | null,
+  members: number,
+  total_names: number,
+  total_members: number,
+  payer_id = '62308',
+  // Qodo #343 finding 2: defaults to "everyone is named" so every existing call keeps its meaning.
+  named_members = total_members,
+): PayerAliasVobNameRow => ({ payer_id, name, members, total_names, total_members, named_members });
+
+/** N distinct names under one id, heaviest first, capped at 12 exactly the way the SQL caps them. */
+const vnames = (totalNames: number, totalMembers = totalNames * 10): PayerAliasVobNameRow[] =>
+  Array.from({ length: Math.min(totalNames, VOB_NAMES_PER_ID) }, (_, i) =>
+    vname(`PAYER NAME ${String(i + 1).padStart(3, '0')}`, 100 - i, totalNames, totalMembers),
+  );
 
 /* ── 1. alias_norm never reaches a URL ─────────────────────────────────────────────────────────── */
 
@@ -219,6 +243,9 @@ test('every DISPLAY leaf still emits zero controls — the exemption is one comp
       ),
     ],
     ['NeighbourList', renderToStaticMarkup(<NeighbourList neighbours={[neighbour()]} />)],
+    ['VobNameList (collapsed)', renderToStaticMarkup(<VobNameList names={vnames(7)} />)],
+    ['VobNameList (inline)', renderToStaticMarkup(<VobNameList names={vnames(1)} />)],
+    ['VobNameList (unhelpful)', renderToStaticMarkup(<VobNameList names={vnames(369)} />)],
     ['ProposalCell', renderToStaticMarkup(<ProposalCell row={row()} />)],
     ['ReviewNote', renderToStaticMarkup(<ReviewNote note="a note" />)],
     ['ConfidenceValue', renderToStaticMarkup(<ConfidenceValue value="0.5" />)],
@@ -377,6 +404,123 @@ test('an empty page states it rather than rendering a bare list', () => {
   assert.ok(html.includes('Nothing unruled on this page'), html);
 });
 
+/* ── 7. VOB names behind a payer id ────────────────────────────────────────────────────────────── */
+
+/** A vob_payer_id row — an IDENTIFIER, no score, the seed provenance. */
+const idRow = (over: Partial<PayerAliasQueueRow> = {}): PayerAliasQueueRow =>
+  row({ vocabulary: 'vob_payer_id', alias_norm: '62308', confidence: null, provenance: 'vob_payer_id', ...over });
+
+const renderId = (names: readonly PayerAliasVobNameRow[]) =>
+  renderToStaticMarkup(
+    <QueueList rows={[idRow()]} siblings={{}} neighbours={{}} vobNames={{ '62308': [...names] }} />,
+  );
+
+const NAME_RE = /PAYER NAME \d{3}/g;
+
+test('1 name renders INLINE — no <details>, because a one-item disclosure implies an ambiguity that does not exist', () => {
+  // 48% of cards. The card is saying "this id means one name"; a collapsed "1 name" would say the
+  // opposite.
+  const html = renderId([vname('AETNA', 41, 1, 41)]);
+  assert.ok(html.includes('AETNA'), html);
+  assert.ok(html.includes('41 members'), html);
+  assert.equal(html.includes('<details'), false, 'a single name must not be behind a disclosure');
+  assert.equal(html.includes('showing'), false);
+});
+
+test('2–12 names render in ONE <details>, every name present, no overflow line', () => {
+  for (const total of [2, 7, VOB_NAMES_PER_ID]) {
+    const html = renderId(vnames(total));
+    assert.equal((html.match(/<details/g) ?? []).length, 1, `total=${total}: exactly one disclosure`);
+    assert.equal((html.match(NAME_RE) ?? []).length, total, `total=${total}: every name rendered`);
+    assert.equal(html.includes('showing'), false, `total=${total}: nothing is omitted, so no overflow line`);
+    assert.ok(html.includes(`${total} VOB names`), html);
+  }
+});
+
+test('13–24 names: the 12 heaviest, plus an overflow line naming what is not shown', () => {
+  const html = renderId(vnames(19, 1204));
+  assert.equal((html.match(/<details/g) ?? []).length, 1);
+  assert.equal((html.match(NAME_RE) ?? []).length, VOB_NAMES_PER_ID, 'capped at 12');
+  assert.ok(html.includes('PAYER NAME 012'), 'the 12th heaviest is shown');
+  assert.equal(html.includes('PAYER NAME 013'), false, 'the 13th is not');
+  // The exact ruled wording, with a thousands separator on the member count.
+  assert.ok(html.includes('showing 12 of 19 · 1,204 members'), html);
+});
+
+test('at the threshold and beyond, ONE line says the list cannot help — and no list is rendered', () => {
+  // 2 × cap + 1: from here the omitted names outnumber the shown ones. Pinned so a change to the
+  // threshold is a deliberate edit to the constant, with its docblock, not a drift.
+  assert.equal(VOB_NAMES_UNHELPFUL_FROM, 25);
+  for (const total of [VOB_NAMES_UNHELPFUL_FROM, 100, 369]) {
+    const html = renderId(vnames(total, 4812));
+    assert.equal(html.includes('<details'), false, `total=${total}: no disclosure`);
+    assert.equal((html.match(NAME_RE) ?? []).length, 0, `total=${total}: no names — 12 of ${total} is not progress`);
+    assert.ok(html.includes(`${total} VOB names`), html);
+    assert.ok(html.includes('4,812 members'), html);
+    assert.ok(html.includes('too many for a name list to help'), html);
+  }
+  // The boundary: one below the threshold still gets the capped list.
+  const below = renderId(vnames(VOB_NAMES_UNHELPFUL_FROM - 1));
+  assert.ok(below.includes('<details'), 'total=24 is still a disclosure');
+  assert.ok(below.includes('showing 12 of 24'), below);
+});
+
+/**
+ * ⚠️ PINNED ON PURPOSE — COLLAPSE IS PRESENTATION, NOT CONTAINMENT. A closed <details> serialises
+ * its children, so every name is in the HTML whether or not the reader opened it. That is CORRECT
+ * for payer names (non-PHI by construction) and this test exists so nobody later reads the
+ * <details> as a boundary and puts a value behind it that needed one. If that ever looks tempting,
+ * the answer is server-side omission (the dollar-gating rule), never a closed disclosure.
+ */
+test('a closed <details> is NOT a boundary — every name is in the markup whether opened or not', () => {
+  const names = vnames(7);
+  const html = renderId(names);
+  assert.equal(/<details[^>]*\sopen/.test(html), false, 'rendered closed');
+  for (const n of names) {
+    // `name` is nullable only on the marker row (Qodo #343 finding 2); vnames() builds named rows.
+    const name = n.name;
+    assert.ok(name !== null, 'vnames() must build named rows — a null here is a fixture bug');
+    assert.ok(html.includes(name), `${name} must be in the serialised markup`);
+  }
+});
+
+test('VOB names never reach an href', () => {
+  const html = renderId(vnames(19));
+  for (const m of html.matchAll(/href="([^"]*)"/g)) {
+    assert.equal(/PAYER NAME/.test(m[1] ?? ''), false, `a VOB name leaked into href: ${m[1]}`);
+  }
+});
+
+test('no VOB row behind the id: the absence is stated, not left blank', () => {
+  const html = renderToStaticMarkup(<QueueList rows={[idRow()]} siblings={{}} neighbours={{}} />);
+  assert.ok(html.includes('No VOB row carries this payer id verbatim'), html);
+  assert.equal(html.includes('<details'), false);
+});
+
+test('VOB names never render on a NAME-vocabulary card, even when handed some', () => {
+  // The join is meaningless for vob_insurance_co / claims_primary_payer; the loader sends nothing,
+  // and the leaf must not render it even if a caller does.
+  for (const v of ['vob_insurance_co', 'claims_primary_payer'] as const) {
+    const html = renderToStaticMarkup(
+      <QueueList
+        rows={[row({ vocabulary: v })]}
+        siblings={{}}
+        neighbours={{}}
+        vobNames={{ 'ANTHEM BCBS GA': vnames(3) }}
+      />,
+    );
+    assert.equal(html.includes('VOB name'), false, `${v} rendered VOB names`);
+    assert.equal(html.includes('<details'), false, v);
+    assert.equal(html.includes('No VOB row'), false, `${v} must not even state an absence`);
+  }
+});
+
+test('member counts are named for a screen reader, not left as bare numerals', () => {
+  const html = renderId(vnames(3));
+  assert.ok(html.includes('members'), html);
+  assert.ok(html.includes('sr-only'), 'the per-name count needs a spoken label');
+});
+
 /* ══════════════════════════════════════════════════════════════════════════════════════════════════
  * THE RULING FORM — the one component permitted to emit controls, and what it owes in exchange.
  * ══════════════════════════════════════════════════════════════════════════════════════════════════ */
@@ -486,4 +630,33 @@ test('pending disables the controls rather than hiding them', () => {
   const html = renderForm({}, { pending: true });
   assert.ok(html.includes('disabled'), 'controls must be disabled while a ruling is in flight');
   assert.ok(html.includes('Saving'), 'the submit control should say what is happening');
+});
+
+/* ── 7b. Members without a name — Qodo #343 finding 2 ────────────────────────────────────────── */
+
+test('members but NO named ones: the marker row renders ONE line, not "No VOB row", and no <details>', () => {
+  // total_names 0 with total_members 7: the id is in use by seven members, none of whose latest VOB
+  // records an insurance-company name. An earlier version of the query dropped these before counting,
+  // so the card said "No VOB row carries this payer id verbatim" — false, seven rows carry it.
+  const html = renderToStaticMarkup(<VobNameList names={[vname(null, 0, 0, 7, 'X', 0)]} />);
+  assert.ok(html.includes('7 VOB members carry this payer id'), html);
+  assert.ok(html.includes('none records an insurance-company name'), html);
+  assert.equal(html.includes('No VOB row'), false, 'rows exist — the absence copy is the wrong claim');
+  assert.equal(html.includes('<details'), false, 'nothing to list, so nothing to collapse');
+});
+
+test('some members unnamed: total_members is the WHOLE population and the gap is stated', () => {
+  // 8 members carry the id; 5 have a name (all the same one). The list accounts for 5 of 8 and says so.
+  const one = renderToStaticMarkup(<VobNameList names={[vname('AETNA', 5, 1, 8, 'X', 5)]} />);
+  assert.ok(one.includes('5 members'), one);
+  assert.ok(one.includes('3 without a name'), one);
+  const many = renderToStaticMarkup(
+    <VobNameList names={[vname('AETNA', 6, 2, 10, 'Y', 9), vname('CIGNA', 3, 2, 10, 'Y', 9)]} />,
+  );
+  assert.ok(many.includes('2 VOB names · 10 members · 1 without a name'), many);
+});
+
+test('fully named ids render exactly as before — no unnamed note when named_members == total_members', () => {
+  const html = renderToStaticMarkup(<VobNameList names={[vname('AETNA', 4, 1, 4)]} />);
+  assert.equal(html.includes('without a name'), false, html);
 });

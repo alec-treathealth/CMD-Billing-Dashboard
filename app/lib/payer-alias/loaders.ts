@@ -23,6 +23,7 @@ import {
   buildPayerAliasQueueCountsQuery,
   buildPayerAliasSiblingsQuery,
   buildPayerAliasNeighboursQuery,
+  buildPayerAliasVobNamesQuery,
   buildPayerIdentityOptionsQuery,
   clampPage,
   PAYER_ALIAS_VOCABULARIES,
@@ -30,6 +31,7 @@ import {
   type PayerAliasNeighbourRow,
   type PayerAliasQueueRow,
   type PayerAliasSiblingRow,
+  type PayerAliasVobNameRow,
   type PayerAliasVocabulary,
   type PayerIdentityOptionRow,
 } from '../../../src/collections/payerAliasQueue';
@@ -51,6 +53,12 @@ export interface PayerAliasQueuePage {
   siblings: Record<string, PayerAliasSiblingRow[]>;
   /** alias_norm → up to 3 CONFIRMED look-alikes and how they were ruled. */
   neighbours: Record<string, PayerAliasNeighbourRow[]>;
+  /**
+   * payer id (the alias_norm) → the VOB names filed under it, heaviest first, capped per id.
+   * Populated on the `vob_payer_id` tab ONLY — a payer-id join is meaningless for the two NAME
+   * vocabularies, so for those this is `{}` and no query is issued. Non-PHI: names and counts.
+   */
+  vobNames: Record<string, PayerAliasVobNameRow[]>;
   /** True when a further page exists for this vocabulary. */
   hasMore: boolean;
 }
@@ -72,7 +80,8 @@ function groupBy<T>(rows: readonly T[], key: (row: T) => string): Record<string,
 }
 
 /**
- * One queue page plus all of its decision context, in at most FOUR queries — never a query per row.
+ * One queue page plus all of its decision context, in at most FIVE queries — never a query per row.
+ * The fifth (VOB names behind a payer id) runs only on the vob_payer_id tab.
  *
  * ── WHY COUNTS RUNS FIRST, AND NOT CONCURRENTLY (fixes M2) ──────────────────────────────────────
  * `clampPage` bounds a route value to [1, 200] because it cannot know how many rows exist. 200 pages
@@ -116,12 +125,19 @@ export async function loadPayerAliasQueue(
 
   let siblings: Record<string, PayerAliasSiblingRow[]> = {};
   let neighbours: Record<string, PayerAliasNeighbourRow[]> = {};
+  let vobNames: Record<string, PayerAliasVobNameRow[]> = {};
   if (aliasNorms.length > 0) {
     const sibQ = buildPayerAliasSiblingsQuery(aliasNorms, vocabulary);
     const nbrQ = buildPayerAliasNeighboursQuery(aliasNorms);
-    const [sibRes, nbrRes] = await Promise.all([
+    // On the vob_payer_id tab the alias IS a payer id, so the page's alias set is the id set — one
+    // batched query, never one per card. On a name tab the join would be meaningless: skipped.
+    const vobQ = vocabulary === 'vob_payer_id' ? buildPayerAliasVobNamesQuery(aliasNorms) : null;
+    const [sibRes, nbrRes, vobRes] = await Promise.all([
       db.query<PayerAliasSiblingRow>(sibQ.sql, sibQ.params),
       db.query<PayerAliasNeighbourRow>(nbrQ.sql, nbrQ.params),
+      vobQ
+        ? db.query<PayerAliasVobNameRow>(vobQ.sql, vobQ.params)
+        : Promise.resolve({ rows: [] as PayerAliasVobNameRow[] }),
     ]);
     // ⚠️ THE TWO KEYS ARE DIFFERENT AND THE DIFFERENCE IS EASY TO MISS. A sibling row IS the alias
     // (same string, other vocabulary), so it groups by `alias_norm`. A neighbour row is a DIFFERENT
@@ -130,6 +146,10 @@ export async function loadPayerAliasQueue(
     // group every card under the wrong string and blank the look-alike panel everywhere, silently.
     siblings = groupBy(sibRes.rows, (r) => r.alias_norm);
     neighbours = groupBy(nbrRes.rows, (r) => r.seed);
+    // A VOB-name row's `payer_id` is the alias_norm it was batched under — the card's own key. Its
+    // `name` is a DIFFERENT string (an insurance-co name), so keying on that would scatter every
+    // id's names under the names themselves, exactly the neighbour mistake above in a new coat.
+    vobNames = groupBy(vobRes.rows, (r) => r.payer_id);
   }
 
   return {
@@ -141,6 +161,7 @@ export async function loadPayerAliasQueue(
     rows,
     siblings,
     neighbours,
+    vobNames,
     hasMore: p < lastPage,
   };
 }

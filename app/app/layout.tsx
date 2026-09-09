@@ -58,6 +58,16 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const allowedViews = access.ok ? access.access.allowedViews : undefined;
   const canManageUsers = access.ok ? access.access.canManageUsers : false;
   const canViewUserLogs = access.ok ? isAlecOwnerEmail(access.access.user?.email) : false;
+  // Payer-alias ruling is super_admin ONLY and needs a REAL principal — this mirrors the gate in
+  // app/app/admin/payer-aliases/page.tsx term for term (`!access.access.user || role !== 'super_admin'`
+  // → redirect). Deliberately NOT `canManageUsers`: that is admin ∪ super_admin, and
+  // `ref.payer_alias_map` has no tenancy column to clamp an entity-scoped admin against — the page's
+  // docblock rejects that role by name. The staged-rollout fallback (role super_admin, user null)
+  // must not grow the link either, hence the explicit user check. This is a front door only; the page
+  // and its Server Action re-gate.
+  const canRulePayerAliases = access.ok
+    ? Boolean(access.access.user) && access.access.role === 'super_admin'
+    : false;
   // A single-entitled-tenant user (entity admin OR entity user — anyone who is NOT a super-admin
   // and has an entity) is branded by their fixed entity, server-side, LEFT of the avatar on every
   // route. A super-admin's tenant is view-dependent (?view=) and is handled client-side by the
@@ -138,7 +148,14 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             </Suspense>
             {/* single-tenant user: their entity's logo immediately LEFT of the avatar (server-side). */}
             {singleTenantSlug ? <TenantLogo slug={singleTenantSlug} /> : null}
-            {email ? <UserMenu email={email} canManageUsers={canManageUsers} canViewUserLogs={canViewUserLogs} /> : null}
+            {email ? (
+              <UserMenu
+                email={email}
+                canManageUsers={canManageUsers}
+                canViewUserLogs={canViewUserLogs}
+                canRulePayerAliases={canRulePayerAliases}
+              />
+            ) : null}
           </div>
         </header>
         </HeaderGate>
