@@ -11,8 +11,8 @@
  * treat this module as a gate.
  */
 import {
-  BookOpen,
   FileSearch,
+  Gauge,
   LayoutDashboard,
   Radar,
   Wallet,
@@ -23,7 +23,7 @@ import type { Role } from '@/lib/rbac';
 export type NavLink = {
   href: string;
   label: string;
-  /** Top-bar icon. Historically set on Code Reference only; the bar renders it when present. */
+  /** Top-bar icon. Historically set on the reference tab only (now Code Performance); the bar renders it when present. */
   icon?: LucideIcon;
   /** Rail icon. REQUIRED in spirit — an icon-first rail has nothing to draw without it. */
   railIcon: LucideIcon;
@@ -49,14 +49,17 @@ const CLAIMS_AUDIT: NavLink = {
 // Claims tab TAKEN DOWN 2026-07-15 (Alec) — /claims routes redirect to home; the Claims
 // Explorer code stays in git for a quick restore.
 // Ask tab REMOVED 2026-07-15 (Alec) — unfinished; /ask route redirects to home (reversible).
-const CODE_REFERENCE: NavLink = {
-  href: '/code-reference',
-  label: 'Code Reference',
-  icon: BookOpen,
-  railIcon: BookOpen,
+// Code Reference → CODE PERFORMANCE (2026-09-08, Alec). The static HCPCS × revenue-code lookup became a
+// live billing-code performance surface over the charge rollup (yield, velocity, data quality per
+// pairing). Route renamed with it; /code-reference is a redirect() stub, the /claims + /ask precedent.
+const CODE_PERFORMANCE: NavLink = {
+  href: '/code-performance',
+  label: 'Code Performance',
+  icon: Gauge,
+  railIcon: Gauge,
 };
 
-const BASE_LINKS: readonly NavLink[] = [OVERVIEW, COLLECTIONS, CLAIMS_AUDIT, CODE_REFERENCE];
+const BASE_LINKS: readonly NavLink[] = [OVERVIEW, COLLECTIONS, CLAIMS_AUDIT, CODE_PERFORMANCE];
 
 // ⚠ QUALIFY TAB TAKEN DOWN 2026-08-17 (Alec): "we should take the qualify tab down, only keeping
 // the necessary functions from it. the user should no longer be able to see the qualify tab."
@@ -100,7 +103,7 @@ export const VIEW_SCOPED = new Set<string>([
 export function linksFor(role: Role | undefined): NavLink[] {
   if (role === 'admissions_seat') return [PAYER_INTEL_LINK];
   if (role === 'super_admin')
-    return [OVERVIEW, PAYER_INTEL_LINK, COLLECTIONS, CLAIMS_AUDIT, CODE_REFERENCE];
+    return [OVERVIEW, PAYER_INTEL_LINK, COLLECTIONS, CLAIMS_AUDIT, CODE_PERFORMANCE];
   return [...BASE_LINKS];
 }
 

@@ -104,6 +104,7 @@ export default async function PayerAliasesPage({
           rows={queue.rows}
           siblings={queue.siblings}
           neighbours={queue.neighbours}
+          vobNames={queue.vobNames}
           renderForm={(row) => (
             <PayerAliasRulingForm
               vocabulary={vocabulary}

@@ -28,11 +28,13 @@ import {
   PAYER_ALIAS_RELATIONSHIPS,
   PAYER_ALIAS_VOCABULARIES,
   RELATIONSHIP_REQUIRES_CANONICAL,
+  VOB_NAMES_PER_ID,
   type PayerAliasRelationship,
   type RulingAction,
   type PayerAliasNeighbourRow,
   type PayerAliasQueueRow,
   type PayerAliasSiblingRow,
+  type PayerAliasVobNameRow,
   type PayerAliasVocabulary,
 } from '../../../src/collections/payerAliasQueue.js';
 
@@ -252,17 +254,136 @@ export function NeighbourList({ neighbours }: { neighbours: readonly PayerAliasN
   );
 }
 
+/* ── VOB names behind a payer id ──────────────────────────────────────────────────────────────── */
+
+/**
+ * From how many names does the reveal stop helping? Chosen against the measured distribution of
+ * names-per-id over the 359 vob_payer_id rows (2026-09-07): median 2, mean 9.36, p90 13.2, max 369.
+ *
+ * The cap (12) sits at p90, so nine cards in ten show every name whole. Above the cap, the 12
+ * heaviest names are still MOST of the names while the total is ≤ 24 — the omitted set is smaller
+ * than the shown one, and "showing 12 of 19" is honest progress. From 25 the omitted names OUTNUMBER
+ * the shown, and with a tail that runs to 369 the gap only widens: twelve names cannot describe an
+ * id that 369 payers file under. That id is not one payer's, and a list will not make it one. So the
+ * card says that in one line instead of presenting 12 of 369 as if it were the same disclosure as
+ * 12 of 19.
+ *
+ * 2 × cap + 1, written out so the relationship to the cap IS the constant, not a magic number.
+ */
+export const VOB_NAMES_UNHELPFUL_FROM = VOB_NAMES_PER_ID * 2 + 1;
+
+const fmtInt = (n: number): string => n.toLocaleString('en-US');
+
+/**
+ * The VOB names filed under a payer id — the evidence a reviewer needs to judge an identifier that
+ * cannot be judged by reading it. Rendered ONLY for vob_payer_id rows (QueueCard gates on the
+ * vocabulary); for a name vocabulary the join is meaningless and the loader sends nothing.
+ *
+ * Renderings, from the same measured distribution:
+ *   · 1 name   — inline, uncollapsed. 48% of cards. A "1 name" disclosure implies an ambiguity that
+ *                does not exist; what the card is saying is that this id means one name.
+ *   · 2–12     — one <details>, every name (the cap covers them all).
+ *   · 13–24    — one <details>, the 12 heaviest, plus an overflow line naming what is not shown.
+ *   · ≥ 25     — one line saying the list cannot help, and no list. See VOB_NAMES_UNHELPFUL_FROM.
+ *   · 0        — one line stating the absence (the bare-equality join found no VOB row for this id).
+ *   · members, no names — one line saying so. NOT the 0 case: rows exist, none carries a company
+ *                name. total_members counts them; nothing is listed (Qodo #343 finding 2).
+ *
+ * ⚠️ COLLAPSE IS PRESENTATION, NOT CONTAINMENT. A closed <details> still serialises its children:
+ * every name in the 2–24 renderings is in the HTML whether or not the reader has opened it. That is
+ * fine here — payer names, non-PHI by construction — and nothing is hidden for compliance reasons
+ * (pr_compliance_checklist.yaml's hidden-value rule is about values that must NOT ship at all). The
+ * render suite asserts the names ARE in the markup precisely so nobody later reads the <details> as
+ * a boundary and puts something behind it that needed one.
+ */
+export function VobNameList({ names }: { names: readonly PayerAliasVobNameRow[] }): ReactNode {
+  const first = names[0];
+  if (first === undefined) {
+    return <p className="mt-2 text-xs text-ink400">No VOB row carries this payer id verbatim.</p>;
+  }
+  const totalNames = first.total_names;
+  const totalMembers = first.total_members;
+  // Qodo #343 finding 2: total_members counts EVERY member under the id, named or not. A blank
+  // insurance_co is a member without a name, not a missing member, so the figure the card calls
+  // "members" must not shrink because a VOB left the company field empty — and when some did, the
+  // card says how many, so a reviewer knows the list below does not account for all of them.
+  const unnamed = Math.max(0, totalMembers - first.named_members);
+  const unnamedNote = unnamed > 0 ? ` · ${fmtInt(unnamed)} without a name` : '';
+
+  if (totalNames === 0) {
+    // The MARKER row: members exist under this id but none carries an insurance-company name.
+    // This is not "no VOB row" — the id is in use — and there is nothing to list.
+    return (
+      <p className="mt-2 text-xs text-ink600">
+        <span className="font-medium">
+          {fmtInt(totalMembers)} VOB {totalMembers === 1 ? 'member carries' : 'members carry'} this payer id
+        </span>
+        , but none records an insurance-company name — nothing to list.
+      </p>
+    );
+  }
+
+  if (totalNames === 1) {
+    return (
+      <p className="mt-2 text-xs text-ink600">
+        <span className="font-semibold uppercase tracking-wide text-ink400">VOB name </span>
+        <span className="font-mono text-ink900">{first.name}</span>
+        <span className="ml-2 tabular-nums">
+          · {fmtInt(first.members)} {first.members === 1 ? 'member' : 'members'}
+          {unnamedNote}
+        </span>
+      </p>
+    );
+  }
+
+  if (totalNames >= VOB_NAMES_UNHELPFUL_FROM) {
+    return (
+      <p className="mt-2 text-xs text-ink600">
+        <span className="font-medium text-status-warn">{fmtInt(totalNames)} VOB names</span> share this
+        id across {fmtInt(totalMembers)} members{unnamedNote} — too many for a name list to help, so none is shown.
+      </p>
+    );
+  }
+
+  return (
+    <details className="mt-2 rounded-lg border border-line bg-surface px-3 py-2">
+      <summary className="cursor-pointer text-xs font-semibold text-ink900">
+        {fmtInt(totalNames)} VOB names · {fmtInt(totalMembers)} members{unnamedNote}
+      </summary>
+      <ul className="mt-2 space-y-0.5">
+        {names.map((n) => (
+          <li key={n.name ?? ''} className="text-xs text-ink600">
+            <span className="font-mono text-ink900">{n.name}</span>
+            <span className="ml-2 tabular-nums">
+              <span className="sr-only">members </span>
+              {fmtInt(n.members)}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {totalNames > names.length ? (
+        <p className="mt-2 text-xs tabular-nums text-ink400">
+          showing {names.length} of {fmtInt(totalNames)} · {fmtInt(totalMembers)} members{unnamedNote}
+        </p>
+      ) : null}
+    </details>
+  );
+}
+
 /* ── The card ─────────────────────────────────────────────────────────────────────────────────── */
 
 export function QueueCard({
   row,
   siblings,
   neighbours,
+  vobNames,
   renderForm,
 }: {
   row: PayerAliasQueueRow;
   siblings: readonly PayerAliasSiblingRow[];
   neighbours: readonly PayerAliasNeighbourRow[];
+  /** VOB names behind this id — consulted ONLY when the row's vocabulary is vob_payer_id. */
+  vobNames?: readonly PayerAliasVobNameRow[];
   /** Injected by the page so this leaf stays pure and server-import-free. OMITTED → the card is
    *  read-only and emits no controls at all, which is what the render guard asserts. */
   renderForm?: (row: PayerAliasQueueRow) => ReactNode;
@@ -282,6 +403,9 @@ export function QueueCard({
         <ProposalCell row={row} />
       </div>
       <ReviewNote note={row.review_note} />
+      {/* The alias IS a payer id on this one tab, so the names filed under it are the evidence. On a
+          name tab the same data would be meaningless, and the loader does not send it. */}
+      {row.vocabulary === 'vob_payer_id' ? <VobNameList names={vobNames ?? []} /> : null}
       <SiblingList siblings={siblings} />
       <NeighbourList neighbours={neighbours} />
       {renderForm ? renderForm(row) : null}
@@ -293,11 +417,14 @@ export function QueueList({
   rows,
   siblings,
   neighbours,
+  vobNames = {},
   renderForm,
 }: {
   rows: readonly PayerAliasQueueRow[];
   siblings: Record<string, PayerAliasSiblingRow[]>;
   neighbours: Record<string, PayerAliasNeighbourRow[]>;
+  /** payer id → VOB names, heaviest first. Empty on the two name tabs. */
+  vobNames?: Record<string, PayerAliasVobNameRow[]>;
   renderForm?: (row: PayerAliasQueueRow) => ReactNode;
 }): ReactNode {
   if (rows.length === 0) {
@@ -315,6 +442,7 @@ export function QueueList({
           row={row}
           siblings={siblings[row.alias_norm] ?? []}
           neighbours={neighbours[row.alias_norm] ?? []}
+          vobNames={vobNames[row.alias_norm] ?? []}
           renderForm={renderForm}
         />
       ))}

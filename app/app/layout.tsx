@@ -1,6 +1,5 @@
 import type { Metadata } from 'next';
 import { Suspense } from 'react';
-import { SpeedInsights } from '@vercel/speed-insights/next';
 import { NavLinks } from '@/components/nav-links';
 import { TenantScope, TenantScopeRail } from '@/components/nav/tenant-scope';
 import { TenantLogo } from '@/components/tenant-logo';
@@ -8,6 +7,7 @@ import { UserMenu } from '@/components/user-menu';
 import { BrandTheme } from '@/components/brand-theme';
 import { HeaderGate } from '@/components/header-gate';
 import { NavRail } from '@/components/shell/nav-rail';
+import { SpeedInsights } from '@/components/speed-insights';
 import { ContentInset } from '@/components/shell/content-inset';
 import { dashboardAccess } from '@/lib/access';
 import { isAlecOwnerEmail } from '@/lib/alec-only';
@@ -59,6 +59,16 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const allowedViews = access.ok ? access.access.allowedViews : undefined;
   const canManageUsers = access.ok ? access.access.canManageUsers : false;
   const canViewUserLogs = access.ok ? isAlecOwnerEmail(access.access.user?.email) : false;
+  // Payer-alias ruling is super_admin ONLY and needs a REAL principal — this mirrors the gate in
+  // app/app/admin/payer-aliases/page.tsx term for term (`!access.access.user || role !== 'super_admin'`
+  // → redirect). Deliberately NOT `canManageUsers`: that is admin ∪ super_admin, and
+  // `ref.payer_alias_map` has no tenancy column to clamp an entity-scoped admin against — the page's
+  // docblock rejects that role by name. The staged-rollout fallback (role super_admin, user null)
+  // must not grow the link either, hence the explicit user check. This is a front door only; the page
+  // and its Server Action re-gate.
+  const canRulePayerAliases = access.ok
+    ? Boolean(access.access.user) && access.access.role === 'super_admin'
+    : false;
   // A single-entitled-tenant user (entity admin OR entity user — anyone who is NOT a super-admin
   // and has an entity) is branded by their fixed entity, server-side, LEFT of the avatar on every
   // route. A super-admin's tenant is view-dependent (?view=) and is stated client-side by the
@@ -131,9 +141,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               In rail mode the rail carries the mark, so this cell holds ONLY the pill — a tenant
               indicator that vanished on an env var would be the exact failure this control
               exists to prevent (ruling 4, 2026-09-08). TenantScope reads ?view= via
-              useSearchParams, so it keeps a Suspense boundary for the static routes
-              (/, /code-reference) this shared layout also renders. Inner gap mirrors the
-              header's (2b). */}
+              useSearchParams, so it keeps a Suspense boundary for the static routes (/, the
+              /code-reference redirect stub — /code-performance itself is force-dynamic) this shared
+              layout also renders. Inner gap mirrors the header's (2b). */}
           <div className="flex items-center gap-2 lg:gap-3">
             {railMode ? null : (
               <>
@@ -154,7 +164,8 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           </div>
           {/* col 2: nav — centered. NavLinks reads ?view= (to forward it onto the Dashboard
               link) via useSearchParams, so it must be wrapped in Suspense for the static routes
-              (/, /code-reference) this shared layout also renders — same as the scope pill above.
+              (/, the /code-reference redirect stub — /code-performance itself is force-dynamic) this
+              shared layout also renders — same as the scope pill above.
               In rail mode the rail is the nav, so this is omitted rather than duplicated. */}
           {railMode ? null : (
             <Suspense fallback={null}>
@@ -170,7 +181,14 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           <div className="flex items-center justify-end gap-3">
             {/* single-tenant user: their entity's logo immediately LEFT of the avatar (server-side). */}
             {singleTenantSlug ? <TenantLogo slug={singleTenantSlug} /> : null}
-            {email ? <UserMenu email={email} canManageUsers={canManageUsers} canViewUserLogs={canViewUserLogs} /> : null}
+            {email ? (
+              <UserMenu
+                email={email}
+                canManageUsers={canManageUsers}
+                canViewUserLogs={canViewUserLogs}
+                canRulePayerAliases={canRulePayerAliases}
+              />
+            ) : null}
           </div>
         </header>
         {/* The 4px tenant rail — full-bleed, directly under the bar, in the active tenant's
@@ -185,6 +203,11 @@ export default async function RootLayout({ children }: { children: React.ReactNo
         </HeaderGate>
         {children}
         </ContentInset>
+        {/* Core Web Vitals. Our own wrapper, never @vercel/speed-insights/next directly — the
+            vitals beacon carries the full href, so the wrapper strips the query string before
+            egress (?facility=/?payer=/?actor= must not leave). See components/speed-insights.tsx
+            for the payload contract and the P0-4 ruling it inherits. It needs no Suspense here:
+            the package wraps its own useSearchParams() reader. Renders null. */}
         <SpeedInsights />
       </body>
     </html>

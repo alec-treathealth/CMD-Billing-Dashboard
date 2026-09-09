@@ -110,7 +110,9 @@ test('⚠ on the Claims Desk INDEX the SAME super_admin is offered two — the r
   // isViewScopedRoute is VIEW_SCOPED by exact path OR sub-route — the desk's sub-route must count.
   for (const href of VIEW_SCOPED) assert.equal(isViewScopedRoute(href), true, `${href} is scoped`);
   assert.equal(isViewScopedRoute('/dashboard/collections/explorer'), true, 'sub-routes of a scoped route are scoped');
-  for (const p of ['/payer-intel', '/admin', '/admin/users', '/account', '/code-reference', '/qualify', '/', null]) {
+  // /code-performance (#346) reads no ?view= — its tenant is a control on the page — so the pill is a
+  // label there, like Payer Intel; its /code-reference predecessor is a redirect stub, equally unscoped.
+  for (const p of ['/payer-intel', '/admin', '/admin/users', '/account', '/code-performance', '/code-reference', '/qualify', '/', null]) {
     assert.equal(isViewScopedRoute(p), false, `${p} does not read ?view=`);
   }
 });

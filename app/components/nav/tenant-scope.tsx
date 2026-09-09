@@ -45,7 +45,8 @@
  *     surface, /payer-intel, is cross-tenant and not ?view=-scoped): render NOTHING. Any tenant
  *     name would be a lie and "Consolidated" would advertise a dashboard scope they do not have.
  *   · AN UNSCOPED ROUTE (any pathname outside `VIEW_SCOPED` in lib/nav-model.ts — /payer-intel,
- *     /admin, /account, /code-reference, /qualify…): the SAME rationale applies to a super_admin
+ *     /admin, /account, /code-performance and its /code-reference redirect stub, /qualify…): the
+ *     SAME rationale applies to a super_admin
  *     there, and the Phase 1 recon missed it (the code reviewer caught it). Offering BXR on
  *     /payer-intel would write `?view=bxr` onto a route that ignores it and paint a gold rail
  *     over a cross-tenant surface. So the pill is the non-interactive <span> — it STATES the

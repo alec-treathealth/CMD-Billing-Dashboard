@@ -131,7 +131,7 @@ test('railActive: ordinary routes in rail mode render the rail AND reserve the i
   assert.equal(railActive('rail', '/dashboard'), true);
   assert.equal(railActive('rail', '/dashboard/collections'), true);
   assert.equal(railActive('rail', '/billing-audit'), true);
-  assert.equal(railActive('rail', '/code-reference'), true);
+  assert.equal(railActive('rail', '/code-performance'), true);
 });
 
 test('railActive: a nullish pathname (pre-hydration) still lets the rail render', () => {
@@ -168,12 +168,12 @@ test('nav: super_admin sees Payer Intel slotted between Overview and Collections
     '/payer-intel',
     '/dashboard/collections',
     '/billing-audit',
-    '/code-reference',
+    '/code-performance',
   ]);
 });
 
 test('nav: entity admin / user / unknown get the base set with NO cross-tenant entries', () => {
-  const base = ['/dashboard', '/dashboard/collections', '/billing-audit', '/code-reference'];
+  const base = ['/dashboard', '/dashboard/collections', '/billing-audit', '/code-performance'];
   assert.deepEqual(hrefs('admin'), base);
   assert.deepEqual(hrefs('user'), base);
   assert.deepEqual(hrefs(undefined), base);
@@ -208,10 +208,10 @@ test('navHref: the tenant scope rides along to view-scoped routes only', () => {
   assert.equal(navHref('/dashboard', 'bxr'), '/dashboard?view=bxr');
   assert.equal(navHref('/dashboard/collections', 'bxr'), '/dashboard/collections?view=bxr');
   assert.equal(navHref('/billing-audit', 'indigo'), '/billing-audit?view=indigo');
-  // Qualify + Payer Intel are cross-tenant and pin their own scope; Code Reference is global.
+  // Qualify + Payer Intel are cross-tenant and pin their own scope; Code Performance is global.
   assert.equal(navHref('/qualify', 'bxr'), '/qualify');
   assert.equal(navHref('/payer-intel', 'bxr'), '/payer-intel');
-  assert.equal(navHref('/code-reference', 'bxr'), '/code-reference');
+  assert.equal(navHref('/code-performance', 'bxr'), '/code-performance');
 });
 
 test('navHref: no active view means no param, and the value is encoded', () => {
@@ -229,6 +229,6 @@ test('isActiveNav: every other link still matches its subroutes', () => {
   assert.equal(isActiveNav('/billing-audit', '/billing-audit'), true);
   assert.equal(isActiveNav('/billing-audit', '/billing-audit/detail'), true);
   assert.equal(isActiveNav('/qualify', '/qualify'), true);
-  assert.equal(isActiveNav('/code-reference', '/dashboard'), false);
+  assert.equal(isActiveNav('/code-performance', '/dashboard'), false);
   assert.equal(isActiveNav('/dashboard', null), false);
 });

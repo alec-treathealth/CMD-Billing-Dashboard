@@ -26,7 +26,7 @@ export const metadata: Metadata = { title: 'Qualify | CMD Billing' };
 // Force per-request render so the role gate ALWAYS runs. Without this the page (no searchParams;
 // dashboardAccess short-circuits cookies() when auth env is absent at build) can prerender STATIC
 // and be served without the guard — the guard is a security control, not optional. (Mirrors
-// /code-reference's rationale.)
+// /code-performance's rationale.)
 export const dynamic = 'force-dynamic';
 
 export default async function QualifyPage() {
