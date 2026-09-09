@@ -223,7 +223,15 @@ export function CodePerformanceView({ tenants, defaultTenant }: { tenants: CodeP
               <div className="grid gap-2 lg:grid-cols-3">
                 <TopPairingsChart rows={ready.rows} />
                 <YieldHistogram rows={ready.rows} />
-                <FacilityMixChart options={ready.facilityOptions} />
+                <FacilityMixChart
+                  options={
+                    ready.facilitiesApplied
+                      ? ready.facilityOptions.filter(
+                          (option) => option.facility !== null && ready.facilitiesApplied!.includes(option.facility),
+                        )
+                      : ready.facilityOptions
+                  }
+                />
               </div>
 
               <PairingTable

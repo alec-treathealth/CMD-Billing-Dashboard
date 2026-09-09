@@ -191,8 +191,8 @@ export function YieldHistogram({ rows }: { rows: readonly CodePerfPairingRow[] }
 
 /**
  * BILLED BY FACILITY — the mix question an executive asks first and the pairing table cannot answer,
- * because that table's grain is the CODE, not the site of service. Reads `facilityOptions`, which the
- * board already carries for the filter picker, so this costs no extra query.
+ * because that table's grain is the CODE, not the site of service. The board supplies the facility
+ * vocabulary, scoped to the active selection when one is applied, so this costs no extra query.
  *
  * ⚠️ A NULL FACILITY IS ITS OWN BAR, NEVER DROPPED AND NEVER MERGED. Charges the feed carries with no
  * facility are a real, attributable volume; folding them into another site would misstate that site,
