@@ -12,8 +12,9 @@
  * `.claude/rules/nextjs-app.md` says: "Off-dashboard chrome stays teal." The route test below is
  * therefore a policy boundary, not a capability one. Widening it to /billing-audit would theme
  * the global top bar and nav rail per tenant on that route, which is a design ruling (Alec's),
- * not a bug — Qodo raised it on PR #308 and it was rejected on that basis. The Claims Desk shows
- * its tenant on the page via TenantTabs' per-tenant swatch instead.
+ * not a bug — Qodo raised it on PR #308 and it was rejected on that basis. The Claims Desk states
+ * its tenant in the nav <TenantScope> pill (since 2026-09-08; TenantTabs' on-page swatch before that),
+ * which carries its own data-view and so is tenant-coloured there without <html> being involved.
  *
  * Renders nothing; it only mutates the <html> attribute in an effect. Uses useEffect
  * (not useLayoutEffect) to avoid the SSR warning — a brief default-teal first paint on a

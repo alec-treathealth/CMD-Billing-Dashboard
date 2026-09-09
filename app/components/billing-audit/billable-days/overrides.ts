@@ -23,8 +23,10 @@
  * ENTITY WAS EVER ABSENT. The entity used to be left out because the Claims Desk carried no
  * in-place tenant control: `?view=` was only ever changed by `TenantTabs`, which rendered on
  * /dashboard and /dashboard/collections only, so switching entity was a route change that
- * unmounted the panel and took its state with it. `TenantTabs` now renders on /billing-audit,
- * and a same-pathname `router.push('?view=…')` is a SOFT navigation: the page re-renders with a
+ * unmounted the panel and took its state with it. An in-place tenant control has reached
+ * /billing-audit since 2026-08-31 (`TenantTabs` then; the nav `TenantScope` pill since 2026-09-08),
+ * and a same-pathname `?view=` change — `router.push` then, a `next/link` click now — is a SOFT
+ * navigation: the page re-renders with a
  * new `view` prop and React keeps this panel MOUNTED, override maps and all. Measured, not
  * assumed — `cmd-explorer.tsx` carries a `prevView` reset for exactly this reason on the route
  * that already had the control, and that reset would be dead code if a view change remounted.

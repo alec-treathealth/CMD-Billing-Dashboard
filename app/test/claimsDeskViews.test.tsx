@@ -51,8 +51,8 @@ test('the route default is BXR, and it deliberately differs from the global DEFA
 });
 
 test('a super_admin is offered exactly the two tenants, in route order', () => {
-  // Order is load-bearing: TenantTabs falls back to allowedViews[0], so a reversed list would
-  // light Indigo while the page scoped its data to BXR.
+  // Order is load-bearing: the nav TenantScope pill (TenantTabs before 2026-09-08) falls back to
+  // offered[0], so a reversed list would light Indigo while the page scoped its data to BXR.
   assert.deepEqual(claimsDeskViews(SUPER), ['bxr', 'indigo']);
 });
 

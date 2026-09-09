@@ -13,7 +13,6 @@ import { Suspense } from 'react';
 import { redirect } from 'next/navigation';
 import { CollectionsView } from '@/components/dashboard';
 import { DataFreshness, FreshnessLinePlaceholder } from '@/components/dashboard/data-freshness';
-import { TenantTabs } from '@/components/dashboard/tenant-tabs';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
 import { listGridViews, loadCmdReport } from '@/lib/actions';
@@ -141,11 +140,9 @@ export default async function CollectionsPage({
             plus the header's internal gap to the grid. Do not "simplify" this to no h1 at all, and
             do not make it visible again without re-deriving the grid floor below it. */}
         <h1 className="sr-only">Collections</h1>
-        {/* Same control, same placement as Overview — see the note there. NOT wrapped: see the
-            header's own note for why a `shrink-0` wrapper broke wrapping and stranded the
-            freshness line. TenantTabs takes no className and needs none — as a flex item its own
-            root (`flex flex-wrap items-center gap-2`) shrinks to min-content and wraps. */}
-        <TenantTabs allowedViews={access.access.allowedViews} />
+        {/* The tenant selector moved to the top nav (<TenantScope>, app/layout.tsx) 2026-09-08. This
+            row now holds only the freshness line; its flex/justify classes are unchanged and the
+            layout notes above describe the shape that was measured with the tabs present. */}
         {/* ⚠ THIS IS THE APP'S FIRST DATA-STREAMING SUSPENSE BOUNDARY, and it is not the same
             mechanism as the four in app/layout.tsx. Those wrap CLIENT components that call
             useSearchParams, with fallback={null} — a CSR bailout so the static routes sharing that
@@ -155,9 +152,9 @@ export default async function CollectionsPage({
             "simplify" it to null — see the reserved-box rationale on FreshnessLinePlaceholder.
             ⚠ WHAT IT HOLDS CHANGED WITH THE ROW (2026-09-04). It used to hold the <header>'s
             height outright; now the tablist beside it is the taller item, so the row is
-            height-stable for anyone who sees tabs. For a single-entitled-view user TenantTabs
-            renders null and this line IS the row — the reserve is still the only thing standing
-            between them and an 18px jump on every cold load.
+            height-stable for anyone who saw tabs. Since 2026-09-08 the tabs are in the nav for
+            EVERYONE, so this line IS the row for every reader — the reserve is the only thing
+            standing between them and an 18px jump on every cold load.
 
             WHY THE BOUNDARY EXISTS: DataFreshness is a freshness LABEL that was sitting on the
             blocking shell path. Un-suspended, React cannot flush any of this page until its read

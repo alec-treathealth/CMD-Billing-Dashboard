@@ -1,6 +1,14 @@
 /**
- * The Collections page header — the ONE row that carries the tenant tabs and the freshness line,
- * and the chrome reclaim that row exists for (2026-09-04).
+ * The Collections page header — the ONE row that carried the tenant tabs and still carries the
+ * freshness line, and the chrome reclaim that row exists for (2026-09-04).
+ *
+ * ⚠ THE TABS LEFT THIS ROW 2026-09-08. Alec reversed his 2026-08-18 on-page-tabs ruling; the tenant
+ * selector is the nav <TenantScope> pill in app/layout.tsx and `TenantTabs` is deleted. Two of this
+ * file's tests had the tabs as their SUBJECT — the direct-child / no-wrapper guard and the "share
+ * one row" guard — and that subject is genuinely gone, so they are replaced below by a pin that the
+ * in-body row does not come back. The 1.4.10 overflow they guarded was a defect of the tabs INSIDE
+ * this row; with no tabs in the row there is nothing here to overflow. (The NAV's own reflow at
+ * narrow widths is a separate, pre-existing, unguarded matter recorded in the PR — not this file's.)
  *
  * WHY SOURCE PINS. The page is an async server component whose import graph reaches
  * @/lib/actions → @/lib/access and the RSC `cache()`, which crashes under node:test — the same
@@ -16,6 +24,8 @@
  *   landing rows visible    10 -> 12 at 1440x900 (and the type is 15px, not 13)
  *   contributions           h1 sr-only 32 + one fewer gap-6 and a gap-4 32 + sm:pt-4 16 +
  *                           tabs/freshness sharing one 42.5px row 26 = 106
+ *   (Measured WITH the tabs in the row. Without them the row is the freshness line alone, so the
+ *   chrome is shorter still; the reclaim floor below is therefore conservative, not stale.)
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -26,7 +36,6 @@ import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pageSrc = readFileSync(join(here, '../app/dashboard/collections/page.tsx'), 'utf8');
-const tabsSrc = readFileSync(join(here, '../components/dashboard/tenant-tabs.tsx'), 'utf8');
 const overviewSrc = readFileSync(join(here, '../app/dashboard/page.tsx'), 'utf8');
 const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 const pageCode = strip(pageSrc);
@@ -46,58 +55,55 @@ const headerSrc = (() => {
   return pageCode.slice(from, to);
 })();
 
-test('the tabs and the freshness line share ONE row', () => {
-  // Two stacked blocks with a gap-6 between them was the shape this replaced. The tabs and the
-  // Suspense boundary must both be INSIDE the <header>, or the gap comes back.
+test('the freshness line lives INSIDE the header row', () => {
+  // Two stacked blocks with a gap-6 between them was the shape this replaced. The Suspense boundary
+  // must be INSIDE the <header>, or the gap comes back. (This test used to also pin the tabs into
+  // the same row; that half of its subject moved to the nav on 2026-09-08 — see the header note.)
   assert.match(headerSrc, /flex shrink-0 flex-wrap items-center/, 'the header is a wrapping, centred flex row');
-  assert.match(headerSrc, /<TenantTabs allowedViews=\{access\.access\.allowedViews\}/, 'the tabs live in the row');
-  assert.match(headerSrc, /<Suspense fallback=\{<FreshnessLinePlaceholder inline \/>\}>/, 'so does the freshness line');
-  // flex-wrap + a row gap is the 200%-zoom escape: the two do not fit side by side in a 720px
-  // viewport, and the alternative to wrapping is squashing the tablist.
+  assert.match(headerSrc, /<Suspense fallback=\{<FreshnessLinePlaceholder inline \/>\}>/, 'the freshness line is in the row');
+  // flex-wrap + a row gap is the 200%-zoom escape, kept so the row can still wrap if a second item
+  // ever returns to it rather than squashing what is there.
   assert.match(headerSrc, /gap-y-1/, 'the row must be allowed to wrap to two lines');
 });
 
 /*
- * THE WRAPPER REGRESSION, BOTH HALVES (Qodo #323). The first draft of this row wrapped TenantTabs
- * in a `<div className="shrink-0">`, carried over from the old column layout. That one element
- * caused two separate defects, and removing it fixed both:
+ * THE WRAPPER REGRESSION, BOTH HALVES (Qodo #323) — kept as HISTORY, its subject is gone.
+ * The first draft of this row wrapped TenantTabs in a `<div className="shrink-0">`, carried over
+ * from the old column layout. That one element caused two separate defects:
  *
  *   1. `shrink-0` in a ROW means "do not shrink horizontally". The tablist's own `flex-wrap` can
  *      only wrap when its containing block is constrained, so the wrapper took its max-content
  *      width and the DOCUMENT overflowed sideways — measured at 111px past a 390px viewport and
- *      181px past a 320px one, with the tabs stuck on one line. WCAG 1.4.10 (Reflow). As a direct
- *      child the tablist wraps to 2 lines at 390px and 3 at 320px, with zero overflow.
- *   2. When a single-entitled-view user makes TenantTabs return null, the EMPTY wrapper was still
+ *      181px past a 320px one, with the tabs stuck on one line. WCAG 1.4.10 (Reflow).
+ *   2. When a single-entitled-view user made TenantTabs return null, the EMPTY wrapper was still
  *      a zero-width flex item holding `space-between`'s first slot, shoving the freshness line to
- *      the far right of an 1800px container. With no wrapper there is no item, and `space-between`
- *      puts a lone item flush with main-start (measured x=40 — exactly the sm:px-10 inset).
+ *      the far right of an 1800px container.
  *
- * Both are layout, so these pin the markup that produced the measurements. jsdom cannot check a
- * pixel of it (no layout engine) and neither can `next build`.
+ * Both were defects of the tabs INSIDE this row. On 2026-09-08 the tabs left the row for the nav,
+ * so there is no tablist here to wrap, squash, or wrap around. What replaces the two guards is the
+ * pin below that the row does not re-grow one.
  */
-test('TenantTabs is a DIRECT child of the row — no shrink-0 wrapper', () => {
-  assert.match(
-    headerSrc,
-    /<TenantTabs allowedViews=\{access\.access\.allowedViews\} \/>/,
-    'TenantTabs renders unwrapped',
-  );
-  // The wrapper is what a future reader would "restore" to stop the tabs shrinking. It must not
-  // come back in ANY form — the tablist needs to shrink so that it can wrap.
-  assert.doesNotMatch(headerSrc, /<div className="shrink-0">\s*<TenantTabs/, 'no wrapper around the tabs');
-  assert.doesNotMatch(headerSrc, /shrink-0[^"]*">\s*<TenantTabs/, 'and no shrink-0 on any wrapper of them');
-  // `shrink-0` on the <header> ITSELF is correct and unrelated: that is the COLUMN axis, keeping
-  // the row from being squashed by the grid below it.
-  assert.match(headerSrc, /<header className="flex shrink-0/, 'the header keeps its own column-axis shrink-0');
+test('the in-body tenant row is GONE — its subject moved to the nav (2026-09-08)', () => {
+  assert.doesNotMatch(pageCode, /<TenantTabs/, 'no tenant tabs rendered on this page');
+  assert.doesNotMatch(pageSrc, /from\s+['"][^'"]*tenant-tabs['"]/, 'and none imported');
+  assert.doesNotMatch(pageCode, /<TenantScope/, 'nor the nav control mounted here — it lives in app/layout.tsx, once');
+  // The successor control exists where the ruling put it.
+  const layout = readFileSync(join(here, '../app/layout.tsx'), 'utf8');
+  assert.match(layout, /<TenantScope allowedViews=\{allowedViews\} \/>/, 'the nav mounts the scope pill');
+  assert.equal(existsSync(join(here, '../components/dashboard/tenant-tabs.tsx')), false, 'TenantTabs is deleted, not orphaned');
 });
 
 test('justify-between is UNCONDITIONAL — a lone item goes flush left on its own', () => {
+  // The header now holds ONE item for every reader (the freshness line), so this is the shape it
+  // always renders: `space-between` with a lone child puts it flush with main-start (measured x=40,
+  // exactly the sm:px-10 inset). One static class list, no ternary, no visibility predicate.
   assert.match(
     headerSrc,
     /<header className="flex shrink-0 flex-wrap items-center justify-between gap-x-6 gap-y-1">/,
     'one static class list, no ternary',
   );
   // ⚠ AND THE PAGE MUST NOT REACH FOR A VISIBILITY PREDICATE TO DECIDE THIS. The first draft
-  // exported `tenantTabsVisible` from tenant-tabs.tsx and called it here — see the client-boundary
+  // exported `tenantTabsVisible` from a client module and called it here — see the client-boundary
   // test below for why that was a 500 rather than a style choice.
   assert.doesNotMatch(pageCode, /tenantTabsVisible/, 'no visibility predicate is consulted');
   assert.doesNotMatch(pageCode, /allowedViews\.length > 1/, 'and none is re-derived inline either');
@@ -137,6 +143,17 @@ test('the reclaimed padding and gap are exactly the measured ones', () => {
  * So: every value this page imports from a client module must be used as a JSX component and
  * never invoked. Sibling trap, opposite direction: a non-function export from a `'use server'`
  * file breaks every Server Action on the page, also silently.
+ *
+ * ⚠ THE GUARD IS DORMANT AS OF 2026-09-08, AND SAYS SO. TenantTabs was this page's ONLY client
+ * import (data-freshness and unprovisioned-notice are server modules; @/components/dashboard is a
+ * barrel with no directive — which is also a LIMIT of this scan: a client component re-exported
+ * through a directive-less barrel is never checked, because the test looks for `'use client'` on the
+ * file the import resolves to, not on what that file re-exports). With it gone the scan below finds
+ * nothing to check. The old
+ * `checked.length > 0` sentinel — "the guard is worthless if it silently matched nothing" — would
+ * now fail for the wrong reason, so it is replaced by an explicit statement of the current count:
+ * the loop still runs, and the moment a client import is added here it is live again. Do not
+ * "fix" the dormancy by adding a client import to satisfy a test.
  */
 test('nothing imported from a client module is CALLED by this server page', () => {
   const importRe = /import\s+\{([^}]+)\}\s+from\s+'(@\/(?:components|lib)\/[^']+)'/g;
@@ -160,16 +177,11 @@ test('nothing imported from a client module is CALLED by this server page', () =
       );
     }
   }
-  // The guard is worthless if it silently matched nothing: this page imports at least TenantTabs
-  // from a 'use client' module, so the scan must have found something to check.
-  assert.ok(checked.length > 0, `expected >=1 client import to check, found: ${checked.join(', ')}`);
-  // And the premise has to hold — if tenant-tabs.tsx ever loses its 'use client', the scan above
-  // would skip it and pass for the wrong reason.
-  assert.match(tabsSrc, /^'use client';/, 'tenant-tabs.tsx is a client module');
-  // It must also not re-grow a non-component export for a server caller to reach for. Relocating
-  // such a helper to a server-safe module is the correct fix WHEN one is needed; here the layout
-  // fix removed the need, so the cleanest state is no helper at all.
-  assert.doesNotMatch(tabsSrc, /export function tenantTabsVisible/, 'no callable export on the client module');
+  // A REAL RATCHET, not a tautology (the first draft asserted `Array.isArray(checked)`, which cannot
+  // fail — the code review of 2026-09-08 caught it). This FAILS exactly when the dormancy ends, which
+  // is the moment someone needs to look: confirm the loop above is live for the new import, then
+  // update this list to name it.
+  assert.deepEqual(checked, [], `this page has no client imports today — you added one; confirm the guard above is live and update this list: ${checked.join(', ')}`);
 });
 
 test('the compact header is COLLECTIONS-ONLY — Overview is untouched', () => {

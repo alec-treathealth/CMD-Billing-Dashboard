@@ -29,10 +29,11 @@
  * deliberately local to this module — `DEFAULT_VIEW` is shared by /dashboard and
  * /dashboard/collections and must not move on their behalf.
  *
- * ⚠ ORDER IS LOAD-BEARING, AND IT COUPLES TO `TenantTabs`. The tabs component runs its OWN
- * `clampView(resolveView(param), allowedViews)` and falls back to `allowedViews[0]`. If this
- * list did not put the route default first, a bare URL would light a different tab than the
- * page scoped its data to. `claimsDeskViews` therefore intersects in THIS array's order, not
+ * ⚠ ORDER IS LOAD-BEARING, AND IT COUPLES TO THE NAV `TenantScope` PILL (components/nav/
+ * tenant-scope.tsx; `TenantTabs` before 2026-09-08). Its `useTenantScope` runs
+ * `clampView(resolveView(param), offered)` and falls back to `offered[0]`. If this list did not put
+ * the route default first, a bare URL would state a different tenant in the pill than the page
+ * scoped its data to. `claimsDeskViews` therefore intersects in THIS array's order, not
  * the caller's.
  */
 import { type DashboardView } from '@/lib/views';

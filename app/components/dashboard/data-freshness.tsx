@@ -132,9 +132,10 @@ export function FreshnessLine({
  * so this fallback must be rendered `inline` there too — matching the real line's placement is
  * the whole contract, and a stacked fallback under an inline line would reserve 8px of margin
  * the resolved line does not have. What changes on that route is WHY the reserve matters: the
- * tabs (42.5px) set the row height, so the row is height-stable regardless — EXCEPT for a
- * single-entitled-view user, where TenantTabs renders null and this line IS the row. There the
- * fallback is still the only thing holding its 18px. Never simplify it to null on either route.
+ * tabs (42.5px) set the row height until 2026-09-08, when they moved to the nav; since then this
+ * line IS the row for EVERY reader, and the fallback is the only thing holding its 18px. (Before
+ * that, the same was true only for a single-entitled-view user, for whom TenantTabs rendered
+ * null.) Never simplify it to null on either route.
  *
  * IT DELIBERATELY REUSES NO FreshnessState WORDING. Not 'not yet loaded', not 'unavailable':
  * both are REAL, EARNED outcomes of a COMPLETED read (see lib/dataFreshness.ts — 'unavailable'
