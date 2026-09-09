@@ -239,7 +239,7 @@ const PAIR_PREDICATE_SQL = `hcpcs is not distinct from $4::text
 const METRICS_SQL = `count(*)::int                                                    as charges,
     sum(charge_amount)                                               as billed,
     sum(insurance_payments)                                          as collected,
-    round(100.0 * count(*) filter (where ${RELIABLE_TIER_SQL}) / count(*), 1)
+    round(100.0 * count(*) filter (where ${RELIABLE_TIER_SQL}) / nullif(count(*), 0), 1)
                                                                      as allowed_coverage,
     round(100.0 * sum(allowed_reliable) filter (where ${RELIABLE_TIER_SQL})
           / nullif(sum(charge_amount) filter (where ${RELIABLE_TIER_SQL}), 0), 2)
@@ -247,7 +247,7 @@ const METRICS_SQL = `count(*)::int                                              
     round(100.0 * sum(insurance_payments) filter (where ${RELIABLE_TIER_SQL} and allowed_reliable > 0)
           / nullif(sum(allowed_reliable) filter (where ${RELIABLE_TIER_SQL} and allowed_reliable > 0), 0), 2)
                                                                      as paid_of_allowed,
-    sum(greatest(allowed_reliable - insurance_payments, 0))
+    sum(greatest(allowed_reliable - coalesce(insurance_payments, 0), 0))
         filter (where ${RELIABLE_TIER_SQL} and payment_received is not null)
                                                                      as underpaid_dollars,
     percentile_cont(0.5) within group (
@@ -256,13 +256,13 @@ const METRICS_SQL = `count(*)::int                                              
     percentile_cont(0.9) within group (
       order by case when payment_received >= charge_date then payment_received - charge_date end)
                                                                      as days_p90,
-    round(100.0 * count(*) filter (where coalesce(insurance_payments, 0) = 0) / count(*), 1)
+    round(100.0 * count(*) filter (where coalesce(insurance_payments, 0) = 0) / nullif(count(*), 0), 1)
                                                                      as pct_zero_paid,
     round(100.0 * sum(adjustments) / nullif(sum(charge_amount), 0), 2)
                                                                      as write_off_rate,
     round(100.0 * sum(patient_balance_due) / nullif(sum(charge_amount), 0), 2)
                                                                      as patient_balance_rate,
-    round(100.0 * count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / count(*), 1)
+    round(100.0 * count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / nullif(count(*), 0), 1)
                                                                      as matured_share`;
 
 // ---------------------------------------------------------------------------------------------
@@ -417,9 +417,9 @@ select
   round(100.0 * sum(allowed_reliable) filter (where ${RELIABLE_TIER_SQL})
         / nullif(sum(charge_amount) filter (where ${RELIABLE_TIER_SQL}), 0), 2)
                                                                      as allowed_rate,
-  round(100.0 * count(*) filter (where ${RELIABLE_TIER_SQL}) / count(*), 1)
+  round(100.0 * count(*) filter (where ${RELIABLE_TIER_SQL}) / nullif(count(*), 0), 1)
                                                                      as allowed_coverage,
-  round(100.0 * count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / count(*), 1)
+  round(100.0 * count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / nullif(count(*), 0), 1)
                                                                      as matured_share
 from base
 ${where}
