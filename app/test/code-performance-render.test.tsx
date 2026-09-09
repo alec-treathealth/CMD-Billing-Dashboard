@@ -1,0 +1,216 @@
+/**
+ * Code Performance — RENDERED-HTML tests for the pieces most likely to erode between the query layer
+ * and the UI. Each is a correctness requirement, not styling (rulings 2026-09-08):
+ *   1) allowed_coverage renders IN THE SAME CELL as allowed_rate;
+ *   2) paid_of_allowed is never clamped — 123.07% renders as 123.07%;
+ *   3) a suppressed metric is a VISIBLE state with its reason in the header — never blank/absent/zero;
+ *   4) the maturity guard dims yield columns and the banner names velocity-not-yield;
+ *   5) incomplete months are per tenant (the drill-down note names that tenant's feed date);
+ *   6) definitions render review markers (unreviewed / conflict);
+ *   7) no localStorage, no ui/table.tsx, recharts is the only chart dependency.
+ * ⚠️ Must be .tsx — app/package.json collects `test/*.test.tsx` only.
+ */
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { readdirSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { renderToStaticMarkup } from 'react-dom/server';
+
+import type { CodeDescriptionMap, CodePerfPairingRow, CodePerfSummary } from '../lib/code-performance/contract';
+import { CODE_PERF_SUPPRESSION_REASONS } from '../../src/collections/codePerformanceQuery.js';
+import { DEFAULT_PAIRING_SORT, nextSort, PairingTable, sortPairingRows, pairKeyOf } from '../components/code-performance/pairing-table';
+import { MaturityBanner, KpiGrid } from '../components/code-performance/kpi-grid';
+import { FacilityTable, PayerTable, firstIncompleteMonth } from '../components/code-performance/pair-drilldown';
+import { DefinitionsPanel } from '../components/code-performance/definitions-panel';
+import { fmtMoney, fmtPct } from '../components/code-performance/format';
+
+const here = dirname(fileURLToPath(import.meta.url));
+
+function row(over: Partial<CodePerfPairingRow>): CodePerfPairingRow {
+  return {
+    hcpcs: 'S9480', loc_suffix: null, revcode: '0905', payers: 28, facilities: 13, charges: 3352,
+    billed: 13565725, collected: 2884981.82, allowed_coverage: 97.3, allowed_rate: 21.97, paid_of_allowed: 95.87,
+    underpaid_dollars: 170307.97, days_p50: 30, days_p90: 96, pct_zero_paid: 3.3, matured_share: 88,
+    first_seen: '2026-03-12', last_seen: '2026-08-21', days_idle: 18, payer_concentration: 36, facilities_rated: 13,
+    facility_spread: 30.1, write_off_rate: { state: 'available', value: 75.91 },
+    patient_balance_rate: { state: 'suppressed', reason: CODE_PERF_SUPPRESSION_REASONS.indigoPatientBalance },
+    flags: ['wide_facility_spread'],
+    ...over,
+  };
+}
+const indigoSummary: CodePerfSummary = {
+  charges: 42852, pairings: 78, facilities: 28, payers: 78, no_procedure_code_charges: 5172, no_revenue_code_charges: 0,
+  billed: 200255352.96, collected: 50462514.64, allowed_coverage: 99.2, allowed_rate: 27.65, paid_of_allowed: 91.04,
+  underpaid_dollars: 5008781.3, days_p50: 28, days_p90: 75, pct_zero_paid: 3.1, matured_share: 91.7,
+  write_off_rate: { state: 'available', value: 70.67 },
+  patient_balance_rate: { state: 'suppressed', reason: CODE_PERF_SUPPRESSION_REASONS.indigoPatientBalance },
+};
+const bxrSummary: CodePerfSummary = {
+  ...indigoSummary,
+  write_off_rate: { state: 'suppressed', reason: CODE_PERF_SUPPRESSION_REASONS.bxrWriteOff },
+  patient_balance_rate: { state: 'available', value: 3.4 },
+};
+const descriptions: CodeDescriptionMap = {
+  'procedure:S9480': { codeType: 'HCPCS', code: 'S9480', shortLabel: 'Intensive outpatient psychiatric services, per diem', longDescription: null, priorDescription: 'IOP', sourceCitation: 'Novitas — url', provenance: 'alec-seed-2026-09-08', needsReview: true, descriptionConflict: false, tenantOverride: false },
+  'procedure:S9475': { codeType: 'HCPCS', code: 'S9475', shortLabel: 'Ambulatory setting detoxification, per diem', longDescription: null, priorDescription: 'PHP Per Diem — Non-Medicare Payers', sourceCitation: 'Ensora', provenance: 'alec-seed-2026-09-08', needsReview: true, descriptionConflict: true, tenantOverride: false },
+  'procedure:—': { codeType: 'OTHER', code: '—', shortLabel: 'No procedure code reported', longDescription: null, priorDescription: null, sourceCitation: null, provenance: 'alec-seed-2026-09-08', needsReview: true, descriptionConflict: false, tenantOverride: false },
+  'revenue:0905': { codeType: 'REV', code: '0905', shortLabel: 'BH treatment/services — intensive outpatient, psychiatric', longDescription: null, priorDescription: null, sourceCitation: null, provenance: 'alec-seed-2026-09-08', needsReview: true, descriptionConflict: false, tenantOverride: false },
+};
+const noop = () => {};
+
+function renderTable(rows: CodePerfPairingRow[], summary: CodePerfSummary, immature = false) {
+  return renderToStaticMarkup(
+    <PairingTable rows={rows} descriptions={descriptions} summary={summary} immatureWindow={immature} sort={DEFAULT_PAIRING_SORT} onSort={noop} expandedKey={null} onToggle={noop} />,
+  );
+}
+/** The <td> elements of the first body row, in order. */
+function firstRowCells(html: string): string[] {
+  const body = html.slice(html.indexOf('<tbody>'));
+  const tr = body.slice(body.indexOf('<tr'), body.indexOf('</tr>'));
+  return tr.match(/<td[\s\S]*?<\/td>/g) ?? [];
+}
+
+test('allowed_coverage renders in the SAME cell as allowed_rate, and flags the rate as noise under 60%', () => {
+  const cells = firstRowCells(renderTable([row({})], indigoSummary));
+  const allowedCell = cells.find((c) => c.includes('21.97%'));
+  assert.ok(allowedCell, 'allowed rate cell present');
+  assert.ok(allowedCell.includes('coverage 97.3%'), 'coverage sits beside the rate, not in another column');
+  assert.ok(!allowedCell.includes('rate is noise'));
+  const noisy = firstRowCells(renderTable([row({ allowed_coverage: 42.5 })], indigoSummary)).find((c) => c.includes('21.97%'));
+  assert.ok(noisy?.includes('coverage 42.5%') && noisy.includes('rate is noise'));
+});
+
+test('paid_of_allowed is NEVER clamped: 123.07% renders as 123.07% and is flagged', () => {
+  const html = renderTable([row({ paid_of_allowed: 123.07, flags: ['paid_over_allowed'] })], indigoSummary);
+  assert.ok(html.includes('123.07%'));
+  assert.ok(!html.includes('>100.00%<'), 'no clamp to 100');
+  assert.ok(html.includes('paid &gt; allowed'));
+  assert.equal(fmtPct(123.07, 2), '123.07%');
+});
+
+test('a suppressed metric is a VISIBLE state — pill in the cell, reason in the header — for the right tenant', () => {
+  const indigo = renderTable([row({})], indigoSummary);
+  assert.ok(indigo.includes('data-state="suppressed"'), 'Indigo: patient balance cell shows the suppressed pill');
+  assert.ok(indigo.includes(CODE_PERF_SUPPRESSION_REASONS.indigoPatientBalance.slice(0, 40)), 'Indigo: header carries the reason');
+  assert.ok(indigo.includes('75.91%'), 'Indigo: write-off value shown');
+  assert.ok(!indigo.includes(CODE_PERF_SUPPRESSION_REASONS.bxrWriteOff.slice(0, 40)));
+  const bxr = renderTable(
+    [row({ write_off_rate: { state: 'suppressed', reason: CODE_PERF_SUPPRESSION_REASONS.bxrWriteOff }, patient_balance_rate: { state: 'available', value: 3.4 } })],
+    bxrSummary,
+  );
+  assert.ok(bxr.includes(CODE_PERF_SUPPRESSION_REASONS.bxrWriteOff.slice(0, 40)), 'BXR: write-off header carries the reason');
+  assert.ok(bxr.includes('3.40%'), 'BXR: patient balance value shown');
+  const pills = (bxr.match(/data-state="suppressed"/g) ?? []).length;
+  assert.equal(pills, 1, 'exactly one suppressed cell per row on BXR');
+  // The column is PRESENT with a label in both tenants — it never vanishes on tenant switch.
+  for (const html of [indigo, bxr]) {
+    assert.ok(html.includes('Write-off rate') && html.includes('Patient balance'));
+  }
+});
+
+test('patient balance is labelled as AR aging and sits at the far right, apart from allowed rate', () => {
+  const html = renderTable([row({})], indigoSummary);
+  const headers = html.match(/<th[\s\S]*?<\/th>/g) ?? [];
+  const idx = (needle: string) => headers.findIndex((h) => h.includes(needle));
+  assert.ok(idx('Patient balance') === headers.length - 1, 'last column');
+  assert.ok(idx('Patient balance') - idx('Allowed rate') > 5, 'not adjacent to allowed rate');
+  assert.ok(html.includes('AR aging') || html.includes('Outstanding patient balance as of today'));
+});
+
+test('maturity guard: banner names velocity-not-yield; yield headers and cells are dimmed; other columns are not', () => {
+  const banner = renderToStaticMarkup(<MaturityBanner maturedShare={41.2} />);
+  assert.ok(banner.includes('measures velocity and volume, not yield'));
+  assert.ok(banner.includes('41.2%'));
+  assert.ok(banner.includes('role="status"'));
+  const html = renderTable([row({ matured_share: 41.2, flags: ['immature_window'] })], indigoSummary, true);
+  const headers = html.match(/<th[\s\S]*?<\/th>/g) ?? [];
+  const dimmed = headers.filter((h) => h.includes('opacity-60'));
+  assert.ok(dimmed.some((h) => h.includes('Allowed rate')) && dimmed.some((h) => h.includes('Paid of allowed')), 'yield headers dimmed');
+  assert.ok(!headers.find((h) => h.includes('Charges'))?.includes('opacity-60'), 'volume header not dimmed');
+  assert.ok(!headers.find((h) => h.includes('Days to money'))?.includes('opacity-60'), 'velocity header not dimmed');
+  const mature = renderTable([row({})], indigoSummary, false);
+  assert.ok(!(mature.match(/<th[\s\S]*?<\/th>/g) ?? []).some((h) => h.includes('opacity-60')), 'nothing dimmed when mature');
+});
+
+test('KPI grid: coverage rides with the allowed tile; gated tiles show Suppressed + reason; nothing truncates', () => {
+  const board = {
+    tenant: 'indigo' as const, window: '6mo' as const, windowDays: 180, windowStart: '2026-03-12', windowEnd: '2026-09-08',
+    facilitiesApplied: null, summary: indigoSummary, immatureWindow: false, rows: [], facilityOptions: [],
+    freshness: { businessToday: '2026-09-08', maxIngestedAt: null, maxChargeDate: '2026-08-23', maxPaymentReceived: null, futurePaymentCharges: 114, chargeLagDays: 16 },
+    descriptions,
+  };
+  const html = renderToStaticMarkup(<KpiGrid board={board} />);
+  assert.ok(html.includes('27.65%') && html.includes('coverage 99.2%'));
+  assert.ok(html.includes('Suppressed') && html.includes(CODE_PERF_SUPPRESSION_REASONS.indigoPatientBalance.slice(0, 40)));
+  assert.ok(html.includes(fmtMoney(200255352.96)), 'full dollar value, no truncation');
+  assert.ok(html.includes('whitespace-nowrap') && !html.includes('truncate'));
+  assert.ok(html.includes('LAST posting'));
+});
+
+test('drill-down tables: raw payer strings, coverage beside rate, unclamped paid, tenant-specific suppression', () => {
+  const payer = renderToStaticMarkup(
+    <PayerTable
+      rows={[{ payer_raw: 'BLUE SHIELD OF CA', share_of_billed: 4.1, charges: 133, billed: 551000, collected: 124538.6, allowed_coverage: 98.5, allowed_rate: 16.14, paid_of_allowed: 123.07, underpaid_dollars: 9048.12, days_p50: 29, days_p90: 50, pct_zero_paid: 0.8, matured_share: 86.5, write_off_rate: { state: 'available', value: 75.54 }, patient_balance_rate: { state: 'suppressed', reason: CODE_PERF_SUPPRESSION_REASONS.indigoPatientBalance } }]}
+      summary={indigoSummary}
+      dim={false}
+    />,
+  );
+  assert.ok(payer.includes('BLUE SHIELD OF CA') && payer.includes('raw CMD string, unaliased'));
+  assert.ok(payer.includes('123.07%') && payer.includes('coverage 98.5%'));
+  assert.ok(payer.includes('data-state="suppressed"'));
+  const fac = renderToStaticMarkup(<FacilityTable rows={[]} belowFloor={3} summary={bxrSummary} dim={false} />);
+  assert.ok(fac.includes('No facility reaches 30 charges') && fac.includes('3 facilities excluded'));
+});
+
+test('incomplete months are per tenant: the first incomplete month is the shading edge', () => {
+  const months = [
+    { month: '2026-06-01', charges: 1, billed: 1, collected: 0, allowed_rate: null, allowed_coverage: null, matured_share: 100, incomplete: false },
+    { month: '2026-07-01', charges: 1, billed: 1, collected: 0, allowed_rate: null, allowed_coverage: null, matured_share: 80, incomplete: false },
+    { month: '2026-08-01', charges: 1, billed: 1, collected: 0, allowed_rate: null, allowed_coverage: null, matured_share: 0, incomplete: true },
+  ];
+  assert.equal(firstIncompleteMonth(months), '2026-08-01');
+  assert.equal(firstIncompleteMonth(months.map((m) => ({ ...m, incomplete: false }))), null);
+});
+
+test('definitions panel renders review markers: every row unreviewed, S9475 flagged as a conflict with both texts', () => {
+  const html = renderToStaticMarkup(
+    <DefinitionsPanel rows={[row({}), row({ hcpcs: 'S9475', revcode: '0912' }), row({ hcpcs: '—', revcode: '1002' })]} descriptions={descriptions} />,
+  );
+  assert.ok(html.includes('unreviewed'));
+  assert.ok(html.includes('conflict'));
+  assert.ok(html.includes('Ambulatory setting detoxification, per diem') && html.includes('PHP Per Diem — Non-Medicare Payers'));
+  assert.ok(html.includes('No procedure code reported'), 'the em dash renders through the shared no-code label');
+  assert.ok(html.includes('No description on file'), 'a code with no 038 row says so instead of inventing text');
+});
+
+test('client-side sort: allowlisted keys only, nulls last both ways, stable tie-break, desc first then toggles', () => {
+  const rows = [row({ hcpcs: 'A', allowed_rate: 10 }), row({ hcpcs: 'B', allowed_rate: null }), row({ hcpcs: 'C', allowed_rate: 30 })];
+  assert.deepEqual(sortPairingRows(rows, { key: 'allowed_rate', direction: 'desc' }).map((r) => r.hcpcs), ['C', 'A', 'B']);
+  assert.deepEqual(sortPairingRows(rows, { key: 'allowed_rate', direction: 'asc' }).map((r) => r.hcpcs), ['A', 'C', 'B']);
+  assert.deepEqual(nextSort(DEFAULT_PAIRING_SORT, 'charges'), { key: 'charges', direction: 'desc' });
+  assert.deepEqual(nextSort({ key: 'charges', direction: 'desc' }, 'charges'), { key: 'charges', direction: 'asc' });
+  assert.equal(pairKeyOf(row({ hcpcs: null, loc_suffix: null, revcode: null })), pairKeyOf(row({ hcpcs: null, loc_suffix: null, revcode: null })));
+  assert.notEqual(pairKeyOf(row({ hcpcs: 'H2013', loc_suffix: 'IOP' })), pairKeyOf(row({ hcpcs: 'H2013', loc_suffix: null })), 'the suffix is part of the identity');
+});
+
+test('source sweeps: no browser storage, no ui/table.tsx, recharts only, hex only inside the chart module', () => {
+  const dir = join(here, '..', 'components', 'code-performance');
+  for (const f of readdirSync(dir)) {
+    const src = readFileSync(join(dir, f), 'utf8');
+    assert.doesNotMatch(src, /localStorage\.|sessionStorage\.|document\.cookie/, `${f}: persists client-side`);
+    assert.doesNotMatch(src, /components\/ui\/table/, `${f}: imports the shared ui/table (10 consumers — ruled off limits)`);
+    assert.doesNotMatch(src, /from 'chart\.js'|from 'd3|from 'victory|from 'nivo|from '@nivo/, `${f}: a second charting dependency`);
+    if (f !== 'pair-drilldown.tsx') assert.doesNotMatch(src, /#[0-9a-fA-F]{6}\b/, `${f}: literal hex outside the chart`);
+  }
+  const lib = join(here, '..', 'lib', 'code-performance');
+  for (const f of readdirSync(lib)) {
+    assert.doesNotMatch(readFileSync(join(lib, f), 'utf8'), /localStorage\.|sessionStorage\./, `${f}: persists client-side`);
+  }
+});
+
+test('the old route is a redirect stub and the static component is gone', () => {
+  const stub = readFileSync(join(here, '..', 'app', 'code-reference', 'page.tsx'), 'utf8');
+  assert.ok(stub.includes("redirect('/code-performance')"));
+  assert.throws(() => readFileSync(join(here, '..', 'components', 'code-reference.tsx'), 'utf8'), 'the 402-line static dataset is retired');
+});
