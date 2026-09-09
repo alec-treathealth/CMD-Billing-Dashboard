@@ -1,0 +1,88 @@
+-- 0108 — (business_entity_id, charge_date) btree on collections.cmd_explorer_charge_rollup
+--
+-- ⚠ APPLIED TO PROD BEFORE THIS FILE WAS COMMITTED — 2026-09-08 15:36 PDT, ONE autocommit
+--   `execute_sql` statement (Supabase MCP); indisvalid = indisready = true; 3,704 kB. Same discipline,
+--   same reason as 0070/0081/0092/0107: CREATE INDEX CONCURRENTLY cannot run inside a transaction block
+--   and `apply_migration` wraps everything in one. The ledger row was INSERTED BY HAND
+--   (version 20260908223624, name 0108_cmd_charge_rollup_entity_charge_date) per the 0101/0107
+--   precedent so the next session does not re-issue 0108. Re-applying to a fresh database: run the
+--   statement below with autocommit `execute_sql`, NOT `apply_migration`, and outside the :45–:48
+--   window — the hourly refresh holds SHARE UPDATE EXCLUSIVE, which CIC queues behind.
+--
+-- WHY: /code-performance (src/collections/codePerformanceQuery.ts) windows the rollup on charge_date
+--   per tenant: `business_entity_id = $1 and charge_date >= today − N and charge_date < today + 1`.
+--   None of the rollup's 14 indexes led with charge_date. MEASURED 2026-09-08, EXPLAIN (ANALYZE,
+--   BUFFERS) on the 6mo all-facility pairing query, same SQL before and after:
+--
+--     BXR    before  Index Scan cmd_charge_rollup_entity_payment + Filter (52,481 rows removed),
+--                    61,149 buffers of which 18,899 read from disk        10,959 ms cold / 343 ms warm
+--            after   Index Scan cmd_charge_rollup_entity_charge_date, 19,237 buffers          254 ms warm
+--     Indigo before  Parallel Seq Scan, 21,546 buffers (10,410 read)        567 ms cold / 505 ms warm
+--            after   Index Scan cmd_charge_rollup_entity_charge_date, 41,963 buffers          545 ms warm
+--
+--   The BXR cold figure is the finding this index answers: the planner mis-estimated the window
+--   (rows=9,001 vs 19,824 actual — `now()`-based bounds are STABLE, not constant, so the estimate is
+--   generic) and walked the whole tenant slice in payment order, paying a random heap read for every
+--   row it then discarded. With a charge_date-led index the Index Cond covers the window and no row is
+--   read only to be filtered.
+--
+-- ⚠ WHAT THIS DOES NOT FIX — read before expecting a cold number under a second. The matview is laid
+--   out in GRAIN order (0050's group by), so the rows of any charge_date window are scattered at
+--   roughly one row per heap page: BXR 6mo ≈ 20k rows → 19k page visits; Indigo 6mo ≈ 44k rows →
+--   42k page visits, which is MORE visits than the heap's 21,586 pages — a cold Indigo index scan
+--   can do worse than the cold seq scan it replaced (567 ms, sequential I/O). This index fixes the
+--   PLAN; it cannot fix the LAYOUT. The cold cost is bounded by pages-in-window, and the levers for
+--   that are a separate decision (an INCLUDE-covering index for index-only scans — price it by its
+--   widest text column, the 0092 lesson; or a matview rebuilt in (entity, charge_date) order).
+--
+-- MEASURED COLD, POST-REFRESH (the production cold case: the hourly refresh churns shared_buffers,
+--   which is how the 10,959 ms run above arose 10 minutes after the 02:45 refresh):
+--   Measured 15:51 PDT, four minutes after the 15:45 refresh (22:45:32–22:47:08 UTC) completed:
+--     BXR    Index Scan cmd_charge_rollup_entity_charge_date, 19,250 buffers, 1 read     259.7 ms
+--     Indigo Index Scan cmd_charge_rollup_entity_charge_date, 42,129 buffers, 0 reads    580.5 ms
+--   ⚠ THE HYPOTHESIS ABOVE WAS WRONG AND IS CORRECTED HERE: the refresh did NOT evict the working
+--   set (one disk read in 19,250). The 10,959 ms run this morning was OVERNIGHT IDLENESS — nobody had
+--   touched the rollup for hours — not refresh churn. That state cannot be manufactured in a session
+--   (pg_prewarm / pg_buffercache are not installed; shared_buffers 256 MB held the whole 168 MB heap
+--   once touched). What can be said about it is arithmetic: the plan now touches 19,250 pages for
+--   BXR against 61,149 before (3.2x fewer), so a fully-cold BXR run scales to roughly 10,959 ms ×
+--   19.2/61.1 ≈ 3.4 s worst case if every page is a disk read — better than before, NOT under 800 ms.
+--   For Indigo the fully-cold case is the RISK this index introduces: 42,115 scattered heap visits
+--   replace a 21,546-page sequential scan (567 ms cold), so an overnight-cold Indigo load could be
+--   slower than before this index. Warm and post-refresh, both tenants are faster or unchanged.
+--
+-- REFRESH IMPACT (measured BEFORE apply, as ruled): collections.refresh_cmd_explorer_charge_rollup()
+--   runs `refresh materialized view concurrently` on the rollup and on cmd_explorer_filter_options — a
+--   diff merge that maintains indexes incrementally for CHANGED rows only; it does not rebuild the
+--   (now 15) indexes. The last 14 hourly runs before apply took 94.7–113.2 s against maxDuration 180 s.
+--   This index is 3.7 MB — two low-cardinality keys, heavy btree dedup, the same shape as the 4.0 MB
+--   cmd_charge_rollup_entity_payment — so the per-refresh delta is sub-second. First post-apply run:
+--   2026-09-08 22:45:32 UTC (the first run after the 15:36 PDT apply): duration_ms = 96,286, ok = true,
+--   rollup_max_payment_date 2026-09-11 — inside the 94.7–113.2 s band; no material slowdown.
+--
+-- PHI DISCIPLINE: index keys are a tenant uuid and a calendar date. No PHI, no INCLUDE payload.
+-- OWNERSHIP: postgres, like every `collections` relation — NO `set role` (sql-migrations.md: a SET ROLE
+--   claims_admin in this plane downgrades the applying role and fails 42501).
+-- IDEMPOTENT: `create index concurrently if not exists`. ⚠ IF NOT EXISTS does NOT repair an INVALID
+--   index left by an interrupted CONCURRENTLY build (0092's note): if `indisvalid = false`, drop it
+--   first, then re-run — and per the live-DDL rule, stop and report rather than loop.
+-- DEPENDENCY: 0050/0059 (the matview). FUTURE REBUILD HAZARD: any migration that drops and recreates
+--   the matview (the stale 0067 pattern) silently loses this index — recreate it in that migration.
+-- Rollback: 0108_cmd_charge_rollup_entity_charge_date_rollback.sql
+
+create index concurrently if not exists cmd_charge_rollup_entity_charge_date
+  on collections.cmd_explorer_charge_rollup using btree (business_entity_id, charge_date);
+
+-- ───────────────────────────────────────────────────────────────────────────────────────────────────
+-- Verification (run manually after apply)
+-- ───────────────────────────────────────────────────────────────────────────────────────────────────
+-- select i.indisvalid, i.indisready, pg_size_pretty(pg_relation_size(i.indexrelid))
+--   from pg_index i where i.indexrelid = 'collections.cmd_charge_rollup_entity_charge_date'::regclass;
+-- -- expect: t | t | ~3704 kB
+--
+-- explain (analyze, buffers) <the 6mo pairing query from buildCodePerfPairingQuery, one tenant>
+-- -- expect: Index Scan using cmd_charge_rollup_entity_charge_date with the charge_date bounds in the
+-- --         Index Cond and NO "Rows Removed by Filter" line on the scan.
+--
+-- select started_at, duration_ms, ok from collections.rollup_refresh_run order by started_at desc limit 3;
+-- -- expect: the first post-apply run within the 94.7–113.2 s band recorded above.

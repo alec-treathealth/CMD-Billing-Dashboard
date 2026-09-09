@@ -4723,3 +4723,101 @@ index, it is an absent one.** Before adding a partial index, write the exact que
 check the predicate is present in the WHERE — and confirm with `idx_scan` after apply rather than
 assuming. A partial index also cannot be caught by a typecheck, a test, or a review that reads
 only the migration: both halves have to be read together, which is exactly what did not happen.
+
+## 038 — `ref.code_description`: curated code labels for /code-performance (APPLIED LIVE 2026-09-08)
+
+Applied via `apply_migration` (ledger `20260908093315`) and committed in the same session
+(`ac6c715` on `feat/code-performance`). 85 rows, every one `needs_review = true`; one deliberate
+`description_conflict` (S9475: HCPCS descriptor says ambulatory detox per diem, the 2026-06-18
+static reference said PHP per diem for non-Medicare payers — both can be true, routed to review).
+
+Three rulings worth knowing before touching it:
+
+- **NOT `ref.service_codes`, and not by oversight.** service_codes (0010 VOB foundation) has zero
+  rows and zero code readers on any branch or worktree, but two other 0010 tables foreign-key into
+  it (`benefit_check_services`, `claim_line_features`). A table two others FK into is a fixed point
+  regardless of row count — "zero rows, zero readers" was the wrong test. The fold (code_description
+  into service_codes, or dropping the unused 0010 scaffolding) is a FILED follow-up gated on the VOB
+  foundation's fate. To keep it cheap, 038 uses service_codes' `code_type` vocabulary VERBATIM
+  (`CPT` / `HCPCS` / `REV` / `OTHER`), enforced by a shape CHECK: five digits → CPT, letter + four
+  digits → HCPCS, four digits or three + X → REV, else OTHER. Category III CPT (`0042T`) falls to
+  OTHER under that rule — none are live; when one appears it is a migration, not a read-time guess.
+- **Read precedence is tenant-row-wins, global-fallback**, implemented as ONE query
+  (`distinct on (code_type, code) … order by code_type, code, business_entity_id nulls last`) in
+  `src/collections/codePerformanceQuery.ts`, whose test locks the ORDER BY. Do not add a second
+  reader with a different precedence.
+- **Two "no code reported" shapes, one presentation.** The literal em dash in the procedure slot IS
+  a row (so it appears in the review queue with its explanation); the NULL revenue code is NOT (a
+  NULL cannot key a lookup). Both render through `describeCodeSlot`, one label family, one flag.
+
+Two sources are kept side by side: per-code descriptors (`alec-seed-2026-09-08`) and the retired
+static Code Reference dataset (`code-reference-static-2026-06-18`, cited to CMS PHP Billing, CMS
+Transmittal A01-111, Novitas IOP, NUBC UB-04, Ensora, Behave Health) as `prior_description` +
+`source_citation`. The static set is a CORROBORATING source, not a source of truth — it omits 90853,
+the second-highest-volume group code live (3,814 charges in the trailing 180 days). No writer role
+exists yet; "review workflow / writer for ref.code_description" is a filed follow-up, and the
+rollback file says plainly that once one exists, DROP destroys human rulings.
+
+## Accounting-identity findings on the charge rollup — two live ingest defects (2026-09-08)
+
+The instrument: for posted charges, `charge_amount = insurance_payments + adjustments +
+patient_balance_due` within one cent. It holds on **96.6% of BXR** and **98.5% of Indigo** charges
+whose snapshots all predate 2026-08-15, which is the 0050/0059 semantics working. It breaks after
+that date, for a different reason per tenant. Neither is fixed here; both are filed.
+
+1. **BXR `adjustments` is zeroed on ~28% of charges since the 2026-08-15 re-pin to report
+   10094775.** The HEADERS aliases `Insurance Paid Amount` / `Insurance Adjustment Amount` were
+   "ruled equivalent, unmeasured" (cmdExplorer.ts). They are PER-PAYMENT-ROW values: 98.8% of
+   post-08-15 BXR charges have two rows on one payment date, 92.5% pairing a zero row with a
+   positive one; only 2 charges carry two positive paid values. `max(insurance_payments)` therefore
+   still lands on the right figure BY LUCK; the latest-snapshot pick for `adjustments` lands on the
+   zero row about half the time. Identity on post-08-15 BXR: **62%** with the rollup's rule, **90%**
+   with `max(adjustments)`; mixed-era charges 55% → 81%. `max()` over-counts 13% of mixed-era
+   charges, so the fix needs era awareness — it is not a one-word change. Consequence taken:
+   `write_off_rate` is DROPPED for BXR on /code-performance (directional bias of unknown magnitude
+   does not travel with a screenshot).
+2. **Indigo `patient_balance_due` is NULL on 100% of charges re-snapshotted since 2026-08-15**
+   (12,481 of 12,481; 0 of 34,019 before). Report 10092391 lost `Charge Balance Due Pat` the day
+   the employer column was added; the latest-snapshot NULL overwrites real balances (26.5% of
+   those charges carried a positive balance before). Indigo identity 98.5% → 73.5%. Consequence:
+   `patient_balance_rate` is SUPPRESSED for Indigo, as a visible state with a reason.
+
+Also measured: BXR `patient_balance_due` is clean (varies on 33 of 2,734 post-08-15 charges;
+identity identical under latest/max/min); the residual ~10% non-balancing post-08-15 BXR charges
+have a POSITIVE remainder (in-flight insurance balance), not a column defect. The "cutover
+checklist" the HEADERS comment says carries the detection query does not exist in the repo.
+
+## 0108 — `(business_entity_id, charge_date)` btree on the charge rollup (APPLIED LIVE 2026-09-08)
+
+Applied as ONE autocommit `execute_sql` `CREATE INDEX CONCURRENTLY` at 15:36 PDT (the 0070/0081/
+0092/0107 discipline — CIC cannot run inside `apply_migration`'s transaction), ledger row hand-inserted
+(`20260908223624`), 3,704 kB, `indisvalid = true`. Committed in the same session on
+`feat/code-performance`.
+
+**Why it exists:** /code-performance windows the rollup on `charge_date` per tenant and no index led
+with `charge_date`. The BXR 6mo pairing query planned as an Index Scan on
+`cmd_charge_rollup_entity_payment` with a Filter that discarded 52,481 of 72,305 rows — 61,149 buffers,
+18,899 of them disk reads — **10,959 ms cold / 343 ms warm**. Indigo planned as a Parallel Seq Scan
+(567 ms cold / 505 ms warm). Cause: `now()`-based bounds are STABLE, not constant, so the row estimate
+was generic (9,001 vs 19,824 actual) and the payment-ordered index looked cheap.
+
+**Measured after:** BXR 254–260 ms (warm and 4 min post-refresh), Indigo 545–580 ms; the first
+refresh with the index in place took 96.3 s (band 94.7–113.2 s) — REFRESH … CONCURRENTLY maintains
+indexes incrementally, so a 3.7 MB two-key btree costs it nothing measurable.
+
+⚠️ **TWO LESSONS, one of them a correction to my own hypothesis.**
+
+1. **The hourly refresh does NOT evict the working set.** I assumed the 10.9 s run (02:5x, ten
+   minutes after the 02:45 refresh) was refresh churn. Four minutes after the 15:45 refresh the same
+   query had 1 disk read in 19,250 buffers. The morning run was OVERNIGHT IDLENESS. That state cannot
+   be manufactured in a session (no pg_prewarm / pg_buffercache; shared_buffers 256 MB holds the whole
+   168 MB heap once touched), so "cold" here means "first load after hours idle" and is estimable
+   only by page arithmetic.
+2. **An index fixes the PLAN, not the LAYOUT.** The matview is laid out in grain order (0050's GROUP
+   BY), so a charge_date window's rows sit ~one per heap page: BXR 6mo ≈ 20k rows → 19.2k page
+   visits; Indigo 6mo ≈ 44k rows → 42.1k page visits, MORE than the heap's 21,586 pages. Fully cold,
+   BXR scales to ≈ 3.4 s (10,959 × 19.2/61.1) — better, not under 800 ms — and Indigo's index plan
+   could be SLOWER than the seq scan it replaced (42k random reads vs 21.5k sequential). The levers
+   are a separate decision: an INCLUDE-covering index for index-only scans (price it by its widest
+   text column — the 0092 lesson), or a matview laid out in (entity, charge_date) order. Neither
+   authored; the matview was explicitly ruled out as the wrong tool.

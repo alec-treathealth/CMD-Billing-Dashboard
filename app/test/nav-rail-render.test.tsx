@@ -38,7 +38,7 @@ function render(opts: {
 
 test('rail: super_admin renders every destination, labelled', () => {
   const html = render({ role: 'super_admin' });
-  for (const label of ['Overview', 'Payer Intel', 'Collections', 'Claims Desk', 'Code Reference']) {
+  for (const label of ['Overview', 'Payer Intel', 'Collections', 'Claims Desk', 'Code Performance']) {
     assert.ok(html.includes(label), `missing destination: ${label}`);
   }
 });
@@ -49,7 +49,7 @@ test('rail: admissions_seat is PAYER-INTEL-only — no dashboard destinations le
   assert.ok(html.includes('Payer Intel'));
   assert.ok(!html.includes('Collections'));
   assert.ok(!html.includes('Claims Desk'));
-  assert.ok(!html.includes('Code Reference'));
+  assert.ok(!html.includes('Code Performance'));
   assert.ok(!html.includes('href="/dashboard"'));
 });
 
@@ -65,11 +65,11 @@ test('rail: the tenant scope rides onto view-scoped hrefs only', () => {
   assert.ok(html.includes('href="/dashboard?view=bxr"'));
   assert.ok(html.includes('href="/dashboard/collections?view=bxr"'));
   assert.ok(html.includes('href="/billing-audit?view=bxr"'));
-  // Payer Intel is cross-tenant; Code Reference is global. Neither may carry the scope.
+  // Payer Intel is cross-tenant; Code Performance is global. Neither may carry the scope.
   assert.ok(html.includes('href="/payer-intel"'));
-  assert.ok(html.includes('href="/code-reference"'));
+  assert.ok(html.includes('href="/code-performance"'));
   assert.ok(!html.includes('/payer-intel?view='));
-  assert.ok(!html.includes('/code-reference?view='));
+  assert.ok(!html.includes('/code-performance?view='));
 });
 
 /** The `<a …>` open tags, in render order. Attribute ORDER inside a tag is next/link's business. */
@@ -113,7 +113,7 @@ test('rail: the active indicator is painted from the M3 token, not a hex', () =>
 
 test('rail: collapsed still carries every label — it is not icon-only for a screen reader', () => {
   const collapsed = render({ role: 'super_admin', expanded: false });
-  for (const label of ['Overview', 'Payer Intel', 'Collections', 'Claims Desk', 'Code Reference']) {
+  for (const label of ['Overview', 'Payer Intel', 'Collections', 'Claims Desk', 'Code Performance']) {
     assert.ok(collapsed.includes(label), `collapsed rail dropped: ${label}`);
   }
   // Collapsed leans on title= for the truncated label.
