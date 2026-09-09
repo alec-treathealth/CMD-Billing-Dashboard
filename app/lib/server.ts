@@ -328,6 +328,9 @@ import {
   type AuditScope,
 } from '../../src/billingAudit/auditConfig.js';
 import { consolidatedAuditCron } from '../../src/billingAudit/auditConsolidated.js';
+import { arSnapshotCron } from '../../src/billingAudit/arSnapshotCron.js';
+import { AR_CACHE_TAG, AR_EXPECTED_EMPTY_CUSTOMERS, AR_SNAPSHOT_CUSTOMERS } from '../../src/billingAudit/arConfig.js';
+import { cmdFetchSnapshot } from '../../src/collections/cmdSnapshot.js';
 import { withTenant } from '../../src/veris/withTenant.js';
 import { isAuthorized } from '../../src/bearerAuth.js';
 import { assertRequiredEnvVars } from './env-preflight';
@@ -2094,6 +2097,47 @@ export async function handleBillingAuditConsolidatedCron(req: {
     return { status: 200, body: { ok: true, writer_user: writerUser, ...stats } };
   } catch (err) {
     console.error('billing-audit consolidated cron failed:', err instanceof Error ? err.message : String(err));
+    return { status: 500, body: { error: 'cron_failed' } };
+  }
+}
+
+/**
+ * AR Management snapshot ingest (/api/cron/ar-snapshot). GET only; CRON_SECRET-gated (constant-time
+ * Bearer). Loops the AR roster (src/billingAudit/arConfig.ts — the 19 BXR accounts the V2 snapshot
+ * endpoint serves), downloads each stale customer's full data snapshot (direct GET, no report slot),
+ * maps + encrypts + upserts claims.ar_* as claims_audit_writer, and records every pull in
+ * claims.ar_snapshot_run. Writer identity is asserted BEFORE any write (assertAuditWriterIdentity).
+ * Non-PHI counts only. Staleness is env-overridable (AR_SNAPSHOT_STALENESS_MS) so an operator can
+ * force a re-pull with 0; the schedule relies on the 20h default.
+ */
+export async function handleArSnapshotCron(req: {
+  method?: string;
+  authorization?: string | null;
+}): Promise<{ status: number; body: unknown }> {
+  if (req.method !== undefined && req.method.toUpperCase() !== 'GET') {
+    return { status: 405, body: { error: 'method_not_allowed' } };
+  }
+  const secret = process.env.CRON_SECRET;
+  if (!secret || !isAuthorized(req.authorization, secret)) {
+    return { status: 401, body: { error: 'unauthorized' } };
+  }
+  try {
+    const writerUser = await assertAuditWriterIdentity();
+    const base = cmdApiConfig(); // CMD_API_* credentials + base URL; report/filter ids are irrelevant to a snapshot GET
+    const stalenessRaw = process.env.AR_SNAPSHOT_STALENESS_MS?.trim();
+    const stalenessMs = stalenessRaw !== undefined && stalenessRaw !== '' && Number.isFinite(Number(stalenessRaw)) ? Math.max(0, Number(stalenessRaw)) : undefined;
+    const stats = await arSnapshotCron({
+      customers: AR_SNAPSHOT_CUSTOMERS,
+      fetchSnapshot: (customerId) => cmdFetchSnapshot({ baseUrl: base.baseUrl, customerId, auth: base.auth }),
+      writeDb: auditWriterDb(),
+      writerUser,
+      expectedEmptyCustomerIds: AR_EXPECTED_EMPTY_CUSTOMERS,
+      revalidate: () => revalidateTag(AR_CACHE_TAG),
+      ...(stalenessMs !== undefined ? { stalenessMs } : {}),
+    });
+    return { status: 200, body: { ok: true, writer_user: writerUser, ...stats } };
+  } catch (err) {
+    console.error('ar-snapshot cron failed:', err instanceof Error ? err.message : String(err));
     return { status: 500, body: { error: 'cron_failed' } };
   }
 }

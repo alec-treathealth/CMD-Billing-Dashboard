@@ -1,8 +1,9 @@
 /**
- * Billing Audit route — the billing team's IP/OP claim-audit workbench, moved off CMD batch
- * reports + the "JT Master Issues" sheet into the app (claims.audit_row / billing_code_decision
- * / flag). The landing is a flat, dense, charge-line-grain work table with a filter bar; a patient
- * drill (Phase-4 build 5) exposes charge-line detail with a canRevealPhi-gated identifier reveal.
+ * AR Management route (/billing-audit — the route and internal names are unchanged; the display
+ * label became "AR Management" on 2026-09-09). The default tab is the AR QUEUE: every open claim
+ * across the BXR facilities from CMD's daily customer data snapshot, organised by age band, with CMD
+ * follow-up notes, denial reasoning, in-app notes and work dispositions (claims.ar_*, migrations
+ * 0109/0110). The IP/OP claim-audit workbench (claims.audit_row) and Billable Days remain as tabs.
  *
  * RBAC: gated + view-clamped like Collections (NOT the deploy-protection-only /claims page) —
  * this plane is PHI, so a plain `user` never gets the reveal control, entity scope comes from the
@@ -36,8 +37,9 @@ import { loadAuditRows, loadAuditFilterOptions, type AuditFilter } from '@/lib/a
 import { TenantTabs } from '@/components/dashboard/tenant-tabs';
 import { claimsDeskViews, resolveClaimsDeskView, urlView } from '@/lib/billing-audit/views';
 import { isQualifyOnlyRole, QUALIFY_HOME } from '@/lib/rbac';
+import { loadArOptionsAction, loadArQueue, loadArSummaryAction } from '@/lib/ar/actions';
 
-export const metadata: Metadata = { title: 'Claims Desk | CMD Billing' };
+export const metadata: Metadata = { title: 'AR Management | CMD Billing' };
 
 export default async function BillingAuditPage({
   searchParams,
@@ -81,11 +83,17 @@ export default async function BillingAuditPage({
   // option rebuild never blocks the page.
   const ytd = presetWindow(DEFAULT_PRESET);
   const initialFilter: AuditFilter = { dateFrom: ytd.dateFrom, dateTo: ytd.dateTo };
-  const [ipReport, ipOpts, opOpts] = await Promise.all([
+  // The AR queue is the default tab, so its summary, options and first page are seeded here too —
+  // the strip and grid paint with data, and the client's first filter change is the first refetch.
+  const [ipReport, ipOpts, opOpts, arOptions, arSummary, arPage] = await Promise.all([
     loadAuditRows('IP', null, initialFilter, undefined, view),
     loadAuditFilterOptions('IP', view),
     loadAuditFilterOptions('OP', view),
+    loadArOptionsAction(view),
+    loadArSummaryAction(view, {}),
+    loadArQueue(view, null, {}, undefined),
   ]);
+  const role = access.access.role;
 
   const facilityTags = (o: { facility_code: string; label: string | null; n: number }): TagOption =>
     ({ value: o.facility_code, label: o.label ?? o.facility_code, count: o.n });
@@ -101,10 +109,11 @@ export default async function BillingAuditPage({
           chrome implying a choice they do not have. */}
       <TenantTabs allowedViews={deskViews} />
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Claims Desk</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">AR Management</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          IP and OP claim-audit workbench. Patient identifiers are masked by default and revealed
-          only through an explicit, audited action.
+          Every open claim across the book by age, with CMD follow-up notes, denial reasoning and work
+          dispositions — plus the IP/OP claim audit and Billable Days. Patient identifiers are masked by
+          default and revealed only through an explicit, audited action.
         </p>
         {/* Facility Resolution entry point — MOVED here from the Collections header (Alec,
             2026-08-17): attributing a 'No Facility' charge is desk work. admin/super_admin ONLY,
@@ -124,6 +133,12 @@ export default async function BillingAuditPage({
       <BillingAuditWorkbench
         view={view}
         canRevealPhi={access.access.canRevealPhi}
+        canWork={role === 'admin' || role === 'super_admin'}
+        arSeed={{
+          summary: arSummary.ok ? arSummary.summary : null,
+          options: arOptions.ok ? arOptions.options : null,
+          page: arPage.ok ? { rows: arPage.rows, nextCursor: arPage.nextCursor } : null,
+        }}
         initialFilter={initialFilter}
         ipPage={ipReport.ok ? { rows: ipReport.rows, nextCursor: ipReport.nextCursor } : null}
         ipFacilities={ipOpts.ok ? ipOpts.options.facilities.map(facilityTags) : []}

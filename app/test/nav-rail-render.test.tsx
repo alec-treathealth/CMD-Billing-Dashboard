@@ -38,7 +38,7 @@ function render(opts: {
 
 test('rail: super_admin renders every destination, labelled', () => {
   const html = render({ role: 'super_admin' });
-  for (const label of ['Overview', 'Payer Intel', 'Collections', 'Claims Desk', 'Code Performance']) {
+  for (const label of ['Overview', 'Payer Intel', 'Collections', 'AR Management', 'Code Performance']) {
     assert.ok(html.includes(label), `missing destination: ${label}`);
   }
 });
@@ -48,7 +48,7 @@ test('rail: admissions_seat is PAYER-INTEL-only — no dashboard destinations le
   const html = render({ role: 'admissions_seat', pathname: '/payer-intel' });
   assert.ok(html.includes('Payer Intel'));
   assert.ok(!html.includes('Collections'));
-  assert.ok(!html.includes('Claims Desk'));
+  assert.ok(!html.includes('AR Management'));
   assert.ok(!html.includes('Code Performance'));
   assert.ok(!html.includes('href="/dashboard"'));
 });
@@ -113,11 +113,11 @@ test('rail: the active indicator is painted from the M3 token, not a hex', () =>
 
 test('rail: collapsed still carries every label — it is not icon-only for a screen reader', () => {
   const collapsed = render({ role: 'super_admin', expanded: false });
-  for (const label of ['Overview', 'Payer Intel', 'Collections', 'Claims Desk', 'Code Performance']) {
+  for (const label of ['Overview', 'Payer Intel', 'Collections', 'AR Management', 'Code Performance']) {
     assert.ok(collapsed.includes(label), `collapsed rail dropped: ${label}`);
   }
   // Collapsed leans on title= for the truncated label.
-  assert.ok(collapsed.includes('title="Claims Desk"'));
+  assert.ok(collapsed.includes('title="AR Management"'));
 });
 
 test('rail: the expand toggle exposes its state and controls the nav landmark', () => {
@@ -143,7 +143,7 @@ test('rail: Beta reads as a badge when expanded and a dot when collapsed', () =>
 
   const collapsed = render({ role: 'super_admin', expanded: false });
   assert.ok(!collapsed.includes('q-beta-badge'));
-  // Two Beta surfaces (Payer Intel + Claims Desk) → two collapsed dot markers. Was three until
+  // Two Beta surfaces (Payer Intel + AR Management) → two collapsed dot markers. Was three until
   // the Qualify tab came down 2026-08-17.
   assert.equal(collapsed.match(/rounded-full bg-coral400/g)?.length, 2);
 });

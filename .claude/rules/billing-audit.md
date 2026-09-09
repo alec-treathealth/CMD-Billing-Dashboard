@@ -6,12 +6,54 @@ paths:
   - "app/app/billing-audit/**"
 ---
 
-# Billing Audit (displayed as "Claims Audit")
+# Billing Audit (displayed as "AR Management" since 2026-09-09; "Claims Desk" before that)
 
-The billing team's IP/OP claim-audit workbench at `/billing-audit`, replacing CMD
-batch reports plus the "JT Master Issues" sheet. Route and internal names stay
-`billing-audit`; only the **display label** is "Claims Audit". The name "Claims"
-is reserved for Veris S10.
+The billing team's AR tab at `/billing-audit`: the **AR Queue** (default, 2026-09-09) plus the
+IP/OP claim-audit workbench and Billable Days. Route and internal names stay `billing-audit`;
+only the **display label** changed — "Claims Audit" → "Claims Desk" (2026-07-15) → "AR
+Management" (2026-09-09). The name "Claims" is reserved for Veris S10.
+
+## The AR Queue — fed by the CMD V2 customer DATA SNAPSHOT (2026-09-09)
+
+`claims.ar_*` (migrations 0109 + 0110, both applied live 2026-09-09) is written nightly by
+`/api/cron/ar-snapshot` (14:05 UTC) from `GET /v2/customer/{c}/snapshot` — CMD's full per-customer
+data extract (30 tab-delimited `.DAT` tables). It returns 200 for **19 of BXR's 20 accounts**; the
+billing umbrella 10030472 is 401 and the ACCOUNT-level endpoint for 475729 is 404 (not configured),
+as is the Indigo account (10024431 → 404, 2026-08-14). Roster: `src/billingAudit/arConfig.ts`
+(the 17 audit-consolidated accounts + TREAT_CO + HOUSTON_MH — the last two are a HOLD item for
+Alec). A snapshot is a direct GET: it consumes **no CBI report slot** and does not contend with
+the hourly explorer/census pulls.
+
+**CMD's "CLAIM AT <payer>" is DERIVED, not stored.** `B_CHARGE.STATUS` is set on ~5% of charges
+(the hand-applied statuses); the rest of what CMD reports show comes from money + responsibility
+columns. The verified rule (`src/billingAudit/arSnapshotMap.ts`, header): custom status text →
+else `PAID` at zero balance → else `BALDUETO='P'` → `BALANCE DUE PATIENT` → else `BALDUETO='I'` →
+`CLAIM AT <payer of the newest E/P/F submission activity>` (+ ` - SECONDARY` when that submission
+went to the secondary) → else `BALANCE DUE OTHER`. Measured 2026-09-09: 128 of the 139 distinct
+`CLAIM AT …` strings on `claims.audit_row` reproduce byte-for-byte. `status_category` uses the
+SHARED `normalizeStatus` taxonomy — do not fork it.
+
+**Notes are two kinds.** `B_PATNOTES.TYPE=0` rows carry `CLAIM=0` and are PATIENT-level follow-up
+notes (CAMH: 1,535 of 1,567); `TYPE=2` rows carry a real claim id. 0110 made `cmd_claim_id`
+nullable for exactly this; a patient-level note renders on every claim of that patient. All note
+bodies (CMD-imported and in-app) are libsodium ciphertext; the notes read is gated to
+`canRevealPhi` and audited (`read_ar_notes`).
+
+**Planes and roles.** `ar_patient` is the ONLY PHI table (name / DOB / member id ciphertext +
+blind indexes); `ar_claim` / `ar_charge` / `ar_remit` / `ar_claim_status_event` carry opaque CMD
+ids only, so the queue page never selects an encrypted column. Ingest writes as
+`claims_audit_writer` under GUC-scoped RLS via `withTenant()`; human writes (`ar_add_note`,
+`ar_set_work`, `ar_mark_notifications_seen`) are `claims_admin`-owned definers with EXECUTE to
+`claims_reader`. Reads are `claims_reader` + the app-layer tenant WHERE. Age is computed at READ
+time from `dos_from` against the business day (`src/billingAudit/arBuckets.ts` — nine bands
+31–60d … 1–2yr, plus 0–30 and 2yr+ so the set is exhaustive; NOT the CMD a)–h) labels in
+`ageBucket.ts`).
+
+**What "resolved" means here.** A claim never leaves history: `in_latest_snapshot` flips off when
+CMD's snapshot stops carrying it, `balance` drops to 0 when it pays, and the work disposition
+(`ar_claim_work`) is human-owned and never touched by the ingest — so "worked, then paid" is
+visible as a state, not lost. The bell (super_admin) reads `ar_claim_event`, which every definer
+appends to.
 
 **Currently behind a refactor notice** for everyone except the shared bypass
 allowlist — `alec@treathealth.ai` + `ryan@treathealth.ai` as of 2026-08-18

@@ -72,6 +72,16 @@ test('both ScopePanels are keyed by `view`, so a tenant switch rebuilds them', (
   }
 });
 
+test('the AR Queue panel is keyed by `view` too — it holds a server-seeded snapshot of one tenant', () => {
+  // Same class of state as the ScopePanels: `ArWorkbench` seeds its summary / first page from server
+  // props in useState initialisers, so a soft tenant switch must remount it or the previous tenant's
+  // rows (and any revealed names cached in the queue table) survive under the new tenant's chrome.
+  const src = read(WORKBENCH);
+  const block = src.slice(src.indexOf('<ArWorkbench'));
+  const render = block.slice(0, block.indexOf('/>'));
+  assert.match(render, /key=\{view\}/, 'ArWorkbench is not keyed by view');
+});
+
 test('the Billable Days panel is NOT keyed by `view` — the asymmetry is deliberate', () => {
   // Asserted so a later "consistency" cleanup cannot key everything and silently trade the PHI
   // bug for destroying a biller's unsaved work. The negative direction of the same claim.

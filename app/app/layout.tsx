@@ -4,6 +4,7 @@ import { NavLinks } from '@/components/nav-links';
 import { SwitcherTenantLogo } from '@/components/dashboard/switcher-tenant-logo';
 import { TenantLogo } from '@/components/tenant-logo';
 import { UserMenu } from '@/components/user-menu';
+import { ArNotificationsBell } from '@/components/ar-notifications-bell';
 import { BrandTheme } from '@/components/brand-theme';
 import { HeaderGate } from '@/components/header-gate';
 import { NavRail } from '@/components/shell/nav-rail';
@@ -148,6 +149,11 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             </Suspense>
             {/* single-tenant user: their entity's logo immediately LEFT of the avatar (server-side). */}
             {singleTenantSlug ? <TenantLogo slug={singleTenantSlug} /> : null}
+            {/* AR Management change feed — a super-admin surface by request (2026-09-09). Rendered by
+                DOM omission for every other role; the actions behind it re-gate on the role too. It
+                needs a real principal, so the no-auth fallback (role super_admin, email null) shows
+                nothing. */}
+            {role === 'super_admin' && email ? <ArNotificationsBell /> : null}
             {email ? (
               <UserMenu
                 email={email}
