@@ -10,7 +10,7 @@
  * Renders from server-seeded data on first paint (no skeleton); a filter change dims it to
  * opacity-60 while the new summary loads (design-system Motion → refresh, never re-skeleton).
  */
-import { AR_BANDS } from '../../../../src/billingAudit/arBuckets';
+import { AR_QUEUE_BANDS } from '../../../../src/billingAudit/arBuckets';
 import type { ArBandKey, ArBandSummaryRow, ArKpiRow } from '@/lib/ar/contract';
 import { staggerDelayMs } from '../../qualify/tokens';
 import { BAND_COLOR, moneyCompact, moneyWhole } from './ar-leaves';
@@ -20,8 +20,6 @@ export interface AgingStripProps {
   kpi: ArKpiRow;
   selected: ArBandKey[];
   onToggle: (key: ArBandKey) => void;
-  agedOnly: boolean;
-  onToggleAgedOnly: () => void;
   loading: boolean;
   /**
    * Set when the summary/KPI load FAILED. Without it the strip had no failure state at all: the
@@ -44,7 +42,7 @@ function Kpi({ label, value, sub, tone, title }: { label: string; value: string;
   );
 }
 
-export function AgingStrip({ bands, kpi, selected, onToggle, agedOnly, onToggleAgedOnly, loading, error }: AgingStripProps) {
+export function AgingStrip({ bands, kpi, selected, onToggle, loading, error }: AgingStripProps) {
   const byBand = new Map(bands.map((b) => [b.band, b]));
   // BAND-INDEPENDENT DENOMINATOR. `kpi.balance` is the FILTERED total, so as soon as the operator
   // pressed a tile — the strip's primary interaction — that tile became 100% and every other tile
@@ -53,7 +51,7 @@ export function AgingStrip({ bands, kpi, selected, onToggle, agedOnly, onToggleA
   // population, so the sum of the bands is the honest denominator and costs no extra query.
   const bandTotal = bands.reduce((sum, b) => sum + (Number(b.balance) || 0), 0);
   const total = Math.max(1, bandTotal);
-  const maxShare = Math.max(0.0001, ...AR_BANDS.map((b) => (Number(byBand.get(b.key)?.balance) || 0) / total));
+  const maxShare = Math.max(0.0001, ...AR_QUEUE_BANDS.map((b) => (Number(byBand.get(b.key)?.balance) || 0) / total));
   const claimsWord = kpi.claims === 1 ? 'claim' : 'claims';
   const DASH = '—';
   const num = (v: number): string => (error ? DASH : v.toLocaleString('en-US'));
@@ -93,23 +91,16 @@ export function AgingStrip({ bands, kpi, selected, onToggle, agedOnly, onToggleA
         </div>
       </div>
 
-      <div className="mt-5 flex items-center justify-between gap-3">
+      {/* The "Aged 31+ days only" toggle is GONE, not moved: the 0–30 day set is excluded from every
+          read on this plane (AR_MIN_AGE_DAYS, ruled 2026-09-10), so a control offering to filter to
+          what is already the only population would be a lie about what it does. */}
+      <div className="mt-5">
         <h2 className="ths-h text-sm font-semibold text-ink900">Age of open balance</h2>
-        <button
-          type="button"
-          aria-pressed={agedOnly}
-          onClick={onToggleAgedOnly}
-          className={[
-            'rounded-full border px-3 py-1 text-xs font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
-            agedOnly ? 'border-[var(--brand-accent)] bg-[var(--brand-accent)] text-white' : 'border-line bg-card text-ink600 hover:border-teal700/50 hover:text-ink900',
-          ].join(' ')}
-        >
-          Aged 31+ days only
-        </button>
+        <p className="mt-0.5 text-xs text-ink400">Claims aged 31 days or more. Newer claims are not on this queue.</p>
       </div>
 
-      <div role="group" aria-label="Age bands (toggle to filter)" className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-5 xl:grid-cols-9">
-        {AR_BANDS.map((b, i) => {
+      <div role="group" aria-label="Age bands (toggle to filter)" className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
+        {AR_QUEUE_BANDS.map((b, i) => {
           const row = byBand.get(b.key);
           const balance = Number(row?.balance) || 0;
           const claims = row?.claims ?? 0;

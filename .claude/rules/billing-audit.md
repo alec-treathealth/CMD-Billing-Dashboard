@@ -124,6 +124,53 @@ The loop is therefore walked **stalest-first, never-ingested first**, ties keepi
 (one `max(finished_at)` query per entity, tenant-scoped like every other run-log read). Keep that
 property if you touch the loop; `test/arSnapshotCron.test.ts` pins all three cases.
 
+### The queue is AGED AR ONLY, and the note column carries PHI — two rulings, 2026-09-10
+
+**0–30 DAYS IS NOT ON THIS QUEUE.** Ruled by Alec: that set "is not needed" — money that has not had
+time to be worked, and 2,584 claims / $14.3M of noise at the top of a queue built for aged AR. The
+predicate lives in `arBaseConds`, so the grid, the tiles and the KPI cannot disagree about the
+population they describe (measured after the change: 25,999 claims / $39.0M across 8 bands).
+
+Two details that are easy to get wrong if you touch this:
+
+- **It is enforced at READ, not at ingest.** The snapshot still records every claim, so one that
+  crosses 31 days arrives WITH its accumulated status history and follow-up notes. Filtering at
+  ingest would surface a claim on the day it ages in with no history at all — exactly when a rep
+  needs the context — and undoing it would need a backfill.
+- **`0_30` stays in `AR_BANDS`; the tile set is `AR_QUEUE_BANDS`.** The SQL CASE must stay total or a
+  stray row classifies as `null`. `AR_BANDS` is the taxonomy, `AR_QUEUE_BANDS` is the 8 tiles.
+- **A NULL `dos_from` is KEPT.** `dos_from <= asOf - 31` is NULL for an undated claim, so a bare
+  comparison would silently drop money we cannot prove is new. On an AR queue that is the worst
+  possible default. Undated claims stay visible.
+
+The "Aged 31+ days only" toggle is **deleted, not moved**: a control offering to filter to what is
+already the only population would misrepresent what it does.
+
+**THE QUEUE'S FOLLOW-UP NOTE COLUMN IS PHI, SERVED TO EVERY ROLE THAT REACHES THE QUEUE.** Ruled by
+Alec 2026-09-10. Note bodies are staff free text about patients; they were previously readable only
+behind `canRevealPhi`, in the drawer. They are now shown in the grid to everyone who can open the
+tab — **including entity `user`, which `app/lib/rbac.ts` describes as NON-PHI**. That contradiction
+is deliberate and is recorded here so a reviewer (or Qodo) does not read it as the defect it would
+otherwise look like. Two properties were NOT relaxed and must not be:
+
+- **The read is AUDITED**, one `read_ar_queue_notes` row per page load, written BEFORE any decrypt,
+  carrying counts and opaque claim ids only. Every other reveal on this plane audits first; a bulk
+  disclosure on every page load is the last one that should skip it.
+- **It is delivered UNCACHED, on its own channel** (`loadArLatestNotes`), keyed by claim id and never
+  folded into `ArQueueRow`. `loadArQueuePage` is wrapped in `unstable_cache` and its payload is
+  PHI-free by construction; putting note text in it would write PHI into Next's data cache — an
+  at-rest surface outside the libsodium design, with none of its key management — and would audit
+  once per five-minute window instead of once per read.
+
+⚠ **`buildArLatestNotesQuery` takes (claim, patient) PAIRS, and that is not incidental.** 0110 made
+CMD notes patient-level, so a claim-id-only lookup silently misses most of them: measured on a live
+page, **15 notes were claim-level and 32 were patient-level** — 68% would have been invisible, and
+the column would have looked merely sparse rather than broken. The pairs come from a tenant-scoped
+read, so a claim can still only ever reach its own patient's notes. One indexed lateral per row;
+206 ms / 609 buffers for a 50-row page. A partial index on
+`(business_entity_id, cmd_patient_id, noted_at desc) where cmd_claim_id is null` would cut that if
+it ever matters.
+
 **What "resolved" means here.** A claim never leaves history: `in_latest_snapshot` flips off when
 CMD's snapshot stops carrying it, `balance` drops to 0 when it pays, and the work disposition
 (`ar_claim_work`) is human-owned and never touched by the ingest — so "worked, then paid" is

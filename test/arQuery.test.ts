@@ -6,6 +6,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { AR_BANDS, AR_MIN_AGE_DAYS, AR_QUEUE_BANDS } from '../src/billingAudit/arBuckets.js';
 import {
   AR_PAGE_SIZE,
   arSortValue,
@@ -26,6 +27,8 @@ import {
   resolveArFilter,
   resolveArSort,
   type ArQueueRow,
+  buildArLatestNotesQuery,
+  buildArPayerOptionsQuery,
 } from '../src/billingAudit/arQuery.js';
 
 const ENT = ['af504ab6-3dcd-4aa4-a93c-27bc58de4088'];
@@ -83,8 +86,9 @@ test('queue query: tenant + in_latest + open-balance predicates, parameterised, 
   assert.match(sql, /c\.business_entity_id = any\(\$2::uuid\[\]\)/);
   assert.match(sql, /c\.in_latest_snapshot/);
   assert.match(sql, /c\.balance > 0/);
-  assert.match(sql, /order by c\.balance DESC nulls last, c\.id DESC limit \$3/);
-  assert.deepEqual(params, [AS_OF, ENT, AR_PAGE_SIZE + 1]);
+  assert.match(sql, /order by c\.balance DESC nulls last, c\.id DESC limit \$4/);
+  // AR_MIN_AGE_DAYS binds between the entity list and the limit — the aged-only predicate.
+  assert.deepEqual(params, [AS_OF, ENT, AR_MIN_AGE_DAYS, AR_PAGE_SIZE + 1]);
   for (const forbidden of ['_enc', '_bidx', 'select *', 'note_enc']) assert.equal(sql.includes(forbidden), false, forbidden);
   assert.match(sql, /as band/);
   assert.match(sql, /as age_days/);
@@ -173,7 +177,7 @@ test('detail builders: claim id validated, tenant pinned, notes include patient-
 });
 
 test('options + notifications: parameterised, bounded, actor excluded', () => {
-  const fac = buildArFacilityOptionsQuery(ENT);
+  const fac = buildArFacilityOptionsQuery(ENT, AS_OF);
   assertParamsAligned(fac.sql, fac.params);
   // Assignees are TENANT-scoped: every super_admin plus this tenant's admins; the slug is allowlisted.
   const asg = buildArAssigneeOptionsQuery('bxr');
@@ -222,4 +226,76 @@ test('patient search or-group covers all three indexes and still works with a si
     buildArSummaryQuery(resolveArFilter({ memberIdBidx: [tok] }), ENT, AS_OF).sql,
     buildArKpiQuery(resolveArFilter({ memberIdBidx: [tok] }), ENT, AS_OF).sql,
   ]) assert.match(q, /\(p\.member_id_bidx = any\(\$\d+::text\[\]\)\)/);
+});
+
+test('every AR read excludes the 0-30 day set, and KEEPS an undated claim', () => {
+  // Ruled 2026-09-10: the 0-30d population is not on this queue. Enforced in arBaseConds, so the
+  // queue, the tiles and the KPI cannot disagree about the population they describe.
+  const q = buildArQueueQuery(null, resolveArFilter({}), resolveArSort({}), 51, ENT, AS_OF);
+  const s = buildArSummaryQuery(resolveArFilter({}), ENT, AS_OF).sql;
+  const k = buildArKpiQuery(resolveArFilter({}), ENT, AS_OF).sql;
+  for (const sql of [q.sql, s, k]) {
+    assert.match(sql, /\(c\.dos_from is null or c\.dos_from <= \(\$\d+::date - \$\d+::int\)\)/, 'aged-only predicate present');
+  }
+  assert.ok(q.params.includes(AR_MIN_AGE_DAYS), `the bound age is the constant (${AR_MIN_AGE_DAYS}), not a literal`);
+  // The NULL branch is the point: a bare comparison would drop undated claims silently, which on an
+  // AR queue means money vanishing. Undated claims stay visible.
+  assert.ok(!/c\.dos_from <= \(\$\d+::date - \$\d+::int\)\s+and/.test(q.sql.replace(/\(c\.dos_from is null or /, '')), 'no bare comparison');
+});
+
+test('AR_QUEUE_BANDS drops 0_30 while AR_BANDS stays the total taxonomy', () => {
+  // AR_BANDS must remain exhaustive so the SQL CASE can never yield a null band for a stray row;
+  // the tile set is a separate, narrower list.
+  assert.equal(AR_BANDS.length, 9);
+  assert.equal(AR_QUEUE_BANDS.length, 8);
+  assert.ok(AR_BANDS.some((b) => b.key === '0_30'), 'the taxonomy still classifies a 0-30d row');
+  assert.ok(!AR_QUEUE_BANDS.some((b) => b.key === '0_30'), 'the queue does not offer it as a tile');
+});
+
+test('buildArLatestNotesQuery resolves claim-level AND patient-level notes, one lateral per pair', () => {
+  // Migration 0110 made CMD notes patient-level (cmd_claim_id NULL on most), so "this claim's
+  // latest note" cannot be answered from the claim id alone — hence pairs.
+  const { sql, params } = buildArLatestNotesQuery(
+    [{ cmdClaimId: '900000001', cmdPatientId: '80000001' }, { cmdClaimId: '900000002', cmdPatientId: '80000002' }],
+    ENT,
+  );
+  assert.match(sql, /from unnest\(\$2::text\[\], \$3::text\[\]\) as k\(cmd_claim_id, cmd_patient_id\)/);
+  assert.match(sql, /cmd_claim_id = k\.cmd_claim_id or \(cmd_claim_id is null and cmd_patient_id = k\.cmd_patient_id\)/);
+  assert.match(sql, /order by noted_at desc, id desc limit 1/, 'latest note only');
+  assert.match(sql, /business_entity_id = any\(\$1::uuid\[\]\)/, 'tenant-scoped');
+  assert.deepEqual(params[1], ['900000001', '900000002']);
+  assert.deepEqual(params[2], ['80000001', '80000002']);
+  // A claim id can only reach its OWN patient's notes: the pair comes from a tenant-scoped read.
+  assert.throws(() => buildArLatestNotesQuery([{ cmdClaimId: '900000001', cmdPatientId: 'x' }], ENT), /patient id/);
+  assert.throws(() => buildArLatestNotesQuery([{ cmdClaimId: 'nope', cmdPatientId: '80000001' }], ENT), /claim/);
+});
+
+test('Qodo #353-3: a SINGLE-CLAIM read bypasses the age floor so the bell can open a fresh claim', () => {
+  // buildArClaimQuery goes through buildArQueueQuery, so it inherited the aged-only predicate and
+  // the drawer refused any claim younger than 31 days. The notifications bell has no age bound and
+  // legitimately surfaces such a claim (someone noted or assigned it), so it advertised a claim and
+  // then failed to open it. A one-claim read is not the queue.
+  const one = buildArClaimQuery('900000001', ENT, AS_OF).sql;
+  assert.ok(!/dos_from <= \(\$\d+::date - \$\d+::int\)/.test(one), 'no age floor on a by-id read');
+  // The queue keeps it.
+  const list = buildArQueueQuery(null, resolveArFilter({}), resolveArSort({}), 51, ENT, AS_OF).sql;
+  assert.match(list, /\(c\.dos_from is null or c\.dos_from <= \(\$\d+::date - \$\d+::int\)\)/);
+  // And the opt-out is NOT reachable from client input — it is a builder argument, not a filter field.
+  const f = resolveArFilter({ includeAgeFloor: false, ignoreAgeFloor: true } as unknown);
+  assert.ok(!('includeAgeFloor' in f) && !('ignoreAgeFloor' in f), 'the sanitiser drops unknown keys');
+  assert.match(buildArQueueQuery(null, f, resolveArSort({}), 51, ENT, AS_OF).sql, /dos_from <= \(\$\d+::date - \$\d+::int\)/);
+});
+
+test('Qodo #353-2: the facility and payer pickers aggregate the SAME population as the queue', () => {
+  // A picker count is read as "this much money is here". Without the floor, a facility whose only
+  // claims are 0-30 days old was offered with a real-looking count and balance, and selecting it
+  // filtered an aged-only queue to nothing.
+  for (const q of [buildArFacilityOptionsQuery(ENT, AS_OF), buildArPayerOptionsQuery(ENT, AS_OF)]) {
+    assert.match(q.sql, /\(c\.dos_from is null or c\.dos_from <= \(\$2::date - \$3::int\)\)/, 'aged-only floor present');
+    assert.deepEqual(q.params, [ENT, AS_OF, AR_MIN_AGE_DAYS]);
+    assertParamsAligned(q.sql, q.params);
+  }
+  // asOf is REQUIRED, not optional: a picker with no business day cannot bound an age honestly.
+  assert.throws(() => buildArFacilityOptionsQuery(ENT, 'not-a-date'));
+  assert.throws(() => buildArPayerOptionsQuery(ENT, ''));
 });

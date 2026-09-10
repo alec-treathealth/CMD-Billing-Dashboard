@@ -548,11 +548,13 @@ test('facility resolution: the old collections path FORWARDS and the desk owns t
   assert.match(stub, /\/billing-audit\/facility-resolution\?view=/);
   assert.doesNotMatch(stub, /FacilityResolutionView|loadResolutionOverview|queryResolutionQueue/);
 
-  // The entry link lives on the desk now, still role-gated by DOM omission, and is GONE from
-  // Collections (a stray second link is exactly the drift this test exists to catch).
-  assert.match(desk, /href=\{`\/billing-audit\/facility-resolution\?view=\$\{view\}`\}/);
-  assert.match(desk, /role === 'admin' \|\| access\.access\.role === 'super_admin'/);
+  // ⚠ THE ENTRY LINK IS NOW ON NEITHER PAGE — removed from the AR Management header 2026-09-10
+  // (Alec). What this test protects is unchanged in spirit: there must be NO stray link anywhere,
+  // and the ROUTE must keep its own gate so removing the link took away no capability. The route
+  // assertions above still pin that. If a link is ever restored it belongs on exactly one page.
+  assert.doesNotMatch(desk, /href=\{`\/billing-audit\/facility-resolution/);
   assert.doesNotMatch(collections, /href=\{`\/dashboard\/collections\/facility-resolution/);
+  assert.doesNotMatch(collections, /href=\{`\/billing-audit\/facility-resolution/);
 });
 
 test('page source: force-dynamic is exported and searchParams parse only the non-PHI allowlist', () => {

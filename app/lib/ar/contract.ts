@@ -103,7 +103,26 @@ export interface ArNotificationsPayload {
   items: ArNotificationRow[];
 }
 
-export type ArQueueResult = { ok: true; rows: ArQueueRow[]; nextCursor: ArCursor | null } | { ok: false; error: string };
+/**
+ * The latest follow-up note on a claim, decrypted for display in the queue.
+ *
+ * ⚠ THIS CARRIES PHI (staff free text about a patient) and is therefore delivered on a SEPARATE,
+ * UNCACHED channel from the queue rows — see loadArLatestNotes. Keyed by cmd_claim_id rather than
+ * folded into ArQueueRow specifically so the cached, PHI-free page payload and this cannot be
+ * confused for one another by a future edit.
+ */
+export type ArLatestNote = {
+  text: string;
+  noted_at: string;
+  author: string | null;
+  source: 'cmd' | 'user';
+  /** false = a patient-level CMD note (migration 0110), true = written against this claim. */
+  claim_level: boolean;
+};
+
+export type ArQueueResult =
+  | { ok: true; rows: ArQueueRow[]; nextCursor: ArCursor | null; latestNotes: Record<string, ArLatestNote> }
+  | { ok: false; error: string };
 export type ArSummaryResult = { ok: true; summary: ArSummary } | { ok: false; error: string };
 export type ArOptionsResult = { ok: true; options: ArOptions } | { ok: false; error: string };
 export type ArClaimDetailResult = { ok: true; detail: ArClaimDetail } | { ok: false; error: string };
