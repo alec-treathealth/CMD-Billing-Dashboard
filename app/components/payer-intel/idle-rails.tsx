@@ -30,15 +30,6 @@
 import type { QualifyPolicyTapeItem } from '../../lib/qualify/board';
 import { TAPE_PALETTE } from '../qualify/tokens';
 import { useMarquee } from '../qualify/useMarquee';
-import { fmtMoneyCompact } from './format';
-
-/** The warm dark ground the losing-ground rail sits on. A component-local literal (the FLAT_HEX
- *  precedent): TreatHealthOS has no warm-dark surface token, and minting a Tailwind token for one
- *  rail would imply reuse this surface has not earned. White + coral400 both clear 4.5:1 on it. */
-const DOWN_RAIL_HEX = '#3B1D17';
-const DOWN_LINE = 'rgba(240,145,124,0.16)';
-const DOWN_DELTA_HEX = '#FF9B85';
-
 function gainerHandle(item: QualifyPolicyTapeItem): string {
   return item.echo ?? item.prefix ?? `⋯${item.tokenTail.slice(-4)}`;
 }

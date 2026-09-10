@@ -40,13 +40,26 @@ import type {
 
 
 
-test('rails source: BOTH rails run the marquee machine (the 2026-08-17 "make them move" ruling)', () => {
+test('rails source: the gainers rail runs the marquee machine (the 2026-08-17 "make them move" ruling)', () => {
+  // Was "BOTH rails" until 2026-09-10, when the decliners rail was removed for latency. The
+  // assertions below passed either way — they are file-level greps — so the NAME was the only thing
+  // that had gone stale, and a test whose name misdescribes its subject is how a later reader
+  // concludes a second rail still exists. Renamed rather than deleted: the marquee contract is a
+  // real property of the surviving rail, and the 2026-08-17 ruling still governs it.
   const here = dirname(fileURLToPath(import.meta.url));
   const src = readFileSync(join(here, '..', 'components', 'payer-intel', 'idle-rails.tsx'), 'utf8');
   assert.match(src, /useMarquee/);
   assert.match(src, /q-marquee/);
   assert.match(src, /data-dup/); // the duplicate-set contract (reduced-motion CSS hides it)
   assert.match(src, /isOverflowing &&/);
+  // And there is exactly ONE rail component now — so the grep above cannot be satisfied by a
+  // leftover second implementation while the first has quietly lost the contract.
+  const exported = [...src.matchAll(/export function (PayerIntel\w*Rail)\b/g)].map((m) => m[1]);
+  assert.deepEqual(exported, ['PayerIntelGainersRail'], 'one rail, and it is the gainers rail');
+  // The decliners rail's dollar formatter and warm-ground palette went with it.
+  for (const dead of ['fmtMoneyCompact', 'DOWN_RAIL_HEX', 'DOWN_DELTA_HEX']) {
+    assert.ok(!src.includes(dead), `${dead} is decliner-only and must not survive the removal`);
+  }
 });
 
 test('gainers rail: static render shows ONE set (effects never run, so no duplicate leaks in)', () => {
