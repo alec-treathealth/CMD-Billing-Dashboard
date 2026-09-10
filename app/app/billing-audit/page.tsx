@@ -85,10 +85,14 @@ export default async function BillingAuditPage({
   const initialFilter: AuditFilter = { dateFrom: ytd.dateFrom, dateTo: ytd.dateTo };
   // The AR queue is the default tab, so its summary, options and first page are seeded here too —
   // the strip and grid paint with data, and the client's first filter change is the first refetch.
-  const [ipReport, ipOpts, opOpts, arOptions, arSummary, arPage] = await Promise.all([
-    loadAuditRows('IP', null, initialFilter, undefined, view),
-    loadAuditFilterOptions('IP', view),
-    loadAuditFilterOptions('OP', view),
+  // ⚠ THE IP/OP AUDIT SEEDS ARE GONE FROM THE RENDER PATH (2026-09-10). Their tabs are hidden
+  // (workbench.tsx SHOW_SCOPE_TABS), so seeding them meant three audit-plane queries on every
+  // render of a page that cannot show them — and because every AR note or work write calls
+  // revalidateTag and re-renders this tree, that cost was paid again on each one. The panels fetch
+  // on first view if the tabs are re-enabled; restore these three calls only if you want them
+  // pre-painted again. The ip*/op* PROPS below stay and receive empty seeds, so the panels keep
+  // typechecking and behave correctly the moment the tabs return.
+  const [arOptions, arSummary, arPage] = await Promise.all([
     loadArOptionsAction(view),
     loadArSummaryAction(view, {}),
     loadArQueue(view, null, {}, undefined),
@@ -109,24 +113,15 @@ export default async function BillingAuditPage({
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">AR Management</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Every open claim across the book by age, with CMD follow-up notes, denial reasoning and work
-          dispositions — plus the IP/OP claim audit and Billable Days. Patient identifiers are masked by
-          default and revealed only through an explicit, audited action.
+          Every open claim aged 31 days or more, with CMD follow-up notes, denial reasoning and work
+          dispositions. Patient identifiers are masked by default and revealed only through an
+          explicit, audited action.
         </p>
-        {/* Facility Resolution entry point — MOVED here from the Collections header (Alec,
-            2026-08-17): attributing a 'No Facility' charge is desk work. admin/super_admin ONLY,
-            the same gate the destination page and every one of its server actions enforce, and
-            rendered by DOM omission rather than CSS, so a plain 'user' never receives the link. */}
-        {access.access.role === 'admin' || access.access.role === 'super_admin' ? (
-          <Link
-            href={`/billing-audit/facility-resolution?view=${view}`}
-            className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-sm text-ink900 hover:border-teal700/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          >
-            Facility Resolution
-            <span aria-hidden>→</span>
-            <span className="sr-only">— attribute charges CMD posted with no facility</span>
-          </Link>
-        ) : null}
+        {/* The Facility Resolution entry point was REMOVED from this header 2026-09-10 (Alec).
+            The ROUTE and its own gate are untouched — /billing-audit/facility-resolution still
+            renders for admin/super_admin by direct URL, and every one of its Server Actions still
+            re-gates independently. Only this link is gone, so removing it takes away no capability
+            and no one's access; it stops advertising desk work from the AR queue's header. */}
       </header>
       <BillingAuditWorkbench
         view={view}
@@ -135,14 +130,14 @@ export default async function BillingAuditPage({
         arSeed={{
           summary: arSummary.ok ? arSummary.summary : null,
           options: arOptions.ok ? arOptions.options : null,
-          page: arPage.ok ? { rows: arPage.rows, nextCursor: arPage.nextCursor } : null,
+          page: arPage.ok ? { rows: arPage.rows, nextCursor: arPage.nextCursor, latestNotes: arPage.latestNotes } : null,
         }}
         initialFilter={initialFilter}
-        ipPage={ipReport.ok ? { rows: ipReport.rows, nextCursor: ipReport.nextCursor } : null}
-        ipFacilities={ipOpts.ok ? ipOpts.options.facilities.map(facilityTags) : []}
-        ipPayers={ipOpts.ok ? ipOpts.options.payers.map(payerTags) : []}
-        opFacilities={opOpts.ok ? opOpts.options.facilities.map(facilityTags) : []}
-        opPayers={opOpts.ok ? opOpts.options.payers.map(payerTags) : []}
+        ipPage={null}
+        ipFacilities={[]}
+        ipPayers={[]}
+        opFacilities={[]}
+        opPayers={[]}
       />
     </main>
   );

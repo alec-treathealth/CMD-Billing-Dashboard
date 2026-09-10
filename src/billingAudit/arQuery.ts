@@ -16,7 +16,7 @@
  * tiles drift live; a band filter compiles to dos_from DATE BOUNDS so the (entity, dos_from) index
  * can serve it.
  */
-import { AR_BANDS, arBandCaseSql, arBandDayRanges, isArBandKey, type ArBandKey } from './arBuckets.js';
+import { AR_BANDS, arBandCaseSql, arBandDayRanges, isArBandKey, type ArBandKey, AR_MIN_AGE_DAYS } from './arBuckets.js';
 
 export const AR_PAGE_SIZE = 50;
 
@@ -188,8 +188,30 @@ function needsPatientJoin(f: ArFilter): boolean {
  * The shared WHERE for the queue and its summaries. `asOfParam` is the already-bound `$n` of the
  * business-day date. `includeBands=false` lets the tile summary describe the un-banded population.
  */
-export function arBaseConds(filter: ArFilter, entityIds: string[], asOfParam: string, add: ParamAdder, includeBands = true): string[] {
+export function arBaseConds(
+  filter: ArFilter,
+  entityIds: string[],
+  asOfParam: string,
+  add: ParamAdder,
+  includeBands = true,
+  includeAgeFloor = true,
+): string[] {
   const conds: string[] = [`c.business_entity_id = any(${add(entityIds)}::uuid[])`, 'c.in_latest_snapshot'];
+  // AGED AR ONLY — the 0–30 day set is excluded from every read on this plane (queue, tiles and
+  // KPI alike, since they share this predicate list). Ruled 2026-09-10; see AR_MIN_AGE_DAYS.
+  //
+  // ⚠ A NULL dos_from is KEPT, not dropped. `dos_from <= asOf - 31` is NULL for an undated claim,
+  // so a bare comparison would silently remove money we cannot prove is new — the opposite of what
+  // an AR queue is for. An undated claim stays visible and is the reason arBandCaseSql takes a date
+  // expression as well as an age.
+  //
+  // `includeAgeFloor=false` is for a SINGLE-CLAIM read, never for a list. The notifications bell can
+  // legitimately surface a claim younger than 31 days (someone noted or assigned it), and the drawer
+  // resolves that claim through this same predicate list — so inheriting the floor made the bell
+  // advertise a claim and then refuse to open it. A one-claim read is not the queue.
+  if (includeAgeFloor) {
+    conds.push(`(c.dos_from is null or c.dos_from <= (${asOfParam}::date - ${add(AR_MIN_AGE_DAYS)}::int))`);
+  }
   if (!filter.includePaid) conds.push('c.balance > 0');
   if (filter.facilityCodes) conds.push(`c.facility_code = any(${add(filter.facilityCodes)}::text[])`);
   if (filter.payerNames) conds.push(`c.current_payer_name = any(${add(filter.payerNames)}::text[])`);
@@ -282,11 +304,13 @@ export function buildArQueueQuery(
   limit: number,
   entityIds: readonly string[],
   asOf: string,
+  /** Internal only — NOT derived from client input. See arBaseConds' includeAgeFloor. */
+  opts: { includeAgeFloor?: boolean } = {},
 ): { sql: string; params: unknown[] } {
   const params: unknown[] = [];
   const add: ParamAdder = (v) => { params.push(v); return `$${params.length}`; };
   const asOfParam = add(asOfOrThrow(asOf));
-  const conds = arBaseConds(filter, entityIdsOrThrow(entityIds), asOfParam, add);
+  const conds = arBaseConds(filter, entityIdsOrThrow(entityIds), asOfParam, add, true, opts.includeAgeFloor !== false);
 
   const { expr, flip, numeric } = sortExpr(sort.column);
   const dir = (flip ? (sort.direction === 'asc' ? 'desc' : 'asc') : sort.direction).toUpperCase();
@@ -368,23 +392,35 @@ export interface ArFacilityOption { facility_code: string; facility_name: string
 export interface ArPayerOption { payer_name: string; n: number; balance: string; }
 export interface ArAssigneeOption { user_id: string; email: string; role: string; }
 
-export function buildArFacilityOptionsQuery(entityIds: readonly string[]): { sql: string; params: unknown[] } {
+/**
+ * THE PICKER AGGREGATES MUST DESCRIBE THE SAME POPULATION AS THE QUEUE.
+ *
+ * Both option builders carry the aged-only floor for the same reason arBaseConds does: without it a
+ * facility or payer whose only claims are 0–30 days old was offered as a selectable option with a
+ * real-looking count and balance, and choosing it filtered an aged-only queue to nothing. The count
+ * beside the option is read as "this much money is here", so a mismatch is a wrong number and not
+ * just a dead filter. `asOf` is therefore required, not optional — a picker without a business day
+ * cannot honestly aggregate an age-bounded population.
+ */
+export function buildArFacilityOptionsQuery(entityIds: readonly string[], asOf: string): { sql: string; params: unknown[] } {
   return {
     sql:
       `select c.facility_code, max(c.facility_name) as facility_name, count(*)::int as n, coalesce(sum(c.balance), 0)::text as balance ` +
       `from claims.ar_claim c where c.business_entity_id = any($1::uuid[]) and c.in_latest_snapshot and c.balance > 0 ` +
+      `and (c.dos_from is null or c.dos_from <= ($2::date - $3::int)) ` +
       `group by c.facility_code order by c.facility_code`,
-    params: [entityIdsOrThrow(entityIds)],
+    params: [entityIdsOrThrow(entityIds), asOfOrThrow(asOf), AR_MIN_AGE_DAYS],
   };
 }
 
-export function buildArPayerOptionsQuery(entityIds: readonly string[]): { sql: string; params: unknown[] } {
+export function buildArPayerOptionsQuery(entityIds: readonly string[], asOf: string): { sql: string; params: unknown[] } {
   return {
     sql:
       `select c.current_payer_name as payer_name, count(*)::int as n, coalesce(sum(c.balance), 0)::text as balance ` +
       `from claims.ar_claim c where c.business_entity_id = any($1::uuid[]) and c.in_latest_snapshot and c.balance > 0 ` +
+      `and (c.dos_from is null or c.dos_from <= ($2::date - $3::int)) ` +
       `and c.current_payer_name is not null group by c.current_payer_name order by balance desc, payer_name limit 400`,
-    params: [entityIdsOrThrow(entityIds)],
+    params: [entityIdsOrThrow(entityIds), asOfOrThrow(asOf), AR_MIN_AGE_DAYS],
   };
 }
 
@@ -446,7 +482,10 @@ function claimIdOrThrow(cmdClaimId: string): string {
 /** The queue row for ONE claim (same projection, no paging) — the drawer header. */
 export function buildArClaimQuery(cmdClaimId: string, entityIds: readonly string[], asOf: string): { sql: string; params: unknown[] } {
   const filter: ArFilter = { claimId: claimIdOrThrow(cmdClaimId), includePaid: true };
-  const { sql, params } = buildArQueueQuery(null, filter, AR_DEFAULT_SORT, 1, entityIds, asOf);
+  // includeAgeFloor: false — the drawer must open ANY claim by id, including one younger than the
+  // queue's 31-day floor that the notifications bell surfaced. Opting out here rather than in
+  // ArFilter keeps it unreachable from client input.
+  const { sql, params } = buildArQueueQuery(null, filter, AR_DEFAULT_SORT, 1, entityIds, asOf, { includeAgeFloor: false });
   // The single-claim read must also see claims that dropped out of the latest snapshot.
   return { sql: sql.replace(' and c.in_latest_snapshot', ''), params };
 }
@@ -509,6 +548,46 @@ export function buildArNotesQuery(cmdClaimId: string, cmdPatientId: string, enti
       `from claims.ar_claim_note where business_entity_id = any($1::uuid[]) ` +
       `and (cmd_claim_id = $2 or (cmd_claim_id is null and cmd_patient_id = $3)) order by noted_at desc, id desc limit $4`,
     params: [entityIdsOrThrow(entityIds), claimIdOrThrow(cmdClaimId), cmdPatientId, Math.max(1, Math.min(500, Math.floor(limit)))],
+  };
+}
+
+/** The latest follow-up note for each claim on a page, keyed back by claim id. Ciphertext. */
+export interface ArLatestNoteEncRow { cmd_claim_id: string; note_enc: Buffer; noted_at: string; source: string; author_label: string | null; claim_level: boolean }
+
+/**
+ * ONE query for the latest follow-up note of every claim on a page — claim-level or patient-level.
+ *
+ * Why it takes PAIRS: migration 0110 made CMD-sourced notes patient-level (`cmd_claim_id` is NULL on
+ * most of them — 1,535 of CAMH's 1,567), so "this claim's latest note" cannot be answered from the
+ * claim id alone. The caller passes (claim, patient) pairs it has already read inside the tenant
+ * scope, and the lateral resolves each independently; a claim id can therefore only ever reach the
+ * notes of its own patient, the same property loadArNotes relies on.
+ *
+ * One indexed lateral per row rather than N round trips. Returns CIPHERTEXT — decryption is the
+ * caller's job, and deliberately not cacheable (see loadArLatestNotes).
+ */
+export function buildArLatestNotesQuery(
+  pairs: readonly { cmdClaimId: string; cmdPatientId: string }[],
+  entityIds: readonly string[],
+): { sql: string; params: unknown[] } {
+  const claims: string[] = [];
+  const patients: string[] = [];
+  for (const p of pairs) {
+    claims.push(claimIdOrThrow(p.cmdClaimId));
+    if (!CMD_ID_RE.test(p.cmdPatientId)) throw new Error('arQuery: patient id must be a CMD numeric id');
+    patients.push(p.cmdPatientId);
+  }
+  return {
+    sql:
+      `select k.cmd_claim_id, n.note_enc, ${tsOut('n.noted_at')} as noted_at, n.source, n.author_label, ` +
+      `(n.cmd_claim_id is not null) as claim_level ` +
+      `from unnest($2::text[], $3::text[]) as k(cmd_claim_id, cmd_patient_id) ` +
+      `cross join lateral (` +
+      `select note_enc, noted_at, source, author_label, cmd_claim_id from claims.ar_claim_note ` +
+      `where business_entity_id = any($1::uuid[]) ` +
+      `and (cmd_claim_id = k.cmd_claim_id or (cmd_claim_id is null and cmd_patient_id = k.cmd_patient_id)) ` +
+      `order by noted_at desc, id desc limit 1) n`,
+    params: [entityIdsOrThrow(entityIds), claims, patients],
   };
 }
 

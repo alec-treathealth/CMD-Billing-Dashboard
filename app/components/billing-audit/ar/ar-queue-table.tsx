@@ -15,7 +15,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pager, SortHeaderCell } from '@/components/data-grid';
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { loadArQueue, revealArPatientsAction } from '@/lib/ar/actions';
-import type { ArCursor, ArFilter, ArQueueRow, ArSort, ArSortColumn } from '@/lib/ar/contract';
+import type { ArCursor, ArFilter, ArQueueRow, ArSort, ArSortColumn, ArLatestNote } from '@/lib/ar/contract';
 import type { DashboardView } from '@/lib/views';
 import { ArStatusChip, BAND_COLOR, BandPill, DenialPills, PatientMask, WorkChip, dateRange, money, relativeTime, shortDate } from './ar-leaves';
 
@@ -25,7 +25,7 @@ export interface ArQueueTableProps {
   filter: ArFilter;
   sort: ArSort;
   onSort: (column: ArSortColumn) => void;
-  initialPage: { rows: ArQueueRow[]; nextCursor: ArCursor | null } | null;
+  initialPage: { rows: ArQueueRow[]; nextCursor: ArCursor | null; latestNotes?: Record<string, ArLatestNote> } | null;
   onOpenClaim: (row: ArQueueRow) => void;
   revealAll: boolean;
   onToggleRevealAll: () => void;
@@ -47,6 +47,7 @@ const COLS: readonly Col[] = [
   { key: 'balance', label: 'Balance', numeric: true, sort: 'balance' },
   { key: 'age', label: 'Age', sort: 'age' },
   { key: 'denial', label: 'Denial' },
+  { key: 'remit', label: '835 · error' },
   { key: 'notes', label: 'Notes', sort: 'last_note_at' },
   { key: 'work', label: 'Work', sort: 'work_status' },
   { key: 'assignee', label: 'Assignee' },
@@ -63,6 +64,10 @@ export function ArQueueTable({ view, canRevealPhi, filter, sort, onSort, initial
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<Map<string, { name: string; member: string | null }>>(new Map());
+  // The latest follow-up note per claim arrives on its own UNCACHED channel alongside the rows
+  // (see loadArLatestNotes) — never merged into ArQueueRow, so the cached page payload stays
+  // PHI-free. Keyed by cmd_claim_id.
+  const [latestNotes, setLatestNotes] = useState<Record<string, ArLatestNote>>(initialPage?.latestNotes ?? {});
   const seeded = useRef(initialPage != null);
   // Request generation: Server Actions cannot be aborted, so a late response for a superseded filter /
   // sort / page must not overwrite the current selection — only the newest request commits.
@@ -79,6 +84,7 @@ export function ArQueueTable({ view, canRevealPhi, filter, sort, onSort, initial
     if (gen !== generation.current) return; // superseded — a newer request owns the state now
     if (!res.ok) { setError(res.error); setLoading(false); return; }
     setRows(res.rows);
+    setLatestNotes(res.latestNotes);
     setHasNext(res.nextCursor != null);
     setPage(target);
     if (res.nextCursor != null && target === cursorList.length - 1) setCursors([...cursorList, res.nextCursor]);
@@ -172,6 +178,7 @@ export function ArQueueTable({ view, canRevealPhi, filter, sort, onSort, initial
               const followup = r.due_on ?? r.cmd_followup_date;
               const overdue = followup !== null && nowMs !== null && Date.parse(`${followup}T23:59:59Z`) < nowMs;
               const lastNote = [r.last_cmd_note_at, r.last_user_note_at].filter((x): x is string => x !== null).sort().pop() ?? null;
+              const note = latestNotes[r.cmd_claim_id];
               const paidSinceWorked = Number(r.balance) <= 0 && r.work_status !== 'open' && r.work_status !== 'resolved' && r.work_status !== 'dismissed';
               return (
                 <TableRow
@@ -197,6 +204,12 @@ export function ArQueueTable({ view, canRevealPhi, filter, sort, onSort, initial
                   <TableCell className={`${CELL} max-w-[18rem]`}>
                     <ArStatusChip statusRaw={r.status_raw} statusCategory={r.status_category} statusPayer={r.status_payer} cmdStatusText={r.cmd_status_text} />
                     {paidSinceWorked ? <span className="ml-1 rounded bg-status-ok/10 px-1.5 py-0.5 text-xs font-semibold text-status-ok">paid since worked</span> : null}
+                    {/* The chip is the DERIVED category; this is CMD's own wording, which is what a
+                        rep recognises from the CMD screen. Shown only when it adds something the
+                        chip has not already said. */}
+                    {r.status_raw && r.status_raw !== r.status_category ? (
+                      <span className="mt-0.5 block truncate text-xs text-ink400" title={r.status_raw}>{r.status_raw}</span>
+                    ) : null}
                   </TableCell>
                   <TableCell className={`${CELL} ths-num text-ink600`}>{dateRange(r.dos_from, r.dos_to)}</TableCell>
                   <TableCell className={`${CELL} ths-num text-xs text-ink600`}>
@@ -208,12 +221,41 @@ export function ArQueueTable({ view, canRevealPhi, filter, sort, onSort, initial
                   <TableCell className={`${CELL} ths-num text-right font-semibold text-ink900`}>{money(r.balance)}</TableCell>
                   <TableCell className={CELL}><BandPill band={r.band} ageDays={r.age_days} /></TableCell>
                   <TableCell className={CELL}><DenialPills items={r.denial_summary} /></TableCell>
-                  <TableCell className={`${CELL} text-xs`}>
-                    {r.cmd_note_count > 0 || lastNote ? (
-                      <span className="inline-flex items-baseline gap-1">
-                        <span className="ths-num font-semibold text-ink900">{r.cmd_note_count}</span>
-                        <span className="text-ink400">{relativeTime(lastNote, nowMs) ?? shortDate(lastNote)}</span>
+                  <TableCell className={`${CELL} max-w-[12rem] text-xs`}>
+                    {/* What the payer's remittance said, and separately whether the claim is stuck
+                        on a SUBMISSION error — a different work queue from a payer decision. */}
+                    {r.last_835_status ? <span className="block truncate text-ink600" title={r.last_835_status}>{r.last_835_status}</span> : null}
+                    {r.last_error_code ? (
+                      <span className="mt-0.5 inline-flex rounded bg-status-danger/10 px-1.5 py-0.5 font-semibold text-status-danger" title={`Clearinghouse / payer error ${r.last_error_code}`}>
+                        err {r.last_error_code}
                       </span>
+                    ) : null}
+                    {!r.last_835_status && !r.last_error_code ? <span className="text-ink400">—</span> : null}
+                  </TableCell>
+                  <TableCell className={`${CELL} text-xs`}>
+                    {/* Gated on `note` as well as the counters. cmd_note_count DOES include
+                        patient-level notes (arSnapshotMap.ts sums claim + patient), so today the two
+                        agree exactly — measured 25,043 vs 25,043 open claims, 0 divergent. But the
+                        counters come from the LAST SNAPSHOT while ar_claim_note accumulates across
+                        runs, so once CMD prunes a note from its export the counter drops while the
+                        note persists, and a proxy gate would hide the very thing being rendered. */}
+                    {r.cmd_note_count > 0 || lastNote || note ? (
+                      <>
+                        <span className="inline-flex items-baseline gap-1">
+                          <span className="ths-num font-semibold text-ink900">{r.cmd_note_count}</span>
+                          <span className="text-ink400">{relativeTime(lastNote, nowMs) ?? shortDate(lastNote)}</span>
+                        </span>
+                        {/* The note BODY — PHI, delivered on the uncached channel. Ruled visible to
+                            every role that can reach the queue (Alec, 2026-09-10); the read is
+                            audited server-side. `note` is absent, not empty, when there is none. */}
+                        {note ? (
+                          <span className="mt-0.5 block truncate text-ink600" title={note.text}>
+                            {note.source === 'user' ? <span className="mr-1 font-semibold text-ink900">app</span> : null}
+                            {note.claim_level ? null : <span className="mr-1 text-ink400" title="a patient-level CMD note, not written against this claim">pt</span>}
+                            {note.text}
+                          </span>
+                        ) : null}
+                      </>
                     ) : <span className="text-ink400">none</span>}
                   </TableCell>
                   <TableCell className={CELL}><WorkChip status={r.work_status} /></TableCell>
