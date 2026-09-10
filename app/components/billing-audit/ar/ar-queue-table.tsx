@@ -233,7 +233,7 @@ export function ArQueueTable({ view, canRevealPhi, filter, sort, onSort, initial
                     {!r.last_835_status && !r.last_error_code ? <span className="text-ink400">—</span> : null}
                   </TableCell>
                   <TableCell className={`${CELL} text-xs`}>
-                    {r.cmd_note_count > 0 || lastNote ? (
+                    {r.cmd_note_count > 0 || lastNote || note ? (
                       <>
                         <span className="inline-flex items-baseline gap-1">
                           <span className="ths-num font-semibold text-ink900">{r.cmd_note_count}</span>
