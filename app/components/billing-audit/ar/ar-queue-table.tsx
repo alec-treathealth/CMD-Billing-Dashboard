@@ -240,7 +240,12 @@ export function ArQueueTable({ view, canRevealPhi, filter, sort, onSort, initial
                     ) : null}
                     {!r.last_835_status && !r.last_error_code ? <span className="text-ink400">—</span> : null}
                   </TableCell>
-                  <TableCell className={CELL}><WorkChip status={r.work_status} /></TableCell>
+                  {/* The EFFECTIVE state, outlined when it is CMD's inference rather than a
+                      person's ruling. `work_status === 'open'` is exactly "no human has ruled",
+                      because ar_set_work is the only writer of that column. */}
+                  <TableCell className={CELL}>
+                    <WorkChip status={r.effective_work_state} derived={r.work_status === 'open'} />
+                  </TableCell>
                   <TableCell className={`${CELL} text-xs text-ink600`}>{r.assignee_email ? r.assignee_email.split('@')[0] : <span className="text-ink400">—</span>}</TableCell>
                   <TableCell className={`${CELL} ths-num text-xs ${overdue ? 'font-semibold text-status-danger' : 'text-ink600'}`}>{followup ? shortDate(followup) : <span className="text-ink400">—</span>}</TableCell>
                   {/* max-w is what makes the inner `truncate` DO anything. truncate is

@@ -92,7 +92,16 @@ export interface ArQueueRow {
   cmd_note_count: number;
   last_cmd_note_at: string | null;
   last_user_note_at: string | null;
+  /** The HUMAN disposition, 'open' when nobody has ruled. The drawer's editor binds to this. */
   work_status: ArWorkStatus;
+  /** CMD's snapshot-derived state; NULL until the next snapshot run. Never 'appeal' — no source. */
+  cmd_work_state: string | null;
+  /**
+   * What the row DISPLAYS and what the chips filter on: the human value when there is one, else
+   * the derived one, with the overdue-follow-up promotion applied (arWorkStateSql). Also the keyset
+   * cursor value for a work_status sort — see arSortValue.
+   */
+  effective_work_state: ArWorkStatus;
   assignee_user_id: string | null;
   assignee_email: string | null;
   due_on: string | null;
@@ -216,12 +225,12 @@ export function arBaseConds(
   if (filter.facilityCodes) conds.push(`c.facility_code = any(${add(filter.facilityCodes)}::text[])`);
   if (filter.payerNames) conds.push(`c.current_payer_name = any(${add(filter.payerNames)}::text[])`);
   if (filter.statusCategories) conds.push(`c.status_category = any(${add(filter.statusCategories)}::text[])`);
-  if (filter.workStatuses) conds.push(`coalesce(w.work_status, 'open') = any(${add(filter.workStatuses)}::text[])`);
+  if (filter.workStatuses) conds.push(`${arWorkStateSql(asOfParam)} = any(${add(filter.workStatuses)}::text[])`);
   if (filter.assigneeUserIds) conds.push(`w.assignee_user_id = any(${add(filter.assigneeUserIds)}::uuid[])`);
   if (filter.hasDenial) conds.push('c.has_denial');
   // The queue shows the WORK due date when one is set, else CMD's follow-up date — the overdue
   // predicate must read the same effective date or a red date would vanish under its own filter.
-  if (filter.followupOverdue) conds.push(`coalesce(w.due_on, c.cmd_followup_date) < ${asOfParam}::date`);
+  if (filter.followupOverdue) conds.push(`${AR_EFFECTIVE_FOLLOWUP} < ${asOfParam}::date`);
   if (filter.minBalance !== undefined) conds.push(`c.balance >= ${add(filter.minBalance)}::numeric`);
   if (filter.claimId) conds.push(`c.cmd_claim_id = ${add(filter.claimId)}`);
   // PATIENT SEARCH IS ONE **OR** GROUP, NOT THREE AND-ED CLAUSES.
@@ -259,8 +268,42 @@ const BASE_JOINS =
   `where n.business_entity_id = c.business_entity_id and n.cmd_claim_id = c.cmd_claim_id and n.source = 'user') un on true`;
 const PATIENT_JOIN = ` left join claims.ar_patient p on p.business_entity_id = c.business_entity_id and p.cmd_patient_id = c.cmd_patient_id`;
 
+/**
+ * THE EFFECTIVE FOLLOW-UP DATE — a human's due date when one is set, else CMD's. Every read of
+ * "when is this claim next due" goes through this, so the Follow-up column, the overdue filter and
+ * the work-state promotion below cannot disagree about which date they mean. A bare
+ * `c.cmd_followup_date` comparison is a bug and arQuery.test.ts asserts it never appears.
+ */
+const AR_EFFECTIVE_FOLLOWUP = `coalesce(w.due_on, c.cmd_followup_date)`;
+
+/**
+ * THE EFFECTIVE WORK STATE — one expression, used by the filter, the sort and the projection so
+ * they cannot disagree. A HUMAN DISPOSITION ALWAYS WINS: `ar_claim_work.work_status` is checked
+ * first and, when present, nothing below it can override it.
+ *
+ * Only when no human has ruled does CMD's snapshot-derived `cmd_work_state` stand in (migration
+ * 0113). Without this, the five non-`open` chips could not return a row — `ar_claim_work` is
+ * human-owned and held 0 rows against 59,070 claims on 2026-09-10, so every claim read 'open'.
+ *
+ * THE OVERDUE-FOLLOW-UP RULE LIVES HERE, NOT IN THE STORED COLUMN, because it is the one input
+ * that goes stale while the data stands still: a claim becomes overdue by the calendar turning
+ * over, and the column is only rewritten nightly. It promotes to `in_progress` only from 'open' or
+ * 'waiting_payer' — an explicit resolved / dismissed / in-progress state is never overridden by a
+ * date. Measured 2026-09-10: 968 of 3,820 in-progress claims come from this rule alone.
+ *
+ * `coalesce(..., 'open')` on the derived column is load-bearing: it is NULL on every row until the
+ * next snapshot run fills it, and a NULL would otherwise make the whole CASE null.
+ */
+function arWorkStateSql(asOfParam: string): string {
+  const derived = `coalesce(c.cmd_work_state, 'open')`;
+  return (
+    `coalesce(w.work_status, case when ${derived} in ('open', 'waiting_payer') ` +
+    `and ${AR_EFFECTIVE_FOLLOWUP} < ${asOfParam}::date then 'in_progress' else ${derived} end)`
+  );
+}
+
 /** The ORDER BY expression for a sort column (and whether `age` flips the direction). */
-function sortExpr(column: ArSortColumn): { expr: string; flip: boolean; numeric: boolean } {
+function sortExpr(column: ArSortColumn, asOfParam: string): { expr: string; flip: boolean; numeric: boolean } {
   switch (column) {
     case 'balance': return { expr: 'c.balance', flip: false, numeric: true };
     case 'total_charges': return { expr: 'c.total_charges', flip: false, numeric: true };
@@ -270,7 +313,10 @@ function sortExpr(column: ArSortColumn): { expr: string; flip: boolean; numeric:
     case 'current_payer_name': return { expr: 'c.current_payer_name', flip: false, numeric: false };
     case 'status_category': return { expr: 'c.status_category', flip: false, numeric: false };
     case 'last_note_at': return { expr: 'greatest(c.last_cmd_note_at, un.last_user_note_at)', flip: false, numeric: false };
-    case 'work_status': return { expr: `coalesce(w.work_status, 'open')`, flip: false, numeric: false };
+    // Sorts by the EFFECTIVE state, so the column sorts by what the row actually shows. ⚠ Keep this
+    // in lockstep with arSortValue's 'work_status' branch — they are the two halves of one keyset
+    // cursor, and a mismatch skips or repeats rows across pages instead of erroring.
+    case 'work_status': return { expr: arWorkStateSql(asOfParam), flip: false, numeric: false };
     case 'cmd_followup_date': return { expr: 'c.cmd_followup_date', flip: false, numeric: false };
   }
 }
@@ -291,7 +337,9 @@ export function arSortValue(row: ArQueueRow, column: ArSortColumn): string | num
       const m = a > b ? a : b;
       return m === '' ? null : m;
     }
-    case 'work_status': return row.work_status;
+    // ⚠ THE EFFECTIVE STATE, not row.work_status — arWorkStateSql is what ORDER BY used, so the
+    // cursor must carry the same value or the next page starts in the wrong place.
+    case 'work_status': return row.effective_work_state;
     case 'cmd_followup_date': return row.cmd_followup_date;
   }
 }
@@ -312,7 +360,7 @@ export function buildArQueueQuery(
   const asOfParam = add(asOfOrThrow(asOf));
   const conds = arBaseConds(filter, entityIdsOrThrow(entityIds), asOfParam, add, true, opts.includeAgeFloor !== false);
 
-  const { expr, flip, numeric } = sortExpr(sort.column);
+  const { expr, flip, numeric } = sortExpr(sort.column, asOfParam);
   const dir = (flip ? (sort.direction === 'asc' ? 'desc' : 'asc') : sort.direction).toUpperCase();
   if (cursor !== null) {
     const cmp = dir === 'DESC' ? '<' : '>';
@@ -339,7 +387,12 @@ export function buildArQueueQuery(
     `c.primary_payer_name, c.current_payer_name, c.status_raw, c.status_category, c.status_payer, c.cmd_status_text, ` +
     `c.has_denial, c.denial_summary, c.last_error_code, c.last_835_status, ${dateOut('c.cmd_followup_date')} as cmd_followup_date, ` +
     `c.cmd_note_count, ${tsOut('c.last_cmd_note_at')} as last_cmd_note_at, ${tsOut('un.last_user_note_at')} as last_user_note_at, ` +
-    `coalesce(w.work_status, 'open') as work_status, w.assignee_user_id::text as assignee_user_id, w.assignee_email, ` +
+    // `work_status` stays the HUMAN value: the drawer's editor is seeded from it and saving writes
+    // it back, so serving CMD's derivation here would launder a guess into somebody's ruling on the
+    // first Save. `effective_work_state` is what the row displays and what the chips filter on.
+    `coalesce(w.work_status, 'open') as work_status, c.cmd_work_state, ` +
+    `${arWorkStateSql(asOfParam)} as effective_work_state, ` +
+    `w.assignee_user_id::text as assignee_user_id, w.assignee_email, ` +
     `${dateOut('w.due_on')} as due_on, w.resolution_code, ${tsOut('c.last_seen_at')} as last_seen_at, c.in_latest_snapshot ` +
     BASE_JOINS + (needsPatientJoin(filter) ? PATIENT_JOIN : '') +
     ` where ${conds.join(' and ')} ` +
@@ -378,6 +431,10 @@ export function buildArKpiQuery(filter: ArFilter, entityIds: readonly string[], 
   const sql =
     `select count(*)::int as claims, coalesce(sum(c.balance), 0)::text as balance, ` +
     `count(*) filter (where c.has_denial)::int as denied, coalesce(sum(c.balance) filter (where c.has_denial), 0)::text as denied_balance, ` +
+    // ⚠ `worked` READS THE HUMAN COLUMN ONLY — do not swap in arWorkStateSql here. This KPI means
+    // "a person has touched this claim", which is what makes it a measure of team activity; fed
+    // the derived state it would report ~23k of 25.9k claims as worked on day one and measure
+    // nothing. The same reasoning applies to ar-queue-table's paidSinceWorked.
     `count(*) filter (where coalesce(w.work_status, 'open') <> 'open')::int as worked, ` +
     `count(*) filter (where coalesce(w.due_on, c.cmd_followup_date) < ${asOfParam}::date)::int as followup_overdue, ` +
     `count(*) filter (where c.cmd_note_count = 0 and un.last_user_note_at is null)::int as never_noted, ` +

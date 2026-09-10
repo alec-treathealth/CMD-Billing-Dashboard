@@ -138,11 +138,61 @@ test('queue query: limit is clamped and the entity scope must not be empty', () 
 });
 
 test('arSortValue matches the sort expression shapes', () => {
-  const row = { balance: '10.50', total_charges: '99.00', dos_from: '2026-01-02', facility_code: 'CAMH', current_payer_name: 'X', status_category: 'AT_PAYER', last_cmd_note_at: '2026-02-01T00:00:00Z', last_user_note_at: '2026-03-01T00:00:00Z', work_status: 'open', cmd_followup_date: null } as unknown as ArQueueRow;
+  const row = { balance: '10.50', total_charges: '99.00', dos_from: '2026-01-02', facility_code: 'CAMH', current_payer_name: 'X', status_category: 'AT_PAYER', last_cmd_note_at: '2026-02-01T00:00:00Z', last_user_note_at: '2026-03-01T00:00:00Z', work_status: 'open', effective_work_state: 'waiting_payer', cmd_followup_date: null } as unknown as ArQueueRow;
   assert.equal(arSortValue(row, 'balance'), 10.5);
   assert.equal(arSortValue(row, 'age'), '2026-01-02');
   assert.equal(arSortValue(row, 'last_note_at'), '2026-03-01T00:00:00Z');
   assert.equal(arSortValue(row, 'cmd_followup_date'), null);
+  // ⚠ The EFFECTIVE state, not work_status — ORDER BY uses arWorkStateSql, so a cursor carrying
+  // the human column would restart the next page at the wrong key and skip or repeat rows.
+  assert.equal(arSortValue(row, 'work_status'), 'waiting_payer');
+  assert.notEqual(arSortValue(row, 'work_status'), row.work_status);
+});
+
+test('work-status chips: a human ruling wins, CMD stands in when there is none, overdue promotes', () => {
+  // The five non-`open` chips returned zero rows before 0113 because ar_claim_work is human-owned
+  // and empty. The filter now reads the effective state; these are its invariants.
+  const q = buildArQueueQuery(null, resolveArFilter({ workStatuses: ['in_progress'] }), { column: 'balance', direction: 'desc' }, 51, ENT, AS_OF);
+  assertParamsAligned(q.sql, q.params);
+
+  // A HUMAN VALUE OUTRANKS EVERYTHING: w.work_status is the first coalesce arm, so no derived
+  // value and no date can override a recorded decision.
+  assert.match(q.sql, /coalesce\(w\.work_status, case when coalesce\(c\.cmd_work_state, 'open'\)/);
+
+  // The derived column is NULL until the next snapshot run, so it must be coalesced — an
+  // un-coalesced NULL nulls the whole CASE and drops the row out of every chip.
+  assert.equal(/case when c\.cmd_work_state in/.test(q.sql), false, 'never compared raw');
+
+  // Overdue promotes ONLY from open / waiting_payer: an explicit resolved, dismissed or
+  // in_progress state is never overridden by a date…
+  assert.match(q.sql, /in \('open', 'waiting_payer'\) and coalesce\(w\.due_on, c\.cmd_followup_date\) < \$1::date then 'in_progress'/);
+  // …and it reads the HUMAN due date first, the same effective date the Follow-up column shows.
+  assert.equal(/ c\.cmd_followup_date < \$1::date/.test(q.sql), false, 'no bare CMD-date comparison');
+
+  // Filter, projection and sort share ONE expression, so they cannot disagree about a row.
+  const expr = /coalesce\(w\.work_status, case when coalesce\(c\.cmd_work_state, 'open'\) in \('open', 'waiting_payer'\) and coalesce\(w\.due_on, c\.cmd_followup_date\) < \$1::date then 'in_progress' else coalesce\(c\.cmd_work_state, 'open'\) end\)/g;
+  assert.equal((q.sql.match(expr) ?? []).length, 2, 'filter + projection');
+  const sorted = buildArQueueQuery(null, {}, { column: 'work_status', direction: 'asc' }, 51, ENT, AS_OF).sql;
+  assert.equal((sorted.match(expr) ?? []).length, 2, 'projection + order by');
+  assert.match(sorted, /order by coalesce\(w\.work_status, case when/);
+
+  // The projection serves BOTH: the human column (what the drawer's editor binds to) and the
+  // effective state (what the row displays). Serving only the effective one would let a Save
+  // launder CMD's inference into somebody's recorded ruling.
+  assert.match(q.sql, /coalesce\(w\.work_status, 'open'\) as work_status, c\.cmd_work_state, /);
+  assert.match(q.sql, /end\) as effective_work_state/);
+
+  // Values stay bound, never inlined.
+  assert.equal(q.sql.includes("'in_progress'])"), false);
+  assert.ok(q.params.some((p) => Array.isArray(p) && p.includes('in_progress')));
+});
+
+test('the `worked` KPI counts HUMANS only — the derived state must not reach it', () => {
+  // "worked" means a person has touched this claim, which is what makes it a measure of team
+  // activity. Fed the derived state it would report ~23k of 25.9k claims worked on day one.
+  const k = buildArKpiQuery(resolveArFilter({}), ENT, AS_OF).sql;
+  assert.match(k, /count\(\*\) filter \(where coalesce\(w\.work_status, 'open'\) <> 'open'\)::int as worked/);
+  assert.equal(/cmd_work_state[^;]*as worked/.test(k), false, 'no derived column between the CASE and `as worked`');
 });
 
 test('summary excludes the band filter; KPI includes it; both stay tenant-pinned', () => {

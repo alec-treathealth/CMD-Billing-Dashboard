@@ -91,6 +91,31 @@ test('chips: status / band / work / denial carry their labels and titles', () =>
   assert.equal(clp02Label('99'), null);
 });
 
+test('WorkChip: a CMD-derived state is visibly weaker than a person\'s ruling, and says so in words', () => {
+  // The queue shows an effective state that is usually CMD's inference (migration 0113), and it
+  // must never carry the same authority as a colleague's decision — otherwise the Work column
+  // reads as if the team had already triaged ~23,000 claims.
+  const human = renderToStaticMarkup(<WorkChip status="in_progress" />);
+  const derived = renderToStaticMarkup(<WorkChip status="in_progress" derived />);
+  assert.notEqual(human, derived, 'the two must not render identically');
+
+  // Same label and hue in both, so the state stays readable either way.
+  assert.ok(human.includes('In progress') && derived.includes('In progress'));
+  assert.ok(human.includes('#3A6B8A') && derived.includes('#3A6B8A'), 'the info hue survives');
+
+  // Human = filled; derived = outlined and lighter weight.
+  assert.ok(human.includes('background-color:#E7EEF4'), 'human chip is filled');
+  assert.ok(derived.includes('background-color:transparent'), 'derived chip is not filled');
+  assert.ok(derived.includes('inset 0 0 0 1px'), 'derived chip is outlined instead');
+  assert.ok(human.includes('font-semibold') && derived.includes('font-medium'));
+
+  // ⚠ COLOUR AND WEIGHT ARE NEVER THE SOLE CARRIER — the distinction is in the title text too, so
+  // it survives greyscale, low vision and a screen reader.
+  assert.ok(derived.includes('nobody has triaged this claim yet'));
+  assert.ok(human.includes('set by a person'));
+  assert.equal(derived.includes('set by a person'), false);
+});
+
 test('12px floor: no AR component sets meaning-bearing text below 12px', () => {
   const dir = path.resolve(import.meta.dirname, '..', 'components', 'billing-audit', 'ar');
   const files = readdirSync(dir).filter((f) => f.endsWith('.tsx')).map((f) => path.join(dir, f));

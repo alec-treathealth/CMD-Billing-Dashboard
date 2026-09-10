@@ -37,8 +37,10 @@ test('writeArSnapshot: upserts every table with the right conflict key, inside t
   assert.match(byTable('ar_claim')[0]!.sql, /on conflict \(business_entity_id, cmd_claim_id\) do update set/);
   assert.match(byTable('ar_claim')[0]!.sql, /in_latest_snapshot = excluded\.in_latest_snapshot/);
   assert.match(byTable('ar_claim')[0]!.sql, /last_run_id = excluded\.last_run_id/);
-  // 51 columns × 6 rows of parameters, denial_summary cast to jsonb, code arrays cast to text[].
-  assert.equal(byTable('ar_claim')[0]!.params!.length, 51 * 6);
+  // 52 columns × 6 rows of parameters (cmd_work_state added by 0113), denial_summary cast to jsonb,
+  // code arrays cast to text[]. This count is the tripwire on CLAIM_COLS and claimParams keeping the
+  // same length AND the same order — a skew would write values into the wrong columns, silently.
+  assert.equal(byTable('ar_claim')[0]!.params!.length, 52 * 6);
   assert.match(byTable('ar_claim')[0]!.sql, /::jsonb/);
   assert.match(byTable('ar_claim')[0]!.sql, /::text\[\]/);
 

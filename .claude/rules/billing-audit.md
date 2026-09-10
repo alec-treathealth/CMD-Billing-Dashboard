@@ -33,6 +33,46 @@ went to the secondary) → else `BALANCE DUE OTHER`. Measured 2026-09-09: 128 of
 `CLAIM AT …` strings on `claims.audit_row` reproduce byte-for-byte. `status_category` uses the
 SHARED `normalizeStatus` taxonomy — do not fork it.
 
+### Work state: TWO columns, and conflating them is the trap (0113, 2026-09-10)
+
+**`ar_claim_work.work_status` is HUMAN-ONLY and `ar_claim.cmd_work_state` is SNAPSHOT-DERIVED.**
+The ingest role holds **no privilege of any kind** on `ar_claim_work` — that is deliberate (0109
+§8: "owned by humans, never by the ingest"), so the cron cannot write a disposition even by
+mistake. Reads take the ONE expression `arWorkStateSql` (`arQuery.ts`), which coalesces
+`work_status` FIRST: **a recorded human ruling can never be overridden by CMD or by a date.**
+
+This exists because the queue's five non-`open` chips returned zero rows for every user and could
+not have returned anything else: `ar_claim_work` held **0 rows against 59,070 claims**, so
+`coalesce(w.work_status,'open')` made every claim 'open'. Expanding the snapshot pull was NOT the
+fix and would not have helped — the signal was already being ingested and never read.
+
+Three things to keep straight when touching this:
+
+- **`'appeal'` is unreachable by derivation, and that is a measured finding, not a gap.** The CMD
+  snapshot models no appeal anywhere: 1 of 71,926 status messages contains the word, no table or
+  column in the 30-table extract models one, and `APPEAL` is absent from the hand-applied status
+  vocabulary across all 20 customers. `cmd_work_state`'s CHECK omits it on purpose while
+  `work_status`'s keeps it. Widening that CHECK needs a source, not just a wish.
+- **The overdue-follow-up rule lives at READ time, never in the column.** It is the one input that
+  changes while the data stands still (the calendar turns over; the column is rewritten nightly),
+  and it moved 968 of 3,820 in-progress claims when measured. It promotes only from
+  `open`/`waiting_payer`, and reads `coalesce(w.due_on, c.cmd_followup_date)` — the same effective
+  date the Follow-up column shows. A bare `c.cmd_followup_date` comparison is a bug; a test asserts
+  it never appears.
+- **`worked` in the KPI row, and `paidSinceWorked` in the table, MUST stay on `work_status`.** Both
+  mean "a person touched this". Fed the effective state they would report ~23k of 25.9k claims as
+  worked on day one and measure nothing. The queue projection therefore serves BOTH columns, and
+  the drawer's editor binds to the human one — otherwise opening a claim and pressing Save would
+  launder CMD's inference into somebody's recorded decision.
+
+⚠ **`B_CLAIMSTATUS.ERR_FIXED` IS A TRI-STATE `X`/`T`/`F`, NOT Y/N** (X = not applicable, T = fixed,
+F = still open; measured X 55,523 / T 8,728 / F 7,675). Two consequences, both learned the hard
+way: `last_error_*` must exclude `'T'` or the queue advertises errors CMD has already resolved
+(**471 of 2,245 open claims, 21%**, did exactly that until 2026-09-10); and `ACTION_CODE='C'`
+("Correct and resubmit.") is **not** a state and must not be read as one — **404 aged open claims
+carry a latest error that is `T`+`C`**, meaning CMD asked for a correction and it was made, while
+`X`+`C` is **0 claims**, so the clause only ever adds errors.
+
 **Notes are two kinds.** `B_PATNOTES.TYPE=0` rows carry `CLAIM=0` and are PATIENT-level follow-up
 notes (CAMH: 1,535 of 1,567); `TYPE=2` rows carry a real claim id. 0110 made `cmd_claim_id`
 nullable for exactly this; a patient-level note renders on every claim of that patient. All note
@@ -59,11 +99,15 @@ sentences before optimising anything here; two of them were learned the expensiv
 
 `parseTsv` materialises one JS object per row with a property per column — roughly **13x the source
 text**. CAMH is the worst case: a 6.4 MB ZIP holding **77.5 MB uncompressed across 32 tables**, of
-which `arSnapshotMap.ts` reads only **11**.
+which `arSnapshotMap.ts` reads only **13** — B_CHARGESTATUS, B_PAYOR, B_CLAIM, ICLAIM, B_ACTIVITY,
+B_CHARGE, B_REMITTANCE, B_CLAIMSTATUS, B_PATNOTES, INS_POLICIES, B_PATIENT, B_PRACTICE, B_FACILITY.
+(This said "11" until 2026-09-10, counted before ICLAIM and INS_POLICIES were wired; `rowsOf` calls
+are the honest count.) CMD's own `meta/oracle-create.sql` inside the ZIP is the authoritative
+inventory of all **30** tables and every column — read it before assuming a field does not exist.
 
 `parseSnapshotZip` is lazy in two layers — `readZipEntriesLazy` defers the INFLATE, and the table
-view defers the ROW MATERIALISATION — so the 21 unread tables (B_CREDIT 12.4 MB, CLAIM_ICD_CODE and
-ICLAIM 4.9 MB each, plus ~18 smaller) cost nothing. Measured against the live CAMH snapshot:
+view defers the ROW MATERIALISATION — so the 17 unread tables (B_CREDIT 12.4 MB, CLAIM_ICD_CODE
+4.9 MB, INSCHECK, plus ~14 smaller) cost nothing. Measured against the live CAMH snapshot:
 
 | stage | eager | lazy |
 |---|---|---|

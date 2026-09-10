@@ -147,6 +147,8 @@ export interface ArClaimPlain {
   cmdNoteCount: number;
   lastCmdNoteAt: string | null;
   insLastPaymentDate: string | null;
+  /** Snapshot-derived, NEVER a human disposition — see deriveCmdWorkState and migration 0113. */
+  cmdWorkState: ArCmdWorkState;
 }
 
 export interface ArRemitPlain {
@@ -232,6 +234,79 @@ export function deriveChargeStatus(input: DeriveStatusInput): {
   }
   const n = normalizeStatus(raw);
   return { statusRaw: raw, statusCategory: n.category, statusPayer: n.statusPayer };
+}
+
+/**
+ * The SNAPSHOT-DERIVED work state — what CMD's own data says is happening to this claim.
+ *
+ * ⚠ THIS IS NOT A HUMAN DISPOSITION. `claims.ar_claim_work.work_status` is; it is written only by
+ * the `ar_set_work` definer, and a human value always wins at read time. This exists because that
+ * table is empty until somebody triages, which made the queue's five non-`open` chips return zero
+ * rows for every user (0 work rows / 59,070 claims, 2026-09-10) — see migration 0113.
+ *
+ * `'appeal'` is NOT a possible return value, and that is a finding rather than an omission: the
+ * CMD snapshot models no appeal anywhere (1 of 71,926 status messages mentions the word; no table,
+ * column or hand-applied status does). Appeal stays reachable only by a human.
+ *
+ * THE OVERDUE-FOLLOW-UP RULE IS DELIBERATELY ABSENT HERE and is applied at READ time instead
+ * (`arWorkStateSql` in arQuery.ts). It moved 968 of 3,820 in-progress claims when measured, so it
+ * is material — and it is the one input that changes while the data stands still, so freezing it
+ * into a nightly column would make it wrong by up to a day. Everything below is a fact about the
+ * snapshot, and is exactly as fresh as the snapshot.
+ *
+ * Order is priority order; first match wins. Pure; never throws.
+ */
+export type ArCmdWorkState = 'open' | 'in_progress' | 'waiting_payer' | 'resolved' | 'dismissed';
+
+/** Hand-applied statuses meaning the claim was given up on, not that work is pending. */
+const CMD_DISMISSED_STATUSES = new Set(['WRITE OFF', 'VOID REQUESTED']);
+/** …that a human is actively on it. `NEGOTIAT` covers NEGOTIATE WITH … and RENEGOTIATING both. */
+const CMD_IN_PROGRESS_STATUS = /ESCALATION|ON HOLD|NEGOTIAT/;
+/**
+ * …that the ball is with the payer: a records request, or a higher-payment review.
+ *
+ * ⚠ `MR REQUEST` is not redundant with `RECORD REQUEST` — CMD carries BOTH spellings, and the
+ * abbreviated one is the more common (`OPTUM PNI MR REQUEST`, 32 claims, vs `MEDICAL RECORD
+ * REQUEST`, 7). A first draft matched only the long form and silently left those 32 reading
+ * 'open'; the test's own vocabulary list caught it.
+ */
+const CMD_WAITING_STATUS = /RECORD REQUEST|MR REQUEST|PENDING FOR HIGHER|APPROVED FOR HIGHER/;
+
+export interface DeriveCmdWorkStateInput {
+  /** Claim balance in CENTS — shares the mapper's integer money rather than re-parsing a string. */
+  balanceCents: number;
+  cmdStatusText: string | null;
+  /** CMD claim frequency; '8' is a void. */
+  claimFrequency: string | null;
+  statusCategory: StatusCategory;
+  /**
+   * This claim's most recent ERROR status event is still open — `ERR_FIXED = 'F'`, and NOTHING
+   * ELSE.
+   *
+   * ⚠ ERR_FIXED IS A TRI-STATE `X`/`T`/`F`, not the Y/N its 0109 schema comment implied: X = not
+   * applicable, T = fixed, F = still open. `X` is not read as unfixed — 131 aged open claims carry
+   * it as their latest error and nothing proves those are open.
+   *
+   * ⚠ AND `ACTION_CODE = 'C'` ("Correct and resubmit.") IS DELIBERATELY NOT A SIGNAL HERE, though
+   * it reads like one. It is the instruction attached to the error, not the error's state, and it
+   * survives the fix: measured 2026-09-10, 404 aged open claims carry a latest error that is
+   * `T`+`C` — CMD asked for a correction and the correction was made. Treating 'C' as open would
+   * call all 404 "In progress" against CMD's own record. Meanwhile `X`+`C` is **0 claims**, so the
+   * clause adds nothing on the other side either. It was in the first draft of this rule and the
+   * fixture caught it.
+   */
+  latestErrorOpen: boolean;
+}
+
+export function deriveCmdWorkState(input: DeriveCmdWorkStateInput): ArCmdWorkState {
+  const status = (input.cmdStatusText ?? '').trim().toUpperCase();
+  if (input.balanceCents <= 0) return 'resolved';
+  if (CMD_DISMISSED_STATUSES.has(status) || input.claimFrequency === '8') return 'dismissed';
+  if (input.latestErrorOpen) return 'in_progress';
+  if (status !== '' && CMD_IN_PROGRESS_STATUS.test(status)) return 'in_progress';
+  if (status !== '' && CMD_WAITING_STATUS.test(status)) return 'waiting_payer';
+  if (input.statusCategory === 'AT_PAYER') return 'waiting_payer';
+  return 'open';
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -524,6 +599,11 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
   const statusEvents: ArStatusEventPlain[] = [];
   const latestByClaim = new Map<string, ArStatusEventPlain>();
   const lastErrorByClaim = new Map<string, ArStatusEventPlain>();
+  // The latest ERROR row per claim, WARNINGs excluded and every ERR_FIXED value kept — the input to
+  // deriveCmdWorkState. It is deliberately NOT lastErrorByClaim: that map answers "what should the
+  // queue display" and so drops resolved errors, while this one answers "is the newest error still
+  // open", which needs the resolved rows present in order to conclude that it is not.
+  const latestErrorOnlyByClaim = new Map<string, ArStatusEventPlain>();
   for (const r of rowsOf(tables, 'B_CLAIMSTATUS')) {
     const id = cmdText(r.SEQNO);
     const claimId = cmdText(r.CLAIM);
@@ -544,6 +624,10 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
     const key = ev.statusDate ?? '';
     const latest = latestByClaim.get(claimId);
     if (!latest || key >= (latest.statusDate ?? '')) latestByClaim.set(claimId, ev);
+    if (type === 'ERROR') {
+      const pe = latestErrorOnlyByClaim.get(claimId);
+      if (!pe || key >= (pe.statusDate ?? '')) latestErrorOnlyByClaim.set(claimId, ev);
+    }
     if (type === 'ERROR' || type === 'WARNING') {
       statusEvents.push(ev);
       // ⚠ AN ERROR CMD HAS ALREADY FIXED IS NOT THIS CLAIM'S "LAST ERROR".
@@ -665,6 +749,11 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
     const act = lastActivity.get(claimId);
     const l835 = last835.get(claimId);
     const err = lastErrorByClaim.get(claimId);
+    // "Is the newest clearinghouse error still open" — the one status input to the work state.
+    // ERR_FIXED='F' only; see DeriveCmdWorkStateInput.latestErrorOpen for why ACTION_CODE='C' is
+    // NOT part of this despite looking like it should be.
+    const errLatest = latestErrorOnlyByClaim.get(claimId);
+    const latestErrorOpen = errLatest?.errFixed === 'F';
     const claimRemits = remitsByClaim.get(claimId) ?? [];
     const denial = summarizeDenials(claimRemits);
     const nsClaim = noteStatsByClaim.get(claimId);
@@ -718,6 +807,13 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
       cmdNoteCount: noteCount,
       lastCmdNoteAt: lastNote,
       insLastPaymentDate: insLastPaid,
+      cmdWorkState: deriveCmdWorkState({
+        balanceCents: bal,
+        cmdStatusText,
+        claimFrequency: cmdText(claim.FREQUENCY),
+        statusCategory,
+        latestErrorOpen,
+      }),
     });
   }
 

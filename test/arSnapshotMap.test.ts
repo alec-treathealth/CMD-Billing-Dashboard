@@ -5,7 +5,7 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { deriveChargeStatus, mapSnapshot, summarizeDenials } from '../src/billingAudit/arSnapshotMap.js';
+import { deriveChargeStatus, deriveCmdWorkState, mapSnapshot, summarizeDenials } from '../src/billingAudit/arSnapshotMap.js';
 import { snapshotTablesFrom, type SnapshotTable } from '../src/billingAudit/snapshotParse.js';
 import { buildFixture, FX } from './fixtures/arSnapshotFixture.js';
 
@@ -33,6 +33,88 @@ test('deriveChargeStatus: the precedence table', () => {
   assert.equal(at({ balanceDueTo: 'O' }).statusRaw, 'BALANCE DUE OTHER');
   assert.equal(at({ balanceDueTo: 'O' }).statusCategory, 'OTHER');
   assert.equal(at({ balanceDueTo: null }).statusRaw, 'BALANCE DUE OTHER');
+});
+
+test('deriveCmdWorkState: the precedence table, and what CMD cannot tell us', () => {
+  const at = (o: Partial<Parameters<typeof deriveCmdWorkState>[0]>) =>
+    deriveCmdWorkState({ balanceCents: 100_00, cmdStatusText: null, claimFrequency: '1', statusCategory: 'OTHER', latestErrorOpen: false, ...o });
+
+  // 1. Zero balance outranks everything — including an open error on a claim that has since paid.
+  assert.equal(at({ balanceCents: 0 }), 'resolved');
+  assert.equal(at({ balanceCents: 0, latestErrorOpen: true }), 'resolved');
+  assert.equal(at({ balanceCents: -50 }), 'resolved', 'a credit balance is not open AR');
+
+  // 2. Given up on.
+  assert.equal(at({ cmdStatusText: 'WRITE OFF' }), 'dismissed');
+  assert.equal(at({ cmdStatusText: 'VOID REQUESTED' }), 'dismissed');
+  assert.equal(at({ claimFrequency: '8' }), 'dismissed', 'CMD frequency 8 is a void');
+  assert.equal(at({ cmdStatusText: 'write off' }), 'dismissed', 'status text is compared upper-cased');
+  assert.equal(at({ cmdStatusText: 'WRITE OFF', latestErrorOpen: true }), 'dismissed', 'dismissal outranks an open error');
+
+  // 3. An open clearinghouse error is work.
+  assert.equal(at({ latestErrorOpen: true }), 'in_progress');
+  assert.equal(at({ latestErrorOpen: true, statusCategory: 'AT_PAYER' }), 'in_progress', 'outranks at-payer');
+
+  // 4. Hand-applied statuses that mean a person is on it. `NEGOTIAT` catches both spellings.
+  for (const s of ['MANAGER ESCALATION - JESS', 'SUPERVISOR ESCALATION - TULA', 'ON HOLD - CODING RESEARCH',
+    'NEEDS RENEGOTIATING', 'NEGOTIATE WITH FIRST HEALTH DIRECT', 'NEGOTIATE WITH CIGNA DIRECT']) {
+    assert.equal(at({ cmdStatusText: s }), 'in_progress', s);
+  }
+
+  // 5. …and the ones that mean the ball is with the payer.
+  for (const s of ['MEDICAL RECORD REQUEST', 'OPTUM PNI MR REQUEST', 'PENDING FOR HIGHER PAYMENT',
+    'APPROVED FOR HIGHER PAYMENT']) {
+    assert.equal(at({ cmdStatusText: s }), 'waiting_payer', s);
+  }
+
+  // 6. Otherwise the derived CMD category carries it.
+  assert.equal(at({ statusCategory: 'AT_PAYER' }), 'waiting_payer');
+  assert.equal(at({ statusCategory: 'BALANCE_DUE_PATIENT' }), 'open', 'patient balance is not "at payer"');
+  assert.equal(at({ statusCategory: 'OTHER' }), 'open');
+  // A status CMD carries that maps to no work meaning falls through rather than guessing.
+  for (const s of ['TERMED INSURANCE', 'PAID TO MEMBER', 'MEDICARE PRIMARY', 'PTM']) {
+    assert.equal(at({ cmdStatusText: s }), 'open', s);
+  }
+
+  // 'appeal' IS UNREACHABLE, and that is the finding: the CMD snapshot models no appeal anywhere.
+  // Only a human can put a claim in that state.
+  const everyReachable = new Set([
+    at({ balanceCents: 0 }), at({ cmdStatusText: 'WRITE OFF' }), at({ latestErrorOpen: true }),
+    at({ statusCategory: 'AT_PAYER' }), at({}),
+  ]);
+  assert.equal(everyReachable.has('appeal' as never), false);
+  assert.deepEqual([...everyReachable].sort(), ['dismissed', 'in_progress', 'open', 'resolved', 'waiting_payer']);
+});
+
+test('deriveCmdWorkState: ERR_FIXED is a tri-state and ACTION_CODE is not a state at all', () => {
+  // The mapper hands this rule a single boolean, so the tri-state reading is pinned where it is
+  // computed — on the fixture. claimB's latest error is T + ACTION_CODE 'C': CMD asked for a
+  // correction and it was MADE. 404 aged open claims look like that live, and calling them
+  // in-progress would contradict CMD's own record.
+  assert.equal(claim(FX.claimB).cmdWorkState, 'waiting_payer', 'a FIXED error is not open work');
+  // claimF's error is 'F', but it is fully paid, so zero balance wins.
+  assert.equal(claim(FX.claimF).cmdWorkState, 'resolved');
+});
+
+test('mapSnapshot: every kept claim carries a derived work state, and it matches its own facts', () => {
+  assert.equal(mapped.claims.every((c) => c.cmdWorkState !== undefined), true);
+  for (const c of mapped.claims) {
+    if (Number(c.balance) <= 0) assert.equal(c.cmdWorkState, 'resolved', `${c.cmdClaimId} is paid`);
+    if (c.cmdStatusText === 'NEEDS RENEGOTIATING') assert.equal(c.cmdWorkState, 'in_progress', c.cmdClaimId);
+  }
+  // Claim by claim, so the reason for each is legible: A and B sit at a payer, C is hand-marked
+  // NEEDS RENEGOTIATING, D is a patient balance and E a "balance due other" (neither is at a
+  // payer), F is paid.
+  assert.equal(claim(FX.claimA).cmdWorkState, 'waiting_payer');
+  assert.equal(claim(FX.claimB).cmdWorkState, 'waiting_payer');
+  assert.equal(claim(FX.claimC).cmdWorkState, 'in_progress');
+  assert.equal(claim(FX.claimD).cmdWorkState, 'open');
+  assert.equal(claim(FX.claimE).cmdWorkState, 'open');
+  assert.equal(claim(FX.claimF).cmdWorkState, 'resolved');
+  // …and the spread, so a rule change has to be acknowledged here rather than pass quietly.
+  const byState: Record<string, number> = {};
+  for (const c of mapped.claims) byState[c.cmdWorkState] = (byState[c.cmdWorkState] ?? 0) + 1;
+  assert.deepEqual(byState, { waiting_payer: 2, in_progress: 1, open: 2, resolved: 1 });
 });
 
 test('claims kept / dropped: deleted claim and unnamed-patient claim are dropped and counted', () => {
