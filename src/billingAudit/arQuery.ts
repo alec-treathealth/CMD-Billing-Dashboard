@@ -16,7 +16,7 @@
  * tiles drift live; a band filter compiles to dos_from DATE BOUNDS so the (entity, dos_from) index
  * can serve it.
  */
-import { AR_BANDS, arBandCaseSql, arBandDayRanges, isArBandKey, type ArBandKey } from './arBuckets.js';
+import { AR_BANDS, arBandCaseSql, arBandDayRanges, isArBandKey, type ArBandKey, AR_MIN_AGE_DAYS } from './arBuckets.js';
 
 export const AR_PAGE_SIZE = 50;
 
@@ -190,6 +190,14 @@ function needsPatientJoin(f: ArFilter): boolean {
  */
 export function arBaseConds(filter: ArFilter, entityIds: string[], asOfParam: string, add: ParamAdder, includeBands = true): string[] {
   const conds: string[] = [`c.business_entity_id = any(${add(entityIds)}::uuid[])`, 'c.in_latest_snapshot'];
+  // AGED AR ONLY — the 0–30 day set is excluded from every read on this plane (queue, tiles and
+  // KPI alike, since they share this predicate list). Ruled 2026-09-10; see AR_MIN_AGE_DAYS.
+  //
+  // ⚠ A NULL dos_from is KEPT, not dropped. `dos_from <= asOf - 31` is NULL for an undated claim,
+  // so a bare comparison would silently remove money we cannot prove is new — the opposite of what
+  // an AR queue is for. An undated claim stays visible and is the reason arBandCaseSql takes a date
+  // expression as well as an age.
+  conds.push(`(c.dos_from is null or c.dos_from <= (${asOfParam}::date - ${add(AR_MIN_AGE_DAYS)}::int))`);
   if (!filter.includePaid) conds.push('c.balance > 0');
   if (filter.facilityCodes) conds.push(`c.facility_code = any(${add(filter.facilityCodes)}::text[])`);
   if (filter.payerNames) conds.push(`c.current_payer_name = any(${add(filter.payerNames)}::text[])`);
@@ -509,6 +517,46 @@ export function buildArNotesQuery(cmdClaimId: string, cmdPatientId: string, enti
       `from claims.ar_claim_note where business_entity_id = any($1::uuid[]) ` +
       `and (cmd_claim_id = $2 or (cmd_claim_id is null and cmd_patient_id = $3)) order by noted_at desc, id desc limit $4`,
     params: [entityIdsOrThrow(entityIds), claimIdOrThrow(cmdClaimId), cmdPatientId, Math.max(1, Math.min(500, Math.floor(limit)))],
+  };
+}
+
+/** The latest follow-up note for each claim on a page, keyed back by claim id. Ciphertext. */
+export interface ArLatestNoteEncRow { cmd_claim_id: string; note_enc: Buffer; noted_at: string; source: string; author_label: string | null; claim_level: boolean }
+
+/**
+ * ONE query for the latest follow-up note of every claim on a page — claim-level or patient-level.
+ *
+ * Why it takes PAIRS: migration 0110 made CMD-sourced notes patient-level (`cmd_claim_id` is NULL on
+ * most of them — 1,535 of CAMH's 1,567), so "this claim's latest note" cannot be answered from the
+ * claim id alone. The caller passes (claim, patient) pairs it has already read inside the tenant
+ * scope, and the lateral resolves each independently; a claim id can therefore only ever reach the
+ * notes of its own patient, the same property loadArNotes relies on.
+ *
+ * One indexed lateral per row rather than N round trips. Returns CIPHERTEXT — decryption is the
+ * caller's job, and deliberately not cacheable (see loadArLatestNotes).
+ */
+export function buildArLatestNotesQuery(
+  pairs: readonly { cmdClaimId: string; cmdPatientId: string }[],
+  entityIds: readonly string[],
+): { sql: string; params: unknown[] } {
+  const claims: string[] = [];
+  const patients: string[] = [];
+  for (const p of pairs) {
+    claims.push(claimIdOrThrow(p.cmdClaimId));
+    if (!CMD_ID_RE.test(p.cmdPatientId)) throw new Error('arQuery: patient id must be a CMD numeric id');
+    patients.push(p.cmdPatientId);
+  }
+  return {
+    sql:
+      `select k.cmd_claim_id, n.note_enc, ${tsOut('n.noted_at')} as noted_at, n.source, n.author_label, ` +
+      `(n.cmd_claim_id is not null) as claim_level ` +
+      `from unnest($2::text[], $3::text[]) as k(cmd_claim_id, cmd_patient_id) ` +
+      `cross join lateral (` +
+      `select note_enc, noted_at, source, author_label, cmd_claim_id from claims.ar_claim_note ` +
+      `where business_entity_id = any($1::uuid[]) ` +
+      `and (cmd_claim_id = k.cmd_claim_id or (cmd_claim_id is null and cmd_patient_id = k.cmd_patient_id)) ` +
+      `order by noted_at desc, id desc limit 1) n`,
+    params: [entityIdsOrThrow(entityIds), claims, patients],
   };
 }
 

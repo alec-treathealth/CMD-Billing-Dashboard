@@ -30,6 +30,7 @@ import type {
 import {
   addArNote, loadArClaimDetail, loadArNotes, loadArNotifications, loadArOptions, loadArQueuePage, loadArSummary,
   markArNotificationsSeen, resolveArAssignee, revealArPatient, revealArPatients, setArWork, type ArActor,
+  loadArLatestNotes,
 } from './server';
 
 const GENERIC = 'AR Management could not be loaded right now.';
@@ -83,7 +84,17 @@ export async function loadArQueue(view: unknown, cursor: unknown, filter: unknow
   if (!s.ok) return { ok: false, error: s.error };
   try {
     const page = await loadArQueuePage(resolveArCursor(cursor), resolveArFilter(filter), resolveArSort(sort), s.scope.entityIds, businessDayIso());
-    return { ok: true, rows: page.rows, nextCursor: page.nextCursor };
+    // The rows come from the CACHED, PHI-free loader. The latest follow-up note per claim is a
+    // SEPARATE UNCACHED read (loadArLatestNotes) because it decrypts staff free text about
+    // patients: caching that would put PHI in Next's data cache, and would audit one disclosure
+    // per cache window instead of one per read. Served to every role that reaches the queue by
+    // Alec's ruling of 2026-09-10 — see the docblock on loadArLatestNotes.
+    const latestNotes = await loadArLatestNotes(
+      page.rows.map((r) => ({ cmdClaimId: r.cmd_claim_id, cmdPatientId: r.cmd_patient_id })),
+      s.scope.actor,
+      s.scope.entityIds,
+    );
+    return { ok: true, rows: page.rows, nextCursor: page.nextCursor, latestNotes };
   } catch (err) {
     console.error('loadArQueue failed', err instanceof Error ? err.message : '');
     return { ok: false, error: GENERIC };

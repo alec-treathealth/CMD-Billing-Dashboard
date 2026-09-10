@@ -63,7 +63,7 @@ test('every post-await state write in the claim drawer is guarded by the current
 // ── B5 ────────────────────────────────────────────────────────────────────────────────────────────
 test('a failed summary load renders an ALERT and dashes, never a confident $0 or stale totals', () => {
   const html = renderToStaticMarkup(
-    <AgingStrip bands={BANDS} kpi={EMPTY_KPI} selected={[]} onToggle={() => {}} agedOnly={false} onToggleAgedOnly={() => {}} loading={false} error="Something failed." />,
+    <AgingStrip bands={BANDS} kpi={EMPTY_KPI} selected={[]} onToggle={() => {}} loading={false} error="Something failed." />,
   );
   assert.match(html, /role="alert"/, 'the failure is announced, not silent');
   assert.match(html, /Totals unavailable/);
@@ -77,7 +77,7 @@ test('a failed summary load renders an ALERT and dashes, never a confident $0 or
 test('with no error the strip shows real totals, and band shares do not depend on the band filter', () => {
   const kpi = { ...EMPTY_KPI, claims: 15, balance: '4000.00' };
   const html = renderToStaticMarkup(
-    <AgingStrip bands={BANDS} kpi={kpi} selected={[]} onToggle={() => {}} agedOnly={false} onToggleAgedOnly={() => {}} loading={false} error={null} />,
+    <AgingStrip bands={BANDS} kpi={kpi} selected={[]} onToggle={() => {}} loading={false} error={null} />,
   );
   assert.ok(!/role="alert"/.test(html), 'no alert on the happy path');
   assert.match(html, /15/);
@@ -86,7 +86,7 @@ test('with no error the strip shows real totals, and band shares do not depend o
   // that band and would make it 100%) cannot move the shares.
   const narrowed = { ...EMPTY_KPI, claims: 5, balance: '3000.00' };
   const selectedHtml = renderToStaticMarkup(
-    <AgingStrip bands={BANDS} kpi={narrowed} selected={['61_90']} onToggle={() => {}} agedOnly={false} onToggleAgedOnly={() => {}} loading={false} error={null} />,
+    <AgingStrip bands={BANDS} kpi={narrowed} selected={['61_90']} onToggle={() => {}} loading={false} error={null} />,
   );
   const share = (s: string): string[] => (s.match(/width:\s?[\d.]+%/g) ?? []).sort();
   assert.deepEqual(share(selectedHtml), share(html), 'band shares are computed from a band-independent total');

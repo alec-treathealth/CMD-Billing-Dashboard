@@ -135,7 +135,7 @@ export default async function BillingAuditPage({
         arSeed={{
           summary: arSummary.ok ? arSummary.summary : null,
           options: arOptions.ok ? arOptions.options : null,
-          page: arPage.ok ? { rows: arPage.rows, nextCursor: arPage.nextCursor } : null,
+          page: arPage.ok ? { rows: arPage.rows, nextCursor: arPage.nextCursor, latestNotes: arPage.latestNotes } : null,
         }}
         initialFilter={initialFilter}
         ipPage={ipReport.ok ? { rows: ipReport.rows, nextCursor: ipReport.nextCursor } : null}

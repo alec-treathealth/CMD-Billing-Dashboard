@@ -49,11 +49,13 @@ import {
   type ArRemitRow,
   type ArSort,
   type ArStatusEventRow,
+  buildArLatestNotesQuery,
+  type ArLatestNoteEncRow,
 } from '../../../src/billingAudit/arQuery.js';
 import { decryptPhi, encryptPhi } from '../../../src/collections/phiCrypto.js';
 import { recordAccess } from '@/lib/server';
 import { arExecutor } from './deps';
-import type { ArClaimDetail, ArFreshness, ArNote, ArNotificationsPayload, ArOptions, ArRevealedPatient, ArSummary, ArWorkPatch } from './contract';
+import type { ArClaimDetail, ArFreshness, ArNote, ArNotificationsPayload, ArOptions, ArRevealedPatient, ArSummary, ArWorkPatch, ArLatestNote } from './contract';
 
 export interface ArActor {
   email: string;
@@ -207,6 +209,58 @@ export async function loadArNotes(cmdClaimId: string, entityIds: string[]): Prom
       };
     }),
   );
+}
+
+/**
+ * The latest follow-up note for every claim on a queue page, decrypted.
+ *
+ * ⚠ DELIBERATELY NOT CACHED, and that is the whole reason this is a separate function rather than
+ * extra columns on loadArQueuePage. That loader is wrapped in `unstable_cache`, and its payload is
+ * PHI-FREE by construction — opaque CMD ids, money and derived status only. Note bodies are staff
+ * free text about patients, so folding them into the cached structure would write PHI into Next's
+ * data cache: a new at-rest surface outside the libsodium design, on disk, with none of its key
+ * management. Keeping it uncached also means the audit row below fires on every disclosure rather
+ * than once per five-minute cache window.
+ *
+ * PHI POSTURE — RULED BY ALEC 2026-09-10. This is served to EVERY role that can reach the queue,
+ * including entity `user`, which `app/lib/rbac.ts` otherwise describes as NON-PHI. That is a
+ * deliberate widening of the note surface for the AR desk, not an oversight, and it is recorded
+ * here so a later reviewer does not read it as the bug it would otherwise look like. The read is
+ * still AUDITED and still tenant-scoped; only the role gate changed.
+ */
+export async function loadArLatestNotes(
+  pairs: readonly { cmdClaimId: string; cmdPatientId: string }[],
+  actor: ArActor,
+  entityIds: string[],
+): Promise<Record<string, ArLatestNote>> {
+  if (pairs.length === 0) return {};
+  // Audit BEFORE the decrypt, the same ordering every other reveal on this plane uses. Bounded
+  // detail: a count plus the claim ids, which are opaque CMD numbers and not PHI.
+  await recordAccess({
+    actorEmail: actor.email,
+    actorUserId: actor.userId,
+    action: 'read_ar_queue_notes',
+    detail: { claims: pairs.length, cmd_claim_ids: pairs.slice(0, 200).map((p) => p.cmdClaimId), entities: entityIds.length },
+  });
+  const q = buildArLatestNotesQuery(pairs, entityIds);
+  const { rows } = await arExecutor().query<ArLatestNoteEncRow>(q.sql, q.params);
+  const out: Record<string, ArLatestNote> = {};
+  for (const r of rows) {
+    let text: string;
+    try {
+      text = await decryptPhi(Buffer.from(r.note_enc));
+    } catch {
+      text = '[note could not be decrypted]';
+    }
+    out[r.cmd_claim_id] = {
+      text,
+      noted_at: r.noted_at,
+      author: r.author_label,
+      source: r.source === 'user' ? 'user' : 'cmd',
+      claim_level: r.claim_level === true,
+    };
+  }
+  return out;
 }
 
 /** Reveal ONE patient — audit row FIRST (id-only detail), then decrypt. */

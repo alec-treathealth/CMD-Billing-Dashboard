@@ -57,6 +57,26 @@ export const AR_BANDS: readonly ArBand[] = [
   { key: '2yr_plus', label: 'Over 2 years', short: '2yr+', minDays: 731, maxDays: null, aged: true },
 ] as const;
 
+/**
+ * The minimum age a claim must reach to appear on the AR queue. Ruled by Alec 2026-09-10: the
+ * 0–30 day set "is not needed" — it is money that has not had time to be worked, and it was
+ * 2,584 claims / $14.3M of noise at the top of a queue whose purpose is aged AR.
+ *
+ * ⚠ ENFORCED AT READ, NOT AT INGEST, and that is deliberate. The snapshot still records every
+ * claim, so when one crosses 31 days it arrives on the queue WITH its accumulated status history
+ * and follow-up notes. Filtering at ingest would make a claim appear on the day it ages in with no
+ * history at all — precisely the moment a rep needs the context — and would need a backfill to
+ * undo. `0_30` therefore stays in the taxonomy below so the band CASE remains total.
+ */
+export const AR_MIN_AGE_DAYS = 31;
+
+/**
+ * The bands the QUEUE displays — every band except `0_30`, which is filtered out before a row can
+ * be classified into it. Distinct from AR_BANDS on purpose: AR_BANDS is the complete taxonomy the
+ * SQL CASE must cover (a stray row must classify, never land as null), while this is the tile set.
+ */
+export const AR_QUEUE_BANDS: readonly ArBand[] = AR_BANDS.filter((b) => b.key !== '0_30');
+
 const KEYS: ReadonlySet<string> = new Set(AR_BANDS.map((b) => b.key));
 
 /** Narrow an untrusted value to a band key. */

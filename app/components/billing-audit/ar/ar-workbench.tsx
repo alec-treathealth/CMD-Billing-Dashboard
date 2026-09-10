@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AR_BANDS } from '../../../../src/billingAudit/arBuckets';
 import { loadArOptionsAction, loadArSummaryAction, searchArPatientsAction } from '@/lib/ar/actions';
-import type { ArBandKey, ArCursor, ArFilter, ArOptions, ArQueueRow, ArSort, ArSortColumn, ArSummary } from '@/lib/ar/contract';
+import type { ArBandKey, ArCursor, ArFilter, ArOptions, ArQueueRow, ArSort, ArSortColumn, ArSummary, ArLatestNote } from '@/lib/ar/contract';
 import { takePendingClaim } from '@/lib/ar/open-claim-store';
 import type { DashboardView } from '@/lib/views';
 import { AgingStrip } from './aging-strip';
@@ -24,7 +24,7 @@ import { shortDate } from './ar-leaves';
 export interface ArSeed {
   summary: ArSummary | null;
   options: ArOptions | null;
-  page: { rows: ArQueueRow[]; nextCursor: ArCursor | null } | null;
+  page: { rows: ArQueueRow[]; nextCursor: ArCursor | null; latestNotes?: Record<string, ArLatestNote> } | null;
 }
 
 export interface ArWorkbenchProps {
@@ -34,7 +34,6 @@ export interface ArWorkbenchProps {
   seed: ArSeed;
 }
 
-const AGED_KEYS: ArBandKey[] = AR_BANDS.filter((b) => b.aged).map((b) => b.key);
 const EMPTY_KPI = { claims: 0, balance: '0', denied: 0, denied_balance: '0', worked: 0, followup_overdue: 0, never_noted: 0, aged_31_plus: 0, aged_31_plus_balance: '0' };
 
 export function ArWorkbench({ view, canRevealPhi, canWork, seed }: ArWorkbenchProps) {
@@ -86,15 +85,13 @@ export function ArWorkbench({ view, canRevealPhi, canWork, seed }: ArWorkbenchPr
   }, []);
 
   const bands = filter.bands ?? [];
-  const agedOnly = bands.length === AGED_KEYS.length && AGED_KEYS.every((k) => bands.includes(k));
   const toggleBand = (key: ArBandKey) => {
     setFilter((f) => {
-      const cur = agedOnly ? [] : (f.bands ?? []);
+      const cur = f.bands ?? [];
       const next = cur.includes(key) ? cur.filter((k) => k !== key) : [...cur, key];
       return { ...f, bands: next.length ? next : undefined };
     });
   };
-  const toggleAgedOnly = () => setFilter((f) => ({ ...f, bands: agedOnly ? undefined : [...AGED_KEYS] }));
 
   const runPatientSearch = useCallback(async (term: string) => {
     if (term.trim() === '') {
@@ -137,8 +134,6 @@ export function ArWorkbench({ view, canRevealPhi, canWork, seed }: ArWorkbenchPr
         kpi={summary?.kpi ?? EMPTY_KPI}
         selected={bands}
         onToggle={toggleBand}
-        agedOnly={agedOnly}
-        onToggleAgedOnly={toggleAgedOnly}
         loading={summaryLoading}
         error={summaryError}
       />
