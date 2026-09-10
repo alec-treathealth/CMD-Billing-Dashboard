@@ -160,29 +160,60 @@ would notice it misfiring.
 left alone by a purge.
 
 ```sql
--- Purge one offboarded facility. Run as claims_admin. :cust is the only parameter.
+-- Purge one offboarded facility. Run as claims_admin.
+--
+-- TWO parameters, and BOTH are required: :entity (the tenant uuid) and :cust (the CMD customer id).
+-- psql's :'name' form emits a QUOTED literal — plain :name substitutes raw text, so `-v cust=10033951`
+-- would compare a text column to an integer and abort the transaction with
+-- "operator does not exist: text = integer" before deleting anything.
+--
+--   psql -v entity="'af504ab6-...'" -v cust=10033951 -f purge.sql
 set role claims_admin;
 begin;
--- Capture the ids BEFORE deleting ar_claim: four tables can only be reached through it.
+-- Capture (entity, claim, patient) TRIPLES before deleting ar_claim: four tables are reachable only
+-- through it, and the entity must travel with the ids for the reason in trap 0 below.
 create temp table _purge as
-  select cmd_claim_id, cmd_patient_id from claims.ar_claim where cmd_customer_id = :cust;
+  select business_entity_id, cmd_claim_id, cmd_patient_id
+    from claims.ar_claim
+   where business_entity_id = :'entity'::uuid and cmd_customer_id = :'cust';
 
-delete from claims.ar_claim_event        where cmd_claim_id in (select cmd_claim_id from _purge);
-delete from claims.ar_claim_work         where cmd_claim_id in (select cmd_claim_id from _purge);
-delete from claims.ar_claim_status_event where cmd_claim_id in (select cmd_claim_id from _purge);
-delete from claims.ar_remit              where cmd_claim_id in (select cmd_claim_id from _purge);
-delete from claims.ar_claim_note         where cmd_customer_id = :cust;
-delete from claims.ar_charge             where cmd_customer_id = :cust;
-delete from claims.ar_claim              where cmd_customer_id = :cust;
+delete from claims.ar_claim_event e
+ where (e.business_entity_id, e.cmd_claim_id) in (select business_entity_id, cmd_claim_id from _purge);
+delete from claims.ar_claim_work w
+ where (w.business_entity_id, w.cmd_claim_id) in (select business_entity_id, cmd_claim_id from _purge);
+delete from claims.ar_claim_status_event t
+ where (t.business_entity_id, t.cmd_claim_id) in (select business_entity_id, cmd_claim_id from _purge);
+delete from claims.ar_remit r
+ where (r.business_entity_id, r.cmd_claim_id) in (select business_entity_id, cmd_claim_id from _purge);
+delete from claims.ar_claim_note  where business_entity_id = :'entity'::uuid and cmd_customer_id = :'cust';
+delete from claims.ar_charge      where business_entity_id = :'entity'::uuid and cmd_customer_id = :'cust';
+delete from claims.ar_claim       where business_entity_id = :'entity'::uuid and cmd_customer_id = :'cust';
 -- ar_patient LAST and never by customer alone: see trap 1.
 delete from claims.ar_patient p
- where p.cmd_patient_id in (select cmd_patient_id from _purge)
+ where (p.business_entity_id, p.cmd_patient_id) in (select business_entity_id, cmd_patient_id from _purge)
    and not exists (select 1 from claims.ar_claim c
                     where c.business_entity_id = p.business_entity_id
                       and c.cmd_patient_id = p.cmd_patient_id
-                      and c.cmd_customer_id <> :cust);
-delete from claims.ar_snapshot_run       where cmd_customer_id = :cust;
+                      and c.cmd_customer_id <> :'cust');
+delete from claims.ar_snapshot_run where business_entity_id = :'entity'::uuid and cmd_customer_id = :'cust';
 commit;
+```
+
+⚠ **TRAP 0 — EVERY PREDICATE CARRIES `business_entity_id`, AND A CMD ID ALONE IS NOT A KEY.** Every
+table in this plane is unique on `(business_entity_id, cmd_*_id)`, never on the CMD id by itself —
+CMD's SEQNOs are per-customer-database, so two accounts can legitimately hold the same claim id. A
+purge matching child rows on `cmd_claim_id` alone would therefore reach another customer's — and,
+once a second tenant exists, another TENANT's — remits, status events, work and change history. And
+nothing else would stop it: this runs as `claims_admin`, which bypasses RLS, so the entity predicate
+in the statement is the only isolation there is.
+**Measured 2026-09-10: zero collisions today, and that is not reassurance.** `ar_claim` currently
+holds exactly ONE `business_entity_id` — Indigo's snapshot endpoint 404s, so no Indigo rows exist —
+which is the only reason the cross-tenant case cannot fire yet. Enabling Indigo is a named
+follow-up. Re-run the collision counts before trusting any purge:
+
+```sql
+select count(*) from (select cmd_claim_id from claims.ar_claim
+                       group by cmd_claim_id having count(distinct cmd_customer_id) > 1) x;
 ```
 
 ⚠ **TRAP 1 — `ar_patient` must NOT be deleted by `cmd_customer_id`, even though it has that column.**
