@@ -24,18 +24,32 @@
  */
 import type { ReactNode } from 'react';
 
+/**
+ * ⚠️ THE BACKGROUND AND BORDER BELONG TO THE TABLE, NOT TO A WRAPPER (2026-09-10). They were on a
+ * wrapping `<div>`, which produced a visible vertical colour seam partway across the table: the
+ * wrapper is only as wide as the scroll container, the table is `w-max` and therefore WIDER, and
+ * everything past the wrapper's right edge had no `bg-card` — so the page's `ground` token (a warm
+ * off-white) showed through beside `card` (pure white). It looked like a per-column colour change, which is
+ * why it read as a styling glitch rather than a box-model one.
+ *
+ * It only appeared when the inner scrollport was removed: while the wrapper was `overflow-x-auto` it
+ * WAS the scroll container, so the table could never exceed it. Putting the paint on the element
+ * that actually spans the content is the fix, and it cannot regress the same way.
+ *
+ * ⚠️ `border-separate`, NOT `border-collapse`, and that is a STICKY requirement rather than a style
+ * preference. With collapsed borders the border belongs to the TABLE, not the cell, so a sticky
+ * header's bottom rule scrolls away with the body and the pinned row loses its edge mid-scroll
+ * (Chrome). Separated borders are drawn per cell and travel with the sticky cell; `border-spacing-0`
+ * keeps the cells flush so nothing else about the grid changes.
+ */
 export function LocalTable({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="rounded-lg border border-line bg-card shadow-ths-sm">
-      {/* ⚠️ `border-separate`, NOT `border-collapse`, and that is a STICKY requirement rather than a
-          style preference. With collapsed borders the border belongs to the TABLE, not the cell, so a
-          sticky header's bottom rule scrolls away with the body and the pinned row loses its edge
-          mid-scroll (Chrome). Separated borders are drawn per cell and travel with the sticky cell;
-          `border-spacing-0` keeps the cells flush so nothing else about the grid changes. */}
-      <table className="w-max min-w-full border-separate border-spacing-0 text-sm" aria-label={label}>
-        {children}
-      </table>
-    </div>
+    <table
+      className="w-max min-w-full border-separate border-spacing-0 rounded-lg border border-line bg-card text-sm shadow-ths-sm"
+      aria-label={label}
+    >
+      {children}
+    </table>
   );
 }
 
@@ -68,10 +82,14 @@ export function LTh({
   const content = (
     <span className="inline-flex flex-col items-start">
       <span className="font-semibold">{children}</span>
-      {/* `whitespace-normal` + a width cap: the th is nowrap so the number never breaks, but an
-          un-capped sub on a nowrap ancestor stretches the column to the width of a whole sentence,
-          which is what made the table wider than any viewport. */}
-      {sub && <span className="whitespace-nowrap text-[10px] font-normal normal-case leading-tight tracking-normal text-ink400">{sub}</span>}
+      {/* ⚠️ `text-ink600`, NOT `text-ink400`, and the reason is the SURFACE (a11y pass 2026-09-10).
+          ink400 is documented in tailwind.config as meeting AA "on white" — 4.88:1 — and it does.
+          This caption does not paint on white: making the sticky header opaque (which a sticky
+          header must be, or rows scroll through it) changed the ground under it from `bg-teal50/40`
+          over white to a SOLID teal50, where ink400 measures 4.35:1 and fails 1.4.3 for 10px text.
+          ink600 is 6.31:1 on the same surface. A token's ratio is a
+          property of the PAIR, never of the colour alone; ths-tokens-contrast.test.tsx pins this. */}
+      {sub && <span className="whitespace-nowrap text-[10px] font-normal normal-case leading-tight tracking-normal text-ink600">{sub}</span>}
     </span>
   );
   return (
@@ -81,6 +99,9 @@ export function LTh({
       aria-sort={sortKey ? (active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none') : undefined}
       className={[
         'whitespace-nowrap border-b border-line bg-teal50 px-2.5 py-1 text-left align-middle text-[11px] uppercase tracking-wide text-ink600',
+        // The header carries its own opaque fill, so it must repeat the table's radius or it paints
+        // square corners over the rounded border.
+        'first:rounded-tl-lg last:rounded-tr-lg',
         'sticky top-0',
         stick ? 'left-0 z-30' : 'z-20',
         align === 'right' ? 'text-right' : 'text-left',
@@ -109,12 +130,22 @@ export function LTh({
   );
 }
 
+/**
+ * A body cell. `rowHeader` renders `<th scope="row">` instead of `<td>`, with identical styling.
+ *
+ * ⚠️ THE IDENTITY CELL MUST BE A ROW HEADER (a11y pass 2026-09-10). Thirteen columns of bare `<td>`
+ * means a screen reader moving across a row announces "89.56%" against its COLUMN header and nothing
+ * about which pairing it belongs to — the reader has to remember the row they entered. `scope="row"`
+ * is what makes the association programmatically determinable (WCAG 1.3.1), and it costs nothing
+ * visually because the styling is shared.
+ */
 export function LTd({
   children,
   align = 'left',
   num = false,
   dim = false,
   stick = false,
+  rowHeader = false,
   className = '',
 }: {
   children: ReactNode;
@@ -124,20 +155,25 @@ export function LTd({
   dim?: boolean;
   /** Pins the cell to the left edge — must be opaque, see the file header. */
   stick?: boolean;
+  /** Render as `<th scope="row">` — the cell that names the row. */
+  rowHeader?: boolean;
   className?: string;
 }) {
+  const Cell = rowHeader ? 'th' : 'td';
   return (
-    <td
+    <Cell
+      scope={rowHeader ? 'row' : undefined}
       className={[
         'border-b border-line px-2.5 py-1.5 align-top',
         stick ? 'sticky left-0 z-10 bg-card' : '',
         align === 'right' ? 'text-right' : 'text-left',
         num ? 'ths-num whitespace-nowrap tabular-nums' : '',
         dim ? 'opacity-60' : '',
+        rowHeader ? 'font-normal' : '',
         className,
       ].join(' ')}
     >
       {children}
-    </td>
+    </Cell>
   );
 }

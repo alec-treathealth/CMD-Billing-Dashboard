@@ -220,16 +220,27 @@ export function PairingTable({
             const open = expandedKey === key;
             const rowDim = dimYield || r.flags.includes('immature_window');
             return (
-              <tr key={key} className={open ? 'bg-teal50/30' : 'hover:bg-teal50/20'} data-pair={key}>
+              // `scroll-mt-12` clears the sticky header when the browser scrolls a focused control
+              // into view. Without it, Tabbing into a row just below the header parks that control
+              // UNDER the pinned header — WCAG 2.2 SC 2.4.11 (focus not obscured). 48px covers the
+              // header's ~40px; a string render cannot verify the outcome, only that the rule ships.
+              <tr key={key} className={`scroll-mt-12 ${open ? 'bg-teal50/30' : 'hover:bg-teal50/20'}`} data-pair={key}>
                 {/* The identity cell IS the expand control's home and the sticky left edge. */}
-                <LTd stick className={open ? 'bg-teal50' : ''}>
+                {/* rowHeader: this cell NAMES the row, so it is a th[scope=row] — without it a
+                    screen reader crossing 13 columns announces each value against its column header
+                    and nothing about which pairing it belongs to. */}
+                <LTd stick rowHeader className={open ? 'bg-teal50' : ''}>
                   <div className="flex items-start gap-1">
+                    {/* ⚠️ 32px, not 24px. This is the row's PRIMARY action on a dense table. 24px is
+                        exactly the SC 2.5.8 floor with no margin, and it was 44px before the
+                        header-height work took it down as collateral. The rows carry a code
+                        description and are already taller than 32px, so this costs no height. */}
                     <button
                       type="button"
                       onClick={() => onToggle(key)}
                       aria-expanded={open}
                       aria-label={`${open ? 'Collapse' : 'Expand'} drill-down for ${r.hcpcs ?? 'no procedure code'} × ${r.revcode ?? 'no revenue code'}`}
-                      className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-teal700 hover:bg-teal50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal500"
+                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded text-teal700 hover:bg-teal50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal500"
                     >
                       {open ? <ChevronDown aria-hidden className="h-4 w-4" /> : <ChevronRight aria-hidden className="h-4 w-4" />}
                     </button>

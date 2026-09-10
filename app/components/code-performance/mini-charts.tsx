@@ -44,10 +44,15 @@ function pairLabel(r: CodePerfPairingRow): string {
 function Panel({ title, hint, children }: { title: string; hint: React.ReactNode; children: React.ReactNode }) {
   return (
     <section className="rounded-xl border border-line bg-card p-3 shadow-ths">
-      <h3 className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+      {/* ⚠️ h2, NOT h3 (a11y pass 2026-09-10). These panels are top-level sections of the route, and
+          the only heading above them is the page's h1 — an h3 here skipped a level, which breaks the
+          document outline a screen-reader user navigates by (WCAG 1.3.1 / 2.4.6). The drill-down's
+          own h2 sits alongside these and its internal h3s nest under it correctly. Visual size comes
+          from the type classes, never from the tag. */}
+      <h2 className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         {title}
         <MetricHint label={title}>{hint}</MetricHint>
-      </h3>
+      </h2>
       {children}
     </section>
   );

@@ -350,3 +350,45 @@ test('globals.css actually declares the :focus-visible fallback, with the token 
   );
   assert.equal(FOCUS_RING_HEX.toUpperCase(), '#2F9A90', 'the token and the stylesheet must agree');
 });
+
+// ── The Code Performance sticky header: measured on the surface it ACTUALLY paints on ──────────
+//
+// This file's recurring thesis, hit again 2026-09-10. `ink400`'s own comment in tailwind.config
+// records "meets WCAG AA (>=4.5:1 on white)" and that is true — 4.88:1. The Code Performance column
+// captions do not paint on white. Making the sticky header OPAQUE (which a sticky header must be,
+// or the rows scroll visibly through it) moved the ground under those captions from a 40% teal50
+// wash over white to a SOLID teal50, and ink400 on solid teal50 is 4.35:1 — a fail for 10px text,
+// produced by a change that was itself correct.
+//
+// The lesson is the one the tape tests above teach: a token's ratio is a property of the PAIR. A
+// ratio recorded against white does not transfer to a tinted fill, and the direction of the error is
+// invisible in a diff — the colour did not change, the surface did.
+const CP_INK_400 = '#63756E'; // tailwind.config ink400
+const CP_INK_600 = '#4A5C5A'; // tailwind.config ink600
+const CP_TEAL_50 = '#EAF4F2'; // the solid sticky-header fill
+const CP_WHITE = '#FFFFFF';
+
+test('Code Performance column captions clear AA on the SOLID header fill, not merely on white', () => {
+  // The premise: the token is fine on white, which is why the mistake was easy to make.
+  assert.ok(contrast(CP_INK_400, CP_WHITE) >= 4.5, 'ink400 on white is the ratio the token documents');
+  // And it does NOT survive the move to the tinted fill.
+  assert.ok(
+    contrast(CP_INK_400, CP_TEAL_50) < 4.5,
+    `ink400 on solid teal50 is ${contrast(CP_INK_400, CP_TEAL_50).toFixed(2)}:1 — if this ever passes, re-derive the note above`,
+  );
+  // The shipped choice, on the surface it paints on.
+  assert.ok(
+    contrast(CP_INK_600, CP_TEAL_50) >= 4.5,
+    `ink600 on solid teal50 must clear AA: ${contrast(CP_INK_600, CP_TEAL_50).toFixed(2)}:1`,
+  );
+});
+
+test('local-table.tsx paints its header captions with the token that clears AA there', () => {
+  // Same URL-relative pattern this file already uses for ths-v2.css — no path helpers imported.
+  const src = readFileSync(new URL('../components/code-performance/local-table.tsx', import.meta.url), 'utf8');
+  // The caption line is the one carrying the 10px size; it must not reach for ink400.
+  const caption = src.split('\n').find((l) => l.includes('text-[10px]') && l.includes('{sub}'));
+  assert.ok(caption, 'the header caption line is gone or renamed — re-check the ratio');
+  assert.ok(caption.includes('text-ink600'), `caption must use ink600: ${caption.trim()}`);
+  assert.equal(caption.includes('text-ink400'), false, 'ink400 is 4.35:1 on this fill');
+});

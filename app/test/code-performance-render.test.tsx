@@ -72,11 +72,19 @@ function renderTable(rows: CodePerfPairingRow[], summary: CodePerfSummary, immat
     <PairingTable rows={rows} descriptions={descriptions} summary={summary} immatureWindow={immature} sort={DEFAULT_PAIRING_SORT} onSort={noop} expandedKey={null} onToggle={noop} />,
   );
 }
-/** The <td> elements of the first body row, in order. */
+/** The COLUMN headers only. The row-identity cell is a `th[scope=row]` in tbody (WCAG 1.3.1), so a
+ *  document-wide `<th>` scrape would mix body cells into the column list and silently break the
+ *  "which column is last" assertions. Slice the thead first. */
+function columnHeaders(html: string): string[] {
+  const thead = html.slice(html.indexOf('<thead>'), html.indexOf('</thead>'));
+  return thead.match(/<th[\s\S]*?<\/th>/g) ?? [];
+}
+
+/** The body cells of the first row, in order — `<td>` plus the leading `th[scope=row]`. */
 function firstRowCells(html: string): string[] {
   const body = html.slice(html.indexOf('<tbody>'));
   const tr = body.slice(body.indexOf('<tr'), body.indexOf('</tr>'));
-  return tr.match(/<td[\s\S]*?<\/td>/g) ?? [];
+  return [...(tr.match(/<th[\s\S]*?<\/th>/g) ?? []), ...(tr.match(/<td[\s\S]*?<\/td>/g) ?? [])];
 }
 
 test('allowed_coverage renders in the SAME cell as allowed_rate, and flags the rate as noise under 60%', () => {
@@ -128,7 +136,7 @@ test('a suppressed metric is a VISIBLE state — pill in the cell, reason in the
 test('the sticky header stays short — no header cell carries a long inline caveat', () => {
   for (const [name, summary] of [['indigo', indigoSummary], ['bxr', bxrSummary]] as const) {
     const html = renderTable([row({})], summary);
-    for (const th of html.match(/<th[\s\S]*?<\/th>/g) ?? []) {
+    for (const th of columnHeaders(html)) {
       // Drop the hint panel first: it is `hidden`, so it occupies no height and may be long.
       const visible = th
         .replace(/<span[^>]*\bhidden\b[^>]*>[\s\S]*?<\/span>/g, '')
@@ -153,7 +161,7 @@ test('a suppressed column still carries its full reason, just not inline', () =>
 
 test('patient balance is labelled as AR aging and sits at the far right, apart from allowed rate', () => {
   const html = renderTable([row({})], indigoSummary);
-  const headers = html.match(/<th[\s\S]*?<\/th>/g) ?? [];
+  const headers = columnHeaders(html);
   const idx = (needle: string) => headers.findIndex((h) => h.includes(needle));
   assert.ok(idx('Patient balance') === headers.length - 1, 'last column');
   assert.ok(idx('Patient balance') - idx('Allowed rate') > 5, 'not adjacent to allowed rate');
@@ -166,13 +174,13 @@ test('maturity guard: banner names velocity-not-yield; yield headers and cells a
   assert.ok(banner.includes('41.2%'));
   assert.ok(banner.includes('role="status"'));
   const html = renderTable([row({ matured_share: 41.2, flags: ['immature_window'] })], indigoSummary, true);
-  const headers = html.match(/<th[\s\S]*?<\/th>/g) ?? [];
+  const headers = columnHeaders(html);
   const dimmed = headers.filter((h) => h.includes('opacity-60'));
   assert.ok(dimmed.some((h) => h.includes('Allowed rate')) && dimmed.some((h) => h.includes('Paid of allowed')), 'yield headers dimmed');
   assert.ok(!headers.find((h) => h.includes('Charges'))?.includes('opacity-60'), 'volume header not dimmed');
   assert.ok(!headers.find((h) => h.includes('Days to money'))?.includes('opacity-60'), 'velocity header not dimmed');
   const mature = renderTable([row({})], indigoSummary, false);
-  assert.ok(!(mature.match(/<th[\s\S]*?<\/th>/g) ?? []).some((h) => h.includes('opacity-60')), 'nothing dimmed when mature');
+  assert.ok(!columnHeaders(mature).some((h) => h.includes('opacity-60')), 'nothing dimmed when mature');
 });
 
 test('KPI grid: coverage rides with the allowed tile; gated tiles show Suppressed + reason; nothing truncates', () => {
@@ -362,4 +370,45 @@ test('with no selection the chart shows every facility, null bar included', () =
 test('a selected facility with no rows in the window simply does not appear', () => {
   const html = renderToStaticMarkup(<FacilityMixChart options={facOpts} facilitiesApplied={['ZETA']} />);
   assert.ok(html.includes('No facilities in this window'), html.slice(0, 300));
+});
+
+/* ── a11y pass 2026-09-10 ─────────────────────────────────────────────────────────────────────── */
+
+test('the row-identity cell is a th[scope=row] — 13 columns need a row header', () => {
+  const html = renderTable([row({})], indigoSummary);
+  const body = html.slice(html.indexOf('<tbody>'));
+  const tr = body.slice(body.indexOf('<tr'), body.indexOf('</tr>'));
+  const rowHeaders = tr.match(/<th[^>]*scope="row"[^>]*>/g) ?? [];
+  assert.equal(rowHeaders.length, 1, 'exactly one cell names the row');
+  // It is the FIRST cell, and it is the sticky one — identity stays on screen and stays announced.
+  assert.ok(tr.indexOf('scope="row"') < tr.indexOf('<td'), 'the row header leads the row');
+  assert.ok((rowHeaders[0] ?? '').includes('sticky'), 'the row header is the pinned identity column');
+});
+
+test('the row primary action clears the target-size floor with margin', () => {
+  const html = renderTable([row({})], indigoSummary);
+  // ⚠ Match the ROW's expand control specifically. A bare `aria-expanded` scrape finds the header's
+  // MetricHint button first, which is a legitimately-24px inline info affordance, not a row action.
+  const expand = html.match(/<button[^>]*aria-label="(?:Expand|Collapse) drill-down[^"]*"[^>]*>/)?.[0] ?? '';
+  assert.ok(expand.includes('h-8') && expand.includes('w-8'), `expand control is not 32px: ${expand}`);
+  assert.equal(expand.includes('h-6'), false, '24px is the SC 2.5.8 floor exactly — leave margin');
+});
+
+test('rows carry scroll-margin so a focused control clears the sticky header (SC 2.4.11)', () => {
+  const html = renderTable([row({})], indigoSummary);
+  const body = html.slice(html.indexOf('<tbody>'));
+  assert.ok(body.includes('scroll-mt-12'), 'without it, Tab parks focus under the pinned header');
+});
+
+test('the table paints its OWN background, so it cannot end mid-scroll', () => {
+  // The colour seam: a wrapper carrying bg-card is only as wide as the scroll container, while the
+  // table is w-max and wider — past the wrapper the page ground showed through as a fake column tint.
+  const html = renderTable([row({})], indigoSummary);
+  const table = html.match(/<table[^>]*>/)?.[0] ?? '';
+  assert.ok(table.includes('bg-card'), `the table must carry the fill: ${table}`);
+  assert.ok(table.includes('w-max'), 'and it is the element that is wider than the viewport');
+  // The old wrapper's signature was a div carrying BOTH the fill and the border. Cells legitimately
+  // contain divs, so the check is for that pairing rather than for the absence of any div.
+  const stranding = (html.match(/<div[^>]*>/g) ?? []).filter((d) => d.includes('bg-card') && d.includes('border-line'));
+  assert.deepEqual(stranding, [], 'a div carrying the fill would strand it at the scroll-container edge');
 });
