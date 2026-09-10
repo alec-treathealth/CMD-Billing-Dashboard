@@ -131,3 +131,27 @@ test('parseSnapshotZip: a missing table throws by NAME only, after the lazy rewr
   assert.equal(tables.get('B_NOPE'), null);
   assert.throws(() => tables.require('b_nope'), /table B_NOPE is missing/);
 });
+
+test('parseSnapshotZip NEVER INFLATES a table nobody reads — proved with an undecompressable entry', () => {
+  // The laziness is two-layered: the inflate is deferred as well as the row materialisation. This
+  // pins the inflate half, which a "does get() work" test cannot see. B_CREDIT carries a payload
+  // that is NOT valid deflate, so inflating it throws — therefore a clean read of B_CHARGE proves
+  // B_CREDIT was never decompressed. (B_CREDIT is the real 12.4 MB table the mapper never reads.)
+  const good = Buffer.from('TRANID\tBALANCE\n900000001\t100.00\n');
+  const zip = buildZip([
+    { name: '10099999/B_CHARGE.DAT', data: good },
+    { name: '10099999/B_CREDIT.DAT', data: Buffer.from('SEQNO\tAMOUNT\n1\t5.00\n') },
+  ]);
+  // Corrupt B_CREDIT's compressed bytes in place, leaving every header intact so the entry is still
+  // LOCATABLE (the central-directory walk must succeed) but not inflatable.
+  const at = zip.indexOf(Buffer.from('10099999/B_CREDIT.DAT'));
+  assert.ok(at > 0, 'entry name found in the archive');
+  const dataStart = at + '10099999/B_CREDIT.DAT'.length;
+  zip.fill(0xff, dataStart, dataStart + 8); // garbage where the deflate stream begins
+  const tables = parseSnapshotZip(zip);
+  // Located, listed, and untouched.
+  assert.deepEqual(tables.names(), ['B_CHARGE', 'B_CREDIT']);
+  assert.deepEqual(tables.require('B_CHARGE').rows, [{ TRANID: '900000001', BALANCE: '100.00' }]);
+  // Only when something actually asks for it does the bad payload surface.
+  assert.throws(() => tables.require('B_CREDIT'));
+});

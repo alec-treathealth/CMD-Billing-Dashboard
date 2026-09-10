@@ -368,9 +368,10 @@ installed, so it prints `N` for everything; ask
 ### Vercel branch↔environment binding
 
 There are exactly **two** Vercel environments, and `app/vercel.json` binds
-neither (it carries `regions` / `installCommand` / `functions` / `crons` only — the `functions`
-block arrived 2026-09-10 and pins `memory: 3009` for `app/api/cron/ar-snapshot/route.ts`, whose
-parse peaks at ~1.1 GB RSS on the largest customer; all binding is
+neither (it carries `regions` / `installCommand` / `crons` only — ⚠ a `functions` block pinning
+`memory: 3009` for the ar-snapshot route was added and REMOVED on 2026-09-10: the deploy log says
+`memory` is "ignored on Active CPU billing", so per-function memory is not settable on this project
+and re-adding it only manufactures false comfort; all binding is
 project-side, `prj_vPJxHFny6OS9gU32swXMn3XJsog3`):
 
 | Environment | Bound to | URLs |
