@@ -126,9 +126,14 @@ export function ArWorkbench({ view, canRevealPhi, canWork, seed }: ArWorkbenchPr
     if (at === null) return 'No ingest has ever been attempted for this tenant.';
     return `The last ingest attempt was ${shortDate(at)} — the daily 14:05 UTC run has not fired since.`;
   })();
-  if (options !== null && freshness === null) {
+  if (options !== null && freshness?.customers === 0) {
     return (
       <div className="rounded-xl border border-line bg-card p-10 text-center">
+          {ingestAlarm ? (
+            <p role="alert" className="mb-4 rounded-md border border-status-warn/40 bg-status-warn/10 px-3 py-2 text-left text-xs text-ink900">
+              <span className="font-semibold">AR ingest needs attention.</span> {ingestAlarm}
+            </p>
+          ) : null}
         <h2 className="ths-h text-lg font-semibold text-ink900">No AR snapshot for this tenant yet</h2>
         <p className="mx-auto mt-2 max-w-xl text-sm text-ink600">
           The AR queue is fed by CMD&rsquo;s daily customer data snapshot. Snapshots are enabled per CMD account; this

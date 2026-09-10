@@ -133,7 +133,7 @@ export const loadArOptions = unstable_cache(
       exec.query<Row>(fr.sql, fr.params),
     ]);
     const fr0 = fresh.rows[0];
-    const freshness: ArFreshness | null = fr0 && Number(fr0.customers ?? 0) > 0
+    const freshness: ArFreshness | null = fr0
       ? {
           customers: Number(fr0.customers),
           oldest_as_of: fr0.oldest_as_of === null ? null : String(fr0.oldest_as_of),
