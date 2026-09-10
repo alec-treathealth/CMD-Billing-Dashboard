@@ -290,3 +290,39 @@ test('assertSnapshotShape: a PRESENT secondary table with a renamed key column D
   const renamed: SnapshotTable = { name: 'B_REMITTANCE', columns: rem.columns.map((c) => (c === 'CLAIM' ? 'CLAIM_ID' : c)), rows: rem.rows };
   assert.throws(() => mapSnapshot(buildFixture({ B_REMITTANCE: renamed })), /B_REMITTANCE: missing CLAIM/);
 });
+
+test('a RELEASED table THROWS on a second read — it must never read as an empty table', () => {
+  // Release-after-use is a memory optimisation guarding an unpinnable function. The failure mode it
+  // must not have is silence: rowsOf() maps a missing table to [], so a released-then-read table
+  // would contribute zero rows and the ingest would record ok over an incomplete book.
+  const t = buildFixture();
+  t.release('B_REMITTANCE');
+  assert.throws(() => t.get('B_REMITTANCE'), /was RELEASED and read again/);
+  assert.throws(() => t.require('B_REMITTANCE'), /was RELEASED and read again/);
+  // Releasing something absent, or twice, is a no-op — not an error.
+  t.release('B_NOT_PRESENT');
+  t.release('B_REMITTANCE');
+  // names() still reports the full snapshot inventory.
+  assert.ok(t.names().includes('B_REMITTANCE'));
+});
+
+test('mapSnapshot releases the seven single-use tables and still maps identically', () => {
+  // The mapper reads every table exactly once, so it releases each after its loop. Proof that it
+  // does: after a full map, each released table throws, while the three whose ROWS are retained in
+  // lookup maps (B_CLAIM, ICLAIM, B_PATIENT) are deliberately left readable.
+  const t = buildFixture();
+  const mapped = mapSnapshot(t);
+  assert.ok(mapped.claims.length > 0 && mapped.charges.length > 0, 'a full book still maps');
+  for (const name of ['B_CHARGESTATUS', 'B_PAYOR', 'B_ACTIVITY', 'B_CHARGE', 'B_REMITTANCE', 'B_CLAIMSTATUS', 'B_PATNOTES']) {
+    assert.throws(() => t.require(name), /was RELEASED/, `${name} should have been released`);
+  }
+  for (const name of ['B_CLAIM', 'B_PATIENT']) {
+    assert.doesNotThrow(() => t.get(name), `${name} is retained in a lookup map — releasing it would free nothing`);
+  }
+  // And the output is unchanged: same counts as the same fixture mapped before releases existed.
+  const fresh = mapSnapshot(buildFixture());
+  assert.deepEqual(
+    { c: mapped.claims.length, ch: mapped.charges.length, r: mapped.remits.length, s: mapped.statusEvents.length, n: mapped.notes.length, p: mapped.patients.length },
+    { c: fresh.claims.length, ch: fresh.charges.length, r: fresh.remits.length, s: fresh.statusEvents.length, n: fresh.notes.length, p: fresh.patients.length },
+  );
+});

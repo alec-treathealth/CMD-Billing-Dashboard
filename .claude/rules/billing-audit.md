@@ -72,9 +72,31 @@ ICLAIM 4.9 MB each, plus ~18 smaller) cost nothing. Measured against the live CA
 
 ⚠ **The laziness removed the parse-step spike and left the PEAK essentially unchanged**, because the
 peak is the row objects of the eleven tables the mapper *does* read. Do not reach for laziness again
-expecting the peak to move; the remaining lever is the ROW REPRESENTATION (an array plus a shared
-column index instead of an object per row) or releasing each table's rows once the mapper is done
-with it. Both are real refactors of `SnapshotRow`, not tweaks.
+expecting the peak to move.
+
+**RELEASE-AFTER-USE is what actually moved it.** Every table is read exactly once, so `mapSnapshot`
+calls `tables.release(name)` after each loop; the ORDER is what does the work, since B_CLAIMSTATUS
+(29 MB of source at CAMH) is parsed late and the saving comes from having already freed B_ACTIVITY,
+B_CHARGE and B_REMITTANCE. B_CLAIM, ICLAIM and B_PATIENT are deliberately NOT released — their rows
+are retained in lookup maps, so releasing would free the wrapper and none of the memory.
+
+Measured on the live CAMH snapshot by capping V8's old space, which is the only test that answers
+"would this OOM" — `heapUsed` after a forced GC does not, because it reports the live set once the
+map is finished rather than the peak during it:
+
+| `--max-old-space-size` | 700 | 900 | 1300 |
+|---|---|---|---|
+| without release-after-use | OOM | **OOM** | OK |
+| with release-after-use | OOM | **OK** | OK |
+
+So the minimum viable old space went from >900 MB to 900 MB, and the post-map live set from 908 MB
+to 393 MB. ⚠ **RSS is a poor proxy here and reads as if nothing improved** (1,125 → 1,086 MB): V8
+does not return freed pages promptly, and RSS still measures ~1,046 MB when the live heap is 12 MB.
+Judge this code by a capped run, never by RSS.
+
+A released table **THROWS** on a second read rather than reading as empty — `rowsOf()` maps a
+missing table to `[]`, so the silent version of this optimisation would have contributed zero rows
+and recorded `ok` over an incomplete book. `release()` on an absent table, or twice, is a no-op.
 
 ⚠⚠ **`memory` CANNOT BE PINNED ON THIS PROJECT — do not re-add it.** `app/vercel.json` briefly
 carried `"functions": {"app/api/cron/ar-snapshot/route.ts": {"memory": 3009}}` and the deploy log

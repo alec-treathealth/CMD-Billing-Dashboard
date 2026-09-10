@@ -27,6 +27,17 @@ export interface SnapshotTables {
   require(name: string): SnapshotTable;
   /** Every table name present, sorted. */
   names(): string[];
+  /**
+   * Drop a table's parsed rows once the caller is finished with it, so the peak holds only what is
+   * still in use. A LATER `get`/`require` for a released table **THROWS** — it does not return null.
+   *
+   * That choice is the whole point. Returning null would turn a memory optimisation into a
+   * silent-wrong-data bug: `rowsOf()` maps a missing table to `[]`, so a released-then-read table
+   * would quietly contribute zero rows and the ingest would record `ok` over an incomplete book —
+   * the same class of failure that assertSnapshotShape exists to stop. Releasing a table that is
+   * absent, or releasing the same one twice, is a harmless no-op.
+   */
+  release(name: string): void;
 }
 
 /** Parse one tab-delimited text: header first, `\r\n`-tolerant, blank lines skipped, short rows padded. */
@@ -88,7 +99,9 @@ export function parseSnapshotZip(zip: Buffer): SnapshotTables {
 function lazySnapshotTables(raw: Map<string, () => Buffer>): SnapshotTables {
   const allNames = [...raw.keys()].sort();
   const parsed = new Map<string, SnapshotTable>();
+  const released = new Set<string>();
   const load = (upper: string): SnapshotTable | null => {
+    if (released.has(upper)) throw new Error(releasedMessage(upper));
     const cached = parsed.get(upper);
     if (cached !== undefined) return cached;
     const inflate = raw.get(upper);
@@ -110,20 +123,46 @@ function lazySnapshotTables(raw: Map<string, () => Buffer>): SnapshotTables {
       return t;
     },
     names: () => [...allNames],
+    release: (name) => {
+      const upper = name.toUpperCase();
+      if (!raw.has(upper) && !parsed.has(upper)) return; // absent, or already released
+      parsed.delete(upper);
+      raw.delete(upper);
+      released.add(upper);
+    },
   };
 }
 
 /** Wrap an already-built table map (the test fixture path). */
 export function snapshotTablesFrom(tables: ReadonlyMap<string, SnapshotTable>): SnapshotTables {
+  const allNames = [...tables.keys()].sort();
+  const released = new Set<string>();
+  const get = (name: string): SnapshotTable | null => {
+    const upper = name.toUpperCase();
+    if (released.has(upper)) throw new Error(releasedMessage(upper));
+    return tables.get(upper) ?? null;
+  };
   return {
-    get: (name) => tables.get(name.toUpperCase()) ?? null,
+    get,
     require: (name) => {
-      const t = tables.get(name.toUpperCase());
+      const t = get(name);
       if (!t) throw new Error(`snapshot: table ${name.toUpperCase()} is missing`);
       return t;
     },
-    names: () => [...tables.keys()].sort(),
+    names: () => [...allNames],
+    release: (name) => {
+      const upper = name.toUpperCase();
+      if (tables.has(upper)) released.add(upper);
+    },
   };
+}
+
+/** One wording for both implementations, so the fixture path and the live path fail identically. */
+function releasedMessage(upper: string): string {
+  return (
+    `snapshot: table ${upper} was RELEASED and read again — ` +
+    'either stop releasing it in arSnapshotMap, or gather what the second pass needs during the first'
+  );
 }
 
 const MONTH_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];

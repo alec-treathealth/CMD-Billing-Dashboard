@@ -331,6 +331,23 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
   assertSnapshotShape(tables);
   const skips: Record<string, number> = {};
 
+  // ── RELEASE-AFTER-USE, and read this before adding a second read of any table ────────────────
+  // Every table below is read EXACTLY ONCE, so each one's rows are dropped the moment its loop
+  // ends (`tables.release`). Without that, the peak held all eleven tables the mapper reads
+  // simultaneously: measured 908 MB of heap / 1,125 MB RSS on CAMH, against a Vercel function whose
+  // memory CANNOT be pinned (see .claude/rules/billing-audit.md — `memory` is ignored on Active CPU
+  // billing). An OOM there does not raise; it kills the process, leaving the run row `running` and
+  // the rest of the roster unprocessed.
+  //
+  // The ORDER is what does the work, not the releasing itself. B_CLAIMSTATUS is the largest table
+  // (29 MB of source text at CAMH) and is parsed LATE, so the saving comes from having already
+  // freed B_ACTIVITY, B_CHARGE and B_REMITTANCE before it is touched.
+  //
+  // B_CLAIM, ICLAIM and B_PATIENT are deliberately NOT released: their rows are retained in lookup
+  // maps for the whole function, so releasing would free the wrapper and none of the memory.
+  //
+  // ⚠ A released table THROWS on a second read — it does not read as empty. If you need a table
+  // twice, gather what the second pass needs during the first, or drop its release() line.
   // Lookups ------------------------------------------------------------------------------------
   const statusText = new Map<string, string>();
   for (const r of rowsOf(tables, 'B_CHARGESTATUS')) {
@@ -339,6 +356,7 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
     const text = cmdText(r.DISPLAY_TEXT);
     if (id && text) statusText.set(id, text.toUpperCase());
   }
+  tables.release('B_CHARGESTATUS'); // only extracted strings are kept
   const payorName = new Map<string, string>();
   const payorType = new Map<string, string | null>();
   for (const r of rowsOf(tables, 'B_PAYOR')) {
@@ -349,6 +367,7 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
       payorType.set(id, cmdText(r.PAYORTYPE));
     }
   }
+  tables.release('B_PAYOR'); // only extracted strings are kept
   const nameOf = (payorId: string | undefined): string | null => (idSet(payorId) ? payorName.get(payorId!.trim()) ?? null : null);
 
   const claimsById = new Map<string, SnapshotRow>();
@@ -390,6 +409,7 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
       if (!prev || (prev.date ?? '') <= when) last835.set(claimId, { status: act.rstatus, date: when });
     }
   }
+  tables.release('B_ACTIVITY'); // the payer ladder is built into Activity objects; no row escapes
 
   /** The payer a claim's insurance balance currently sits with, and at which level. */
   function currentPayer(claim: SnapshotRow, claimId: string): { name: string | null; level: number | null; id: string | null } {
@@ -465,6 +485,7 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
     const list = chargesByClaim.get(claimId);
     if (list) list.push(charge); else chargesByClaim.set(claimId, [charge]);
   }
+  tables.release('B_CHARGE'); // charges are built; nothing holds a B_CHARGE row
 
   // Remits (CAS adjustments + remarks) ---------------------------------------------------------
   const remits: ArRemitPlain[] = [];
@@ -497,6 +518,7 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
     const list = remitsByClaim.get(claimId);
     if (list) list.push(remit); else remitsByClaim.set(claimId, [remit]);
   }
+  tables.release('B_REMITTANCE'); // remits are built; nothing holds a B_REMITTANCE row
 
   // Status events: ERROR/WARNING rows + the latest row per kept claim ---------------------------
   const statusEvents: ArStatusEventPlain[] = [];
@@ -528,6 +550,7 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
       if (!le || key >= (le.statusDate ?? '')) lastErrorByClaim.set(claimId, ev);
     }
   }
+  tables.release('B_CLAIMSTATUS'); // the BIGGEST table (29 MB of source text at CAMH) — statusEvents are new objects
   const eventIds = new Set(statusEvents.map((e) => e.cmdStatusId));
   for (const ev of latestByClaim.values()) if (!eventIds.has(ev.cmdStatusId)) statusEvents.push(ev);
 
@@ -574,6 +597,7 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
     });
     if (claimId !== null) bumpStats(noteStatsByClaim, claimId, notedAt); else bumpStats(noteStatsByPatient, patientId, notedAt);
   }
+  tables.release('B_PATNOTES'); // notes are built; nothing holds a B_PATNOTES row
 
   // Claims -------------------------------------------------------------------------------------
   const claims: ArClaimPlain[] = [];
