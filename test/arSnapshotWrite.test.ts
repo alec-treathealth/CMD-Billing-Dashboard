@@ -46,12 +46,12 @@ test('writeArSnapshot: upserts every table with the right conflict key, inside t
   assert.match(byTable('ar_charge')[0]!.sql, /on conflict \(business_entity_id, cmd_charge_id\)/);
   assert.equal(tupleCount(byTable('ar_remit')[0]!.sql), 5);
   assert.match(byTable('ar_remit')[0]!.sql, /on conflict \(business_entity_id, cmd_remit_id\)/);
-  assert.equal(tupleCount(byTable('ar_claim_status_event')[0]!.sql), 3);
+  assert.equal(tupleCount(byTable('ar_claim_status_event')[0]!.sql), 4);
   assert.match(byTable('ar_claim_status_event')[0]!.sql, /on conflict \(business_entity_id, cmd_status_id\)/);
 
   assert.deepEqual(
     { patients: stats.patients, claims: stats.claims, charges: stats.charges, remits: stats.remits, statusEvents: stats.statusEvents },
-    { patients: 2, claims: 6, charges: 7, remits: 5, statusEvents: 3 },
+    { patients: 2, claims: 6, charges: 7, remits: 5, statusEvents: 4 },
   );
 });
 

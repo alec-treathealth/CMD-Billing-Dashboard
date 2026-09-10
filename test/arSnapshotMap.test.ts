@@ -153,6 +153,27 @@ test('claim F: fully paid → PAID; latest ERROR is the last error; notes counte
   assert.equal(evA.statusMessage?.length, 300);
 });
 
+test('last_error_* excludes an error CMD has already FIXED, but the drawer history keeps it', () => {
+  // claimB's only ERROR carries ERR_FIXED='T'. The queue renders last_error_* as an OPEN
+  // clearinghouse problem, so a resolved error must not win the roll-up — 471 of 2,245 open claims
+  // (21%) were advertising one before this was fixed (measured live 2026-09-10).
+  const b = claim(FX.claimB);
+  assert.equal(b.lastErrorCode, null, 'a fixed error is not the claim\'s open error');
+  assert.equal(b.lastErrorMessage, null);
+  assert.equal(b.lastErrorAt, null);
+  assert.equal(b.lastErrorReceiver, null);
+
+  // …and it is still delivered to the drawer, so nothing is hidden — only the roll-up narrows.
+  const evB = mapped.statusEvents.filter((e) => e.cmdClaimId === FX.claimB);
+  assert.deepEqual(evB.map((e) => e.cmdStatusId), ['300000005']);
+  assert.equal(evB[0]?.errFixed, 'T');
+
+  // 'X' must NOT be treated as fixed: it is every WARNING row plus 250 live ERROR rows, and
+  // nothing proves those are closed. claimF's unfixed 'F' error still rolls up (asserted above),
+  // which together with this pins the tri-state rather than a boolean reading of ERR_FIXED.
+  assert.equal(claim(FX.claimF).lastErrorCode, '16');
+});
+
 test('notes: claim-level AND patient-level kept; deleted / not-kept dropped; author + time mapped; message verbatim (plaintext for the writer to encrypt)', () => {
   assert.equal(mapped.notes.length, 3);
   const patientLevel = mapped.notes.find((x) => x.cmdNoteId === '200000005')!;

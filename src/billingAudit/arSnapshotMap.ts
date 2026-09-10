@@ -546,8 +546,22 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
     if (!latest || key >= (latest.statusDate ?? '')) latestByClaim.set(claimId, ev);
     if (type === 'ERROR' || type === 'WARNING') {
       statusEvents.push(ev);
-      const le = lastErrorByClaim.get(claimId);
-      if (!le || key >= (le.statusDate ?? '')) lastErrorByClaim.set(claimId, ev);
+      // ⚠ AN ERROR CMD HAS ALREADY FIXED IS NOT THIS CLAIM'S "LAST ERROR".
+      // `last_error_*` is rendered in the queue as an OPEN clearinghouse problem, so a resolved
+      // error winning this roll-up overstates the work. Measured 2026-09-10: 471 of the 2,245 open
+      // claims carrying a last_error_code (21%) were advertising an error whose latest event had
+      // ERR_FIXED = 'T'.
+      //
+      // ERR_FIXED is a TRI-STATE `X`/`T`/`F` (X = not applicable, T = fixed, F = still open) — NOT
+      // the Y/N implied elsewhere. Only 'T' is excluded: 'X' is every WARNING row plus 250 ERROR
+      // rows, and nothing proves those are closed, so dropping them would understate instead.
+      //
+      // The full history — fixed rows included — still reaches the drawer via `statusEvents`.
+      // Only the single-value roll-up narrows.
+      if (ev.errFixed !== 'T') {
+        const le = lastErrorByClaim.get(claimId);
+        if (!le || key >= (le.statusDate ?? '')) lastErrorByClaim.set(claimId, ev);
+      }
     }
   }
   tables.release('B_CLAIMSTATUS'); // the BIGGEST table (29 MB of source text at CAMH) — statusEvents are new objects
