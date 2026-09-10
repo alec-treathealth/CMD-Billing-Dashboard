@@ -19,6 +19,7 @@ import { loadArNotificationsAction, markArNotificationsSeenAction } from '@/lib/
 import type { ArNotificationRow, ArNotificationsPayload } from '@/lib/ar/contract';
 import { setPendingClaim } from '@/lib/ar/open-claim-store';
 import { BXR_ENTITY_ID } from '@/lib/views';
+import { navHref } from '@/lib/nav-model';
 import { BellMenuItems } from './ar-notifications-bell-leaves';
 
 const POLL_MS = 60_000;
@@ -58,7 +59,13 @@ export function ArNotificationsBell() {
     const view = e.business_entity_id === BXR_ENTITY_ID ? 'bxr' : 'indigo';
     setPendingClaim({ view, cmdClaimId: e.cmd_claim_id });
     setOpen(false);
-    router.push(`/billing-audit?view=${view}`);
+    // The URL is built by navHref, NOT by a literal here. `tenant-scope.tsx` is the only
+    // interactive writer of ?view= (ruled 2026-09-08, pinned by app/test/tenant-scope.test.tsx):
+    // a second client component spelling the param out would be a second switcher by that test's
+    // definition, even though this is deep-linking rather than tenant selection. navHref lives in
+    // the non-client nav model that already owns view forwarding for every tenant-scoped link, so
+    // routing through it keeps one writer and gets encodeURIComponent for free.
+    router.push(navHref('/billing-audit', view));
   };
 
   return (
