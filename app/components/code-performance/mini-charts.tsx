@@ -215,9 +215,15 @@ export function YieldHistogram({ rows }: { rows: readonly CodePerfPairingRow[] }
                   className="flex h-full flex-1 flex-col justify-end rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal500"
                 >
                   <span className="ths-num mb-0.5 text-center text-[10px] tabular-nums text-ink600">{n}</span>
+                  {/* ⚠️ AN EMPTY BAND DRAWS NOTHING, not a 1% sliver. Verified in a rendered
+                      screenshot 2026-09-10: a floor of 1% painted a ~1px mark under every zero band,
+                      and two adjacent zeros read as one continuous horizontal RULE across the chart
+                      — a line that looks like data where there is none. A non-empty band keeps its
+                      4% floor so a single row stays visible. The band is still labelled and still
+                      tabbable at zero; only the mark goes. */}
                   <span
                     className={`w-full rounded-t ${active === i ? 'bg-[var(--brand-ink)]' : edge ? 'bg-status-warn' : 'bg-[var(--brand-accent)]'}`}
-                    style={{ height: `${Math.max(h, n > 0 ? 4 : 1)}%` }}
+                    style={{ height: n > 0 ? `${Math.max(h, 4)}%` : '0%' }}
                   />
                   <span className="ths-num mt-1 text-center text-[10px] tabular-nums text-ink400">{YIELD_BAND_LABELS[i]}</span>
                 </button>
