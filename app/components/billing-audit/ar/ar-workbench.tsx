@@ -42,6 +42,7 @@ export function ArWorkbench({ view, canRevealPhi, canWork, seed }: ArWorkbenchPr
   const [sort, setSort] = useState<ArSort>({ column: 'balance', direction: 'desc' });
   const [summary, setSummary] = useState<ArSummary | null>(seed.summary);
   const [summaryLoading, setSummaryLoading] = useState(false);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
   const [options, setOptions] = useState<ArOptions | null>(seed.options);
   const [drawer, setDrawer] = useState<DrawerTarget | null>(null);
   const [revealAll, setRevealAll] = useState(false);
@@ -65,7 +66,9 @@ export function ArWorkbench({ view, canRevealPhi, canWork, seed }: ArWorkbenchPr
     setSummaryLoading(true);
     loadArSummaryAction(view, filter).then((res) => {
       if (cancelled) return;
-      if (res.ok) setSummary(res.summary);
+      // A dropped error left the PREVIOUS filter's totals on screen as if they were this filter's.
+      // Keep the last-known numbers out of the way and say so instead of lying quietly.
+      if (res.ok) { setSummary(res.summary); setSummaryError(null); } else { setSummaryError(res.error); }
       setSummaryLoading(false);
     });
     return () => { cancelled = true; };
@@ -137,6 +140,7 @@ export function ArWorkbench({ view, canRevealPhi, canWork, seed }: ArWorkbenchPr
         agedOnly={agedOnly}
         onToggleAgedOnly={toggleAgedOnly}
         loading={summaryLoading}
+        error={summaryError}
       />
       <ArFilterBar options={options} filter={filter} onChange={setFilter} canRevealPhi={canRevealPhi} onPatientSearch={runPatientSearch} searching={searching} />
       <ArQueueTable

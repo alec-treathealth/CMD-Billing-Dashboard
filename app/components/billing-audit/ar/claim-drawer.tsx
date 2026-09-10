@@ -62,7 +62,9 @@ export function ClaimDrawer({ view, canRevealPhi, canWork, target, assignees, on
   const [loading, setLoading] = useState(false);
   const [notes, setNotes] = useState<ArNote[] | null>(null);
   const [notesLoading, setNotesLoading] = useState(false);
-  const [revealed, setRevealed] = useState<ArRevealedPatient | null>(null);
+  // Keyed by the patient it belongs to. A bare ArRevealedPatient could be painted onto whatever
+  // claim happens to be open when a slow reveal lands — see the targetRef note below.
+  const [revealed, setRevealed] = useState<{ patientId: string; patient: ArRevealedPatient } | null>(null);
   const [revealing, setRevealing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState('');
@@ -75,6 +77,29 @@ export function ClaimDrawer({ view, canRevealPhi, canWork, target, assignees, on
   // Load token: a late response for a claim that is no longer selected (or a closed drawer) must not
   // populate the drawer — and must never seed the work form a save could then write to the wrong claim.
   const loadToken = useRef(0);
+  /**
+   * THE CLAIM THIS DRAWER IS CURRENTLY POINTED AT, readable from inside an async callback.
+   *
+   * `loadToken` already protected `loadAll`, but the three MUTATING paths (reveal, submitNote,
+   * submitWork) each did `setState` after an un-abortable Server Action without checking that the
+   * drawer still pointed where it did when the call started. Server Actions cannot be cancelled, so
+   * "the user closed this and opened another claim" is a normal event, not an edge case. Two real
+   * corruptions came out of that:
+   *
+   *   - WRONG-CLAIM WRITE. Save on claim A, close, open claim B; A's response lands and
+   *     `await loadAll(A)` takes a NEWER token, discarding B's in-flight load. The drawer is
+   *     targeted at B but shows A, and `work` holds A's values — so the next Save writes A's
+   *     status / assignee / due date / resolution onto B, logs an ar_claim_event against B, and
+   *     notifies every super-admin that B moved. B's real disposition is gone silently.
+   *   - WRONG-PATIENT IDENTITY. `reveal` called setRevealed unconditionally, so a late reveal for
+   *     patient Alice rendered "Alice · DOB · Member" as the header of claim B. An operator then
+   *     quotes Alice's DOB to a payer about someone else's claim. That is a PHI misattribution,
+   *     which is worse than a failed reveal.
+   *
+   * A ref, not state: the async callback must read the value at RESUME time, and a captured
+   * closure variable is exactly the stale thing we are defending against.
+   */
+  const targetRef = useRef<string | null>(null);
 
   const claimId = target?.cmdClaimId ?? null;
 
@@ -105,27 +130,41 @@ export function ClaimDrawer({ view, canRevealPhi, canWork, target, assignees, on
 
   useEffect(() => {
     loadToken.current += 1; // abandon any in-flight load for the previous claim
+    targetRef.current = claimId;
     setDetail(null); setNotes(null); setRevealed(null); setErr(null); setNoteDraft(''); setSaved(null);
+    // `work` MUST be reset here too. It used to survive a claim change until loadAll replaced it, so
+    // between switching claims and that load resolving (or if it failed) the form held the previous
+    // claim's disposition and a Save wrote it to the new one.
+    setWork({ status: 'open', assignee: '', due: '', resolution: '' });
     if (claimId) void loadAll(claimId);
   }, [claimId, loadAll]);
 
   const reveal = async () => {
     if (!detail) return;
+    const id = targetRef.current;
+    const patientId = detail.claim.cmd_patient_id;
     setRevealing(true); setErr(null);
-    const res = await revealArPatientAction(view, detail.claim.cmd_patient_id);
-    if (res.ok) setRevealed(res.patient); else setErr(res.error);
+    const res = await revealArPatientAction(view, patientId);
+    // The drawer moved while the decrypt was in flight — drop the identity on the floor. The audit
+    // row is already written server-side, which is correct: the reveal DID happen.
+    if (targetRef.current !== id) return;
+    if (res.ok) setRevealed({ patientId, patient: res.patient }); else setErr(res.error);
     setRevealing(false);
   };
 
   const submitNote = async () => {
     if (!claimId || noteDraft.trim().length === 0) return;
     setSavingNote(true); setErr(null);
-    const res = await addArNoteAction(view, claimId, noteDraft.trim());
+    const id = claimId;
+    const res = await addArNoteAction(view, id, noteDraft.trim());
+    // Navigated away: the write landed, so refresh the LIST, but do not re-seed this drawer from a
+    // claim it is no longer showing (that is what repointed the form at the wrong claim).
+    if (targetRef.current !== id) { onChanged(); return; }
     setSavingNote(false);
     if (!res.ok) { setErr(res.error); return; }
     setNoteDraft('');
     setSaved('Note added');
-    await loadAll(claimId);
+    await loadAll(id);
     onChanged();
   };
 
@@ -140,6 +179,7 @@ export function ClaimDrawer({ view, canRevealPhi, canWork, target, assignees, on
       dueOn: work.due || null,
       resolutionCode: work.resolution.trim() || null,
     });
+    if (targetRef.current !== claimId) { onChanged(); return; }
     setSavingWork(false);
     if (!res.ok) { setErr(res.error); return; }
     setSaved('Work status saved');
@@ -152,6 +192,10 @@ export function ClaimDrawer({ view, canRevealPhi, canWork, target, assignees, on
 
   if (!open) return null;
   const c = detail?.claim ?? null;
+  // The FINAL guard on patient identity: render a decrypted name only when it belongs to the patient
+  // whose claim is on screen. Even if a stale identity somehow reached state, it cannot be painted
+  // onto another patient's claim — a mismatch falls back to the mask, never to the wrong name.
+  const shown = revealed !== null && c !== null && revealed.patientId === c.cmd_patient_id ? revealed.patient : null;
 
   return (
     <>
@@ -170,17 +214,17 @@ export function ClaimDrawer({ view, canRevealPhi, canWork, target, assignees, on
               {c ? `${c.facility_code}${c.facility_name ? ` · ${c.facility_name}` : ''}` : 'Claim'}
             </div>
             <h2 id="ar-drawer-title" className="ths-h mt-0.5 flex items-baseline gap-2 text-lg font-semibold text-ink900">
-              <span className={revealed ? '' : 'tracking-widest text-ink400'}>{revealed ? revealed.patient_name : '••••••'}</span>
+              <span className={shown ? '' : 'tracking-widest text-ink400'}>{shown ? shown.patient_name : '••••••'}</span>
               {c ? <span className="ths-num text-xs font-medium text-ink400">claim #{c.cmd_claim_id}</span> : null}
             </h2>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink600">
-              {revealed ? (
+              {shown ? (
                 <>
-                  <span className="ths-num">DOB {shortDate(revealed.patient_dob)}</span>
-                  <span className="ths-num">Member {revealed.member_id ?? '—'}</span>
+                  <span className="ths-num">DOB {shortDate(shown.patient_dob)}</span>
+                  <span className="ths-num">Member {shown.member_id ?? '—'}</span>
                 </>
               ) : c ? <span className="ths-num">patient #{c.cmd_patient_id}</span> : null}
-              {canRevealPhi && !revealed ? (
+              {canRevealPhi && !shown ? (
                 <button type="button" onClick={reveal} disabled={revealing || !c} className="rounded-md border border-teal200 bg-teal50 px-2 py-0.5 text-xs font-semibold text-teal700 transition-colors hover:bg-teal200 disabled:opacity-60">
                   {revealing ? 'Revealing…' : 'Reveal identifiers'}
                 </button>

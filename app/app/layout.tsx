@@ -11,6 +11,7 @@ import { NavRail } from '@/components/shell/nav-rail';
 import { SpeedInsights } from '@/components/speed-insights';
 import { ContentInset } from '@/components/shell/content-inset';
 import { dashboardAccess } from '@/lib/access';
+import { claimsAuditMaintenanceBlocks } from '@/lib/billing-audit/maintenance';
 import { isAlecOwnerEmail } from '@/lib/alec-only';
 import { resolveShellModeEnv } from '@/lib/shell';
 import './globals.css';
@@ -152,8 +153,15 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             {/* AR Management change feed — a super-admin surface by request (2026-09-09). Rendered by
                 DOM omission for every other role; the actions behind it re-gate on the role too. It
                 needs a real principal, so the no-auth fallback (role super_admin, email null) shows
-                nothing. */}
-            {role === 'super_admin' && email ? <ArNotificationsBell /> : null}
+                nothing.
+                ⚠ ALSO GATED ON THE ROLLOUT FLAG, and this is the one piece of AR Management that
+                lives in the LAYOUT rather than behind /billing-audit's own gate. Without the
+                maintenance check the bell renders for every super-admin while the page it links to
+                still shows "being rebuilt" — a live unread badge whose every click dead-ends. That
+                is 12 of the 14 super-admins today. This is a RENDER gate only: the flag must never
+                enter an authorization path (see lib/maintenance-bypass.ts), so the actions behind
+                the bell keep their own independent role gate and are unchanged. */}
+            {role === 'super_admin' && email && !claimsAuditMaintenanceBlocks(email) ? <ArNotificationsBell /> : null}
             {email ? (
               <UserMenu
                 email={email}

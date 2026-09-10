@@ -197,3 +197,29 @@ test('options + notifications: parameterised, bounded, actor excluded', () => {
   assertParamsAligned(c.sql, c.params);
   assert.throws(() => buildArNotificationCountQuery('me', ENT), /uuid/);
 });
+
+test('patient search is ONE or-group — a member-id term must not be ANDed against the name index', () => {
+  // searchArPatientsAction emits a NAME token AND a MEMBER-ID token for any term containing a digit,
+  // because it cannot know which kind was typed. ANDed, that asks for a patient whose NAME is their
+  // member id: zero rows for every member-id search, and — since this predicate set also feeds the
+  // summary and the KPI — a hero reading "Open AR - 0 claims / $0" for a patient who has open AR.
+  const nameTok = 'a'.repeat(64);
+  const memberTok = 'b'.repeat(64);
+  const { sql } = buildArQueueQuery(null, resolveArFilter({ patientNameBidx: [nameTok], memberIdBidx: [memberTok] }), resolveArSort({}), 51, ENT, AS_OF);
+  assert.match(sql, /\(p\.patient_name_bidx = any\(\$\d+::text\[\]\) or p\.member_id_bidx = any\(\$\d+::text\[\]\)\)/, 'the two clauses are ORed inside one group');
+  assert.ok(!/patient_name_bidx = any\(\$\d+::text\[\]\) and/.test(sql), 'never ANDed against the next patient clause');
+});
+
+test('patient search or-group covers all three indexes and still works with a single token', () => {
+  const tok = 'c'.repeat(64);
+  const one = buildArQueueQuery(null, resolveArFilter({ memberIdBidx: [tok] }), resolveArSort({}), 51, ENT, AS_OF).sql;
+  assert.match(one, /\(p\.member_id_bidx = any\(\$\d+::text\[\]\)\)/, 'a lone token is still a valid group');
+  const all = buildArQueueQuery(null, resolveArFilter({ patientNameBidx: [tok], patientNamePrefixBidx: [tok], memberIdBidx: [tok] }), resolveArSort({}), 51, ENT, AS_OF).sql;
+  assert.match(all, /\(p\.patient_name_bidx = any\(\$\d+::text\[\]\) or p\.patient_name_pfx3_bidx = any\(\$\d+::text\[\]\) or p\.member_id_bidx = any\(\$\d+::text\[\]\)\)/, 'all three ORed together');
+  // The summary and the KPI share arBaseConds, so they must carry the same group — that shared
+  // predicate set is why a broken search became a wrong headline number, not merely an empty list.
+  for (const q of [
+    buildArSummaryQuery(resolveArFilter({ memberIdBidx: [tok] }), ENT, AS_OF).sql,
+    buildArKpiQuery(resolveArFilter({ memberIdBidx: [tok] }), ENT, AS_OF).sql,
+  ]) assert.match(q, /\(p\.member_id_bidx = any\(\$\d+::text\[\]\)\)/);
+});

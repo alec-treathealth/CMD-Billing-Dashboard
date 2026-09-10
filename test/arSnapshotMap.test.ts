@@ -225,3 +225,68 @@ test('mapSnapshot tolerates missing optional tables (a tiny snapshot with no not
   // With no activity table the primary payer is the fallback.
   assert.equal(m.claims.find((c) => c.cmdClaimId === FX.claimB)!.statusRaw, 'CLAIM AT ALPHA HEALTH PLAN');
 });
+
+test('summarizeDenials: a CO/PI/OA adjustment is NOT a denial — only CMD\'s DENIAL flag is', () => {
+  const base = { cmdClaimId: '1', cmdChargeId: '1', kind: 'A' as const, isAdjustment: true, payerName: null, payerLevel: 1, receivedDate: null };
+  // CO*45 rides on essentially every remitted OON claim. Before 2026-09-10 it set hasDenial, so the
+  // red "Denied" tile silently meant "has ever been remitted" — always red, therefore ignored.
+  const co = summarizeDenials([{ ...base, cmdRemitId: '1', groupCode: 'CO', code: '45', amount: '500.00', isDenial: false }]);
+  assert.equal(co.hasDenial, false, 'a contractual write-off is not a denial');
+  assert.deepEqual(co.items, [{ g: 'CO', c: '45', amt: '500.00', n: 1 }], 'but it IS still in the adjustments roll-up the drawer shows');
+  for (const g of ['PI', 'OA'] as const) {
+    assert.equal(summarizeDenials([{ ...base, cmdRemitId: '2', groupCode: g, code: '97', amount: '10.00', isDenial: false }]).hasDenial, false, `${g} alone is not a denial`);
+  }
+  // The flag is the whole signal, whatever the group code is.
+  const flagged = summarizeDenials([
+    { ...base, cmdRemitId: '3', groupCode: 'CO', code: '45', amount: '500.00', isDenial: false },
+    { ...base, cmdRemitId: '4', groupCode: 'CO', code: '29', amount: '25.00', isDenial: true },
+  ]);
+  assert.equal(flagged.hasDenial, true);
+  assert.equal(flagged.items.length, 2, 'both adjustments still summarised');
+});
+
+test('assertSnapshotShape: a RENAMED money column fails the parse instead of zeroing the book', () => {
+  // The catastrophic silent case: B_CHARGE.BALANCE renamed => every cmdMoney() falls back to '0.00'
+  // => deriveChargeStatus calls the book PAID => the queue reports $0 open AR for all 19 facilities,
+  // while the run records status='ok' and the 20h freshness cursor blocks a re-pull.
+  const t = buildFixture();
+  const charge = t.require('B_CHARGE');
+  const renamed: SnapshotTable = {
+    name: 'B_CHARGE',
+    columns: charge.columns.map((c) => (c === 'BALANCE' ? 'BAL_AMT' : c)),
+    rows: charge.rows.map((r) => { const { BALANCE, ...rest } = r as Record<string, string>; return { ...rest, BAL_AMT: BALANCE ?? '' }; }),
+  };
+  assert.throws(() => mapSnapshot(buildFixture({ B_CHARGE: renamed })), /shape changed/);
+  // The error names the table and the column, and NOTHING else — it reaches the cron's logger.
+  try {
+    mapSnapshot(buildFixture({ B_CHARGE: renamed }));
+    assert.fail('expected a throw');
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    assert.match(msg, /B_CHARGE: missing BALANCE/);
+    for (const row of charge.rows) {
+      for (const v of Object.values(row)) {
+        if (String(v).length > 3) assert.ok(!msg.includes(String(v)), `the message must not carry a cell value (${String(v)})`);
+      }
+    }
+  }
+});
+
+test('assertSnapshotShape: an ABSENT secondary table stays lenient — a small account may have no remits', () => {
+  // Deliberately NOT promoted to a hard require: a customer with no remittances or no notes can
+  // legitimately ship without the table, and failing that would break the small accounts.
+  const t = buildFixture();
+  const kept = new Map<string, SnapshotTable>();
+  for (const n of t.names()) if (n !== 'B_REMITTANCE' && n !== 'B_PATNOTES') kept.set(n, t.require(n));
+  const mapped = mapSnapshot(snapshotTablesFrom(kept));
+  assert.ok(mapped.claims.length > 0, 'still maps a full book');
+  assert.equal(mapped.remits.length, 0);
+  assert.equal(mapped.notes.length, 0);
+});
+
+test('assertSnapshotShape: a PRESENT secondary table with a renamed key column DOES fail', () => {
+  const t = buildFixture();
+  const rem = t.require('B_REMITTANCE');
+  const renamed: SnapshotTable = { name: 'B_REMITTANCE', columns: rem.columns.map((c) => (c === 'CLAIM' ? 'CLAIM_ID' : c)), rows: rem.rows };
+  assert.throws(() => mapSnapshot(buildFixture({ B_REMITTANCE: renamed })), /B_REMITTANCE: missing CLAIM/);
+});

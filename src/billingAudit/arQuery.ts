@@ -202,9 +202,19 @@ export function arBaseConds(filter: ArFilter, entityIds: string[], asOfParam: st
   if (filter.followupOverdue) conds.push(`coalesce(w.due_on, c.cmd_followup_date) < ${asOfParam}::date`);
   if (filter.minBalance !== undefined) conds.push(`c.balance >= ${add(filter.minBalance)}::numeric`);
   if (filter.claimId) conds.push(`c.cmd_claim_id = ${add(filter.claimId)}`);
-  if (filter.patientNameBidx) conds.push(`p.patient_name_bidx = any(${add(filter.patientNameBidx)}::text[])`);
-  if (filter.patientNamePrefixBidx) conds.push(`p.patient_name_pfx3_bidx = any(${add(filter.patientNamePrefixBidx)}::text[])`);
-  if (filter.memberIdBidx) conds.push(`p.member_id_bidx = any(${add(filter.memberIdBidx)}::text[])`);
+  // PATIENT SEARCH IS ONE **OR** GROUP, NOT THREE AND-ED CLAUSES.
+  // The box is labelled "patient name or member id", and searchArPatientsAction emits a NAME token
+  // AND a MEMBER-ID token for any term containing a digit (app/lib/ar/actions.ts) — it cannot know
+  // which kind the operator typed. Pushed separately these become
+  //   patient_name_bidx = hmac(term) AND member_id_bidx = hmac(term)
+  // which asks for a patient whose NAME is their member id: zero rows, for every member-id search
+  // ever run. And because this same predicate set feeds the summary and the KPI, the hero read
+  // "Open AR · 0 claims / $0" for a patient who has open AR — a wrong number, not just a bad search.
+  const patientOrs: string[] = [];
+  if (filter.patientNameBidx) patientOrs.push(`p.patient_name_bidx = any(${add(filter.patientNameBidx)}::text[])`);
+  if (filter.patientNamePrefixBidx) patientOrs.push(`p.patient_name_pfx3_bidx = any(${add(filter.patientNamePrefixBidx)}::text[])`);
+  if (filter.memberIdBidx) patientOrs.push(`p.member_id_bidx = any(${add(filter.memberIdBidx)}::text[])`);
+  if (patientOrs.length > 0) conds.push(`(${patientOrs.join(' or ')})`);
   if (includeBands && filter.bands) {
     // Compile the band set to DOS bounds: age <= max ⇔ dos_from >= asOf - max; age >= min ⇔ dos_from <= asOf - min.
     const ors = arBandDayRanges(filter.bands).map((r) => {

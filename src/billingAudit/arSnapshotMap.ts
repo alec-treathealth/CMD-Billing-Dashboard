@@ -251,6 +251,70 @@ function rowsOf(tables: SnapshotTables, name: string): readonly SnapshotRow[] {
   return tables.get(name)?.rows ?? [];
 }
 
+/**
+ * THE COLUMNS WHOSE ABSENCE WOULD SILENTLY PRODUCE WRONG MONEY — asserted before any row is read.
+ *
+ * Every cell read in this mapper is an unguarded property access with a null/zero fallback
+ * (`cmdMoney(r.BALANCE) ?? '0.00'`, `cmdText(r.TRANID)`). That is the right shape for a MISSING
+ * VALUE and the wrong shape for a MISSING COLUMN: if CMD renames `B_CHARGE.BALANCE`, every charge
+ * reads `'0.00'`, `deriveChargeStatus` calls the whole book PAID, and the queue reports **$0 open
+ * AR across all 19 facilities** — while the run closes `status='ok'`, the freshness chip shows
+ * today, and the 20h cursor blocks a re-pull until tomorrow.
+ *
+ * The empty-regression guard does NOT catch this: it fires only on `claims.length === 0`, and there
+ * would still be tens of thousands of claims — all worth nothing. This repo has already been bitten
+ * by exactly this class of CMD-side change (the recorded BXR adjustments-zeroed defect, where a
+ * per-payment-row alias silently zeroed ~28% of adjustments for weeks).
+ *
+ * ⚠ EVERY COLUMN BELOW IS EVIDENCED BY THE LIVE 2026-09-09 INGEST, not assumed — because a required
+ * column that is not actually always present would convert a working ingest into `parse_failed`.
+ * Each one is provable by contradiction against the observed result:
+ *   B_CHARGE.TRANID / CLAIMID / PATIENT — absent ⇒ every charge skips on "id/claim/patient missing";
+ *     78,111 charges and 2,415 patients landed, so all three exist.
+ *   B_CHARGE.TRANTYPE — absent ⇒ `(undefined ?? '').trim() !== 'H'` skips every charge; see above.
+ *   B_CHARGE.BALANCE — absent ⇒ the whole book reads $0.00; $52.5M of balance landed.
+ *   B_CHARGE.BALDUETO — absent ⇒ the derived "CLAIM AT …" status collapses; 128 of 139 distinct live
+ *     status strings reproduced byte-for-byte against claims.audit_row.
+ *   B_CHARGE.LASTUPDATE — absent ⇒ snapshotAsOf stays null; every run recorded a real as-of.
+ *   B_CLAIM.SEQNO — absent ⇒ the claim map is empty and every charge skips; 58,830 claims landed.
+ * DELETED is deliberately NOT required on any table: its absence over-counts rather than zeroes, and
+ * unlike the columns above I cannot prove from the observed data that it is always present.
+ */
+const REQUIRED_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  B_CHARGE: ['TRANID', 'CLAIMID', 'PATIENT', 'TRANTYPE', 'BALANCE', 'BALDUETO', 'LASTUPDATE'],
+  B_CLAIM: ['SEQNO'],
+  // Present-but-renamed key columns on the secondary tables. These are checked ONLY WHEN THE TABLE
+  // IS PRESENT (see assertSnapshotShape): a customer with no remits or no notes may legitimately
+  // ship without the table, and turning that into a hard failure would break the small accounts.
+  B_REMITTANCE: ['SEQNO', 'CLAIM', 'CHARGE', 'CODE', 'TYPE'],
+  B_CLAIMSTATUS: ['SEQNO', 'CLAIM', 'STATUS_TYPE'],
+  B_PATNOTES: ['SEQNO', 'CLAIM', 'MESSAGE'],
+  B_PATIENT: ['PACCTNO', 'PFIRST', 'PLAST'],
+  B_PAYOR: ['SEQNO', 'PAYOR'],
+};
+
+/** Tables that must EXIST — a snapshot without them is a broken export, not an empty book. */
+const REQUIRED_TABLES: readonly string[] = ['B_CHARGE', 'B_CLAIM'];
+
+/**
+ * Fail loud on a shape change. Throws with TABLE and COLUMN NAMES ONLY — never a cell value, so this
+ * is safe for the cron's log (which turns it into the fixed `parse_failed` stage label).
+ */
+export function assertSnapshotShape(tables: SnapshotTables): void {
+  for (const name of REQUIRED_TABLES) tables.require(name);
+  const problems: string[] = [];
+  for (const [name, cols] of Object.entries(REQUIRED_COLUMNS)) {
+    const t = tables.get(name);
+    if (!t) continue; // absence is handled by REQUIRED_TABLES for the two core tables
+    const present = new Set(t.columns.map((c) => c.trim().toUpperCase()));
+    const missing = cols.filter((c) => !present.has(c));
+    if (missing.length > 0) problems.push(`${name}: missing ${missing.join(', ')}`);
+  }
+  if (problems.length > 0) {
+    throw new Error(`snapshot shape changed — ${problems.join('; ')}`);
+  }
+}
+
 interface Activity {
   enteredAt: string;
   payorId: string;
@@ -261,10 +325,10 @@ interface Activity {
 
 /** Map one parsed snapshot to AR rows. See the header for every rule encoded here. */
 export function mapSnapshot(tables: SnapshotTables): ArMapped {
-  // A snapshot without its two core tables is a BROKEN EXPORT, not an empty book: fail loud (the cron
-  // records parse_failed) instead of mapping to zero claims and stale-marking every live claim.
-  tables.require('B_CHARGE');
-  tables.require('B_CLAIM');
+  // A snapshot without its two core tables — or with a renamed money/identity column — is a BROKEN
+  // EXPORT, not an empty book: fail loud (the cron records parse_failed and writes NOTHING) instead
+  // of mapping the book to $0 and stale-marking every live claim. See assertSnapshotShape.
+  assertSnapshotShape(tables);
   const skips: Record<string, number> = {};
 
   // Lookups ------------------------------------------------------------------------------------
@@ -688,15 +752,36 @@ export function mapSnapshot(tables: SnapshotTables): ArMapped {
  * (PR) adjustments are excluded — they are a patient balance, not a denial — unless CMD flagged the
  * row DENIAL. Remark codes (kind 'R') carry no money and are excluded here (they render in the
  * drawer's remit table instead).
+ *
+ * ⚠ `items` AND `hasDenial` ANSWER TWO DIFFERENT QUESTIONS, AND CONFLATING THEM MADE THE "DENIED"
+ * TILE MEANINGLESS (fixed 2026-09-10, pre-release review).
+ *
+ *   items     = every CO / PI / OA adjustment on the claim. This is an ADJUSTMENTS roll-up, which is
+ *               what the drawer renders it as, and it is broad ON PURPOSE — the operator wants to see
+ *               the CAS reasons whatever they are.
+ *   hasDenial = CMD's own DENIAL flag on a remittance row (B_REMITTANCE.DENIAL → ArRemitPlain.isDenial).
+ *               NOTHING ELSE.
+ *
+ * hasDenial used to be set by the CO/PI/OA group test as well. CO*45 ("charges exceed fee schedule")
+ * rides on essentially every remitted out-of-network claim, and this repo's own carcDescriptions.ts
+ * calls CO a "Contractual obligation (provider write-off)" — so the red Denied tile silently
+ * degraded into "this claim has ever been remitted", which is close to the whole remitted book. A
+ * tile that is always red tells an AR rep nothing and trains them to ignore it.
+ *
+ * A group code describes WHO absorbs an adjustment, never whether the payer refused the claim.
+ * If a broader "payer took an adjustment" signal is ever wanted, add a SECOND field — do not widen
+ * this one back, or the tile loses its meaning again.
  */
 export function summarizeDenials(remits: readonly ArRemitPlain[]): { items: ArDenialSummaryItem[]; hasDenial: boolean } {
   const agg = new Map<string, { g: string | null; c: string; cents: number; n: number }>();
   let hasDenial = false;
   for (const r of remits) {
     if (r.kind !== 'A') continue;
-    const denialGroup = r.groupCode === 'CO' || r.groupCode === 'PI' || r.groupCode === 'OA';
-    if (!denialGroup && !r.isDenial) continue;
-    if (r.isDenial || denialGroup) hasDenial = true;
+    // Which rows enter the ADJUSTMENTS roll-up (broad, deliberately).
+    const adjustmentGroup = r.groupCode === 'CO' || r.groupCode === 'PI' || r.groupCode === 'OA';
+    if (!adjustmentGroup && !r.isDenial) continue;
+    // Which rows make the claim DENIED (narrow: CMD's flag alone — see the docblock).
+    if (r.isDenial) hasDenial = true;
     const key = `${r.groupCode ?? ''}|${r.code}`;
     const cur = agg.get(key) ?? { g: r.groupCode, c: r.code, cents: 0, n: 0 };
     cur.cents += toCents(r.amount);
