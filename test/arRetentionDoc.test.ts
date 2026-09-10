@@ -84,3 +84,32 @@ test('the purge captures its ids BEFORE deleting ar_claim', () => {
     assert.ok(at >= 0 && at < delClaim, `${child} is deleted before ar_claim`);
   }
 });
+
+test('the retention window is RATIFIED, with both numbers and the column it measures', () => {
+  // Ruled by Alec 2026-09-10. Pinned because a retention policy that quietly reverts to "proposed"
+  // is indistinguishable from never having had one, and this is the obligation an auditor reads.
+  const section = doc.slice(doc.indexOf('### PHI retention and removal'));
+  assert.match(section, /RATIFIED 2026-09-10/, 'the heading states the ruling, not a draft');
+  assert.ok(!/THE WINDOW IS UNRATIFIED|IS ALEC'S CALL AND IS NOT SET/.test(section), 'no draft language survives');
+  assert.match(section, /24 months.*from `last_seen_at`/s, 'the retention period and its column');
+  assert.match(section, /90 days/, 'the offboarding deadline');
+  // last_seen_at is the only column that makes the clock mean "since CMD stopped reporting it".
+  assert.match(section, /`first_seen_at` would purge a long-lived claim/, 'why not first_seen_at');
+  // And the ruling must keep saying that nothing enforces it automatically — that is the design.
+  assert.match(section, /Nothing enforces this yet, and that is deliberate/);
+  assert.match(section, /run by a human/, 'the named mechanism stays manual');
+});
+
+test('the migration header carries the same ratified window as the rule file', () => {
+  // Two copies, deliberately: 0109 is what someone opens when they ask what this plane is, and the
+  // rule file is what loads when they touch the code. They must not disagree about the policy.
+  const sql = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'supabase', 'migrations', '0109_ar_management.sql'),
+    'utf8',
+  );
+  const header = sql.slice(0, sql.indexOf('set role claims_admin;'));
+  assert.match(header, /RULED BY ALEC 2026-09-10/);
+  assert.match(header, /24 months from last_seen_at/);
+  assert.match(header, /within 90 days/);
+  assert.ok(!/unratified/i.test(header), 'the migration header does not still call it unratified');
+});

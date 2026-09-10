@@ -171,7 +171,7 @@ read, so a claim can still only ever reach its own patient's notes. One indexed 
 `(business_entity_id, cmd_patient_id, noted_at desc) where cmd_claim_id is null` would cut that if
 it ever matters.
 
-### PHI retention and removal — THE WINDOW IS UNRATIFIED (drafted 2026-09-10)
+### PHI retention and removal — RATIFIED 2026-09-10
 
 This plane is a **permanent, growing PHI replica**, by design rather than oversight: 2,415 patients'
 encrypted identity, 58,830 claims, 103,367 remits and 15,010 CMD staff notes across 19 accounts,
@@ -186,11 +186,25 @@ roster in the month CLAUDE.md documents, so this is a live path, not a hypotheti
 removal tool that existed was `0109_ar_management_rollback.sql`, which drops the plane for all 19
 accounts — no per-facility or per-patient path for an amendment or a records request.
 
-⚠ **THE WINDOW IS ALEC'S CALL AND IS NOT SET.** Pending that ruling the proposed default is: keep
-non-current rows **24 months** from `last_seen_at`; purge an offboarded facility within **90 days**
-of its removal from `AR_SNAPSHOT_CUSTOMERS`. 24 months is derived from the queue's own bands — it
-exposes 1–2yr and 2yr+, so purging inside that would delete rows the tab exists to show — plus a
-margin. A starting point, not a recommendation carrying authority.
+**THE WINDOW, RULED BY ALEC 2026-09-10 — this is the policy, not a proposal:**
+
+- **Keep non-current rows for 24 months** from `last_seen_at`, then purge.
+- **Purge an offboarded facility within 90 days** of its removal from `AR_SNAPSHOT_CUSTOMERS`.
+
+24 months is derived from the queue's own bands rather than picked: the tab exposes 1–2yr and 2yr+,
+so any window shorter than two years would delete rows the queue exists to show, and the margin
+above 730 days covers a claim that ages in near the boundary.
+
+Two consequences of the ruling that are easy to miss:
+
+- **A 24-month clock needs something to measure, and `last_seen_at` is the only honest column.**
+  `first_seen_at` would purge a long-lived claim that CMD is still reporting, and `dos_from` is a
+  clinical date that has no bearing on how long we have held the record. `last_seen_at` advances on
+  every ingest that still carries the row, so the clock only starts once CMD stops reporting it.
+- **Nothing enforces this yet, and that is deliberate.** There is no retention cron and none is
+  wanted (see THE MECHANISM below). The window is a stated obligation with a named tool, which is
+  what makes it auditable; a scheduled PHI deleter with no alerting behind it would be a worse
+  failure mode than holding data slightly too long. Whoever offboards a facility runs the purge.
 
 **THE MECHANISM: a scoped migration at offboarding, run by a human.** Deliberately NOT a cron. An
 automatic PHI deleter is a worse failure mode than retention, and this repo has no alerting that

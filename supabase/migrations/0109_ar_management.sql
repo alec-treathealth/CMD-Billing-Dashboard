@@ -51,8 +51,10 @@
 -- claims.ar_patient indefinitely, and there is no per-patient path for an amendment or a records
 -- request. The rollback script drops the plane for ALL accounts and is not that path.
 --
--- The retention WINDOW is unratified as of 2026-09-10 (proposed default: 24 months from
--- last_seen_at; an offboarded facility purged within 90 days). The per-facility purge statements,
+-- RETENTION WINDOW, RULED BY ALEC 2026-09-10: keep non-current rows 24 months from last_seen_at;
+-- purge an offboarded facility within 90 days of its removal from AR_SNAPSHOT_CUSTOMERS. Nothing
+-- enforces this automatically and nothing should — the purge is run by a human at offboarding.
+-- The per-facility purge statements,
 -- their dependency order, and the two traps that make a naive purge wrong — ar_patient is unique per
 -- TENANT so it must not be deleted by customer, and notes are patient-level so a claim-only delete
 -- leaves the bodies behind — are in .claude/rules/billing-audit.md under
