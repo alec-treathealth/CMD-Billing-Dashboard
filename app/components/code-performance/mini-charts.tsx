@@ -93,7 +93,7 @@ export function TopPairingsChart({ rows, limit = 6 }: { rows: readonly CodePerfP
                     aria-label={`${pairLabel(r)}: billed ${fmtMoney(r.billed)}, collected ${fmtMoney(r.collected)}`}
                     className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal500"
                   >
-                    <span className="ths-num w-40 shrink-0 truncate text-[11px] text-ink600">{pairLabel(r)}</span>
+                    <span className="ths-num w-28 shrink-0 truncate text-[11px] text-ink600">{pairLabel(r)}</span>
                     <span className="h-3 flex-1 overflow-hidden rounded-full bg-[var(--brand-soft)]">
                       <span className="flex h-full rounded-full bg-[var(--brand-accent)]" style={{ width: `${Math.max(billedPct, 2)}%` }}>
                         <span className="h-full rounded-full bg-[var(--brand-ink)]" style={{ width: `${collectedPct}%` }} />
@@ -318,7 +318,7 @@ export function FacilityMixChart({
                     aria-label={`${label}: billed ${fmtMoney(o.billed)}, ${fmtInt(o.charges)} charges`}
                     className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal500"
                   >
-                    <span className={`w-40 shrink-0 truncate text-[11px] ${o.facility === null ? 'italic text-ink400' : 'text-ink600'}`}>{label}</span>
+                    <span className={`w-28 shrink-0 truncate text-[11px] ${o.facility === null ? 'italic text-ink400' : 'text-ink600'}`}>{label}</span>
                     <span className="h-3 flex-1 overflow-hidden rounded-full bg-[var(--brand-soft)]">
                       <span
                         className={`block h-full rounded-full ${active === i ? 'bg-[var(--brand-ink)]' : 'bg-[var(--brand-accent)]'}`}

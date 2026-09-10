@@ -21,7 +21,7 @@ import type { CodeDescriptionMap, CodePerfPairingRow, CodePerfSummary } from '..
 import { CODE_PERF_SUPPRESSION_REASONS } from '../../src/collections/codePerformanceQuery.js';
 import { DEFAULT_PAIRING_SORT, nextSort, PairingTable, sortPairingRows, pairKeyOf } from '../components/code-performance/pairing-table';
 import { MaturityBanner, KpiGrid } from '../components/code-performance/kpi-grid';
-import { FacilityTable, PayerTable, firstIncompleteMonth } from '../components/code-performance/pair-drilldown';
+import { CHART_BY_TENANT, FacilityTable, PayerTable, firstIncompleteMonth } from '../components/code-performance/pair-drilldown';
 import { DefinitionsPanel } from '../components/code-performance/definitions-panel';
 import { fmtMoney, fmtPct } from '../components/code-performance/format';
 import {
@@ -411,4 +411,71 @@ test('the table paints its OWN background, so it cannot end mid-scroll', () => {
   // contain divs, so the check is for that pairing rather than for the absence of any div.
   const stranding = (html.match(/<div[^>]*>/g) ?? []).filter((d) => d.includes('bg-card') && d.includes('border-line'));
   assert.deepEqual(stranding, [], 'a div carrying the fill would strand it at the scroll-container edge');
+});
+
+/* ── the drill-down: tenant colour, and being navigated to ────────────────────────────────────── */
+
+/**
+ * The chart hardcoded the CONSOLIDATED teal, so it painted teal on every tenant while the rest of
+ * the route resolved `--brand-*` from `data-view` — a tenant's number wearing another tenant's
+ * colour. It must stay literal hex (recharts writes SVG attributes, where a CSS var is unreliable),
+ * so the only thing that can keep it honest is asserting it MIRRORS globals.css.
+ */
+test('the drill-down chart bar colour mirrors each tenant brand-ink in globals.css', () => {
+  const css = readFileSync(join(here, '..', 'app', 'globals.css'), 'utf8');
+  const inkFor = (view: string): string | null => {
+    const block = css.slice(css.indexOf(`[data-view='${view}']`));
+    const m = block.slice(0, 400).match(/--brand-ink:\s*(#[0-9a-fA-F]{6})/);
+    return m?.[1]?.toLowerCase() ?? null;
+  };
+  for (const tenant of ['bxr', 'indigo'] as const) {
+    const ink = inkFor(tenant);
+    assert.ok(ink, `globals.css has no --brand-ink for ${tenant}`);
+    assert.equal(
+      CHART_BY_TENANT[tenant].billed.toLowerCase(),
+      ink,
+      `${tenant}: the chart bar must be that tenant's brand ink`,
+    );
+  }
+  // And it must not be the consolidated teal, which is what it used to be for everyone.
+  const consolidated = inkFor('consolidated');
+  for (const tenant of ['bxr', 'indigo'] as const) {
+    assert.notEqual(CHART_BY_TENANT[tenant].billed.toLowerCase(), consolidated, `${tenant} is wearing the consolidated colour`);
+  }
+});
+
+/**
+ * Opening a row must MOVE the reader to what it opened. The panel renders below a full-height table
+ * inside the same scroller, so revealing it off-screen looked like the chevron did nothing. Focus is
+ * the mechanism (it scrolls, and a screen reader's position follows); `scroll-mt` keeps it clear of
+ * the sticky header. Asserted on the view SOURCE because the behaviour needs a real scrollport.
+ */
+test('view source: expanding a row moves focus to the drill-down, and it clears the sticky header', () => {
+  const raw = readFileSync(join(here, '..', 'components', 'code-performance', 'code-performance-view.tsx'), 'utf8');
+  const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.match(src, /const drilldownRef = useRef<HTMLElement \| null>\(null\);/, 'a ref on the panel');
+  assert.match(
+    src,
+    /useEffect\(\(\) => \{\s*if \(expanded === null\) return;\s*drilldownRef\.current\?\.focus\(\);\s*\}, \[expanded\]\);/,
+    'focus moves on EXPAND only — collapsing must not yank focus',
+  );
+  assert.match(src, /ref=\{drilldownRef\}\s*tabIndex=\{-1\}/, 'the panel is a programmatic focus target');
+  assert.match(src, /className="scroll-mt-12 space-y-2"/, 'and it clears the sticky header when scrolled to');
+});
+
+/**
+ * The two layout levers and the horizontal-scroll fix. A flex item's `min-width:auto` refuses to
+ * shrink below its content, and this column holds a `w-max` table — so without `min-w-0` the column
+ * grew past `main`, the DOCUMENT scrolled sideways, and the pinned KPI header rode off-screen with
+ * it. The symptom reads as a sticky bug and is a min-width bug, which is why it is pinned here.
+ */
+test('view source: the table column cannot blow out its container, and the charts are a landmark', () => {
+  const raw = readFileSync(join(here, '..', 'components', 'code-performance', 'code-performance-view.tsx'), 'utf8');
+  const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.match(src, /flex min-h-0 min-w-0 flex-1 flex-col/, 'the table column carries min-w-0');
+  assert.match(src, /min-h-0 min-w-0 flex-1 overflow-auto/, 'so does the scroller itself');
+  assert.match(src, /<aside\s+id="cp-charts"\s+aria-label="Summary charts"/, 'the charts are a LABELLED complementary landmark');
+  // Conditionally rendered, never `hidden` — a display:flex class beats the hidden attribute.
+  assert.match(src, /\{chartsOpen && \(/, 'the sidebar unmounts rather than relying on [hidden]');
+  assert.equal(/<aside[^>]*\shidden/.test(src), false, 'a hidden aside carrying display:flex would stay visible');
 });

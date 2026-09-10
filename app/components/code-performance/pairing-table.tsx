@@ -27,8 +27,8 @@
  * region needs a hard-coded pixel offset for the second, which silently breaks the moment a code
  * description wraps to a different width.
  */
-import { useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Columns3 } from 'lucide-react';
+import { useMemo } from 'react';
+import { ChevronDown, ChevronRight, Columns3, PanelRight } from 'lucide-react';
 
 import { MiniBar } from '@/components/dashboard/widgets';
 import { displayCell } from '@/lib/phi';
@@ -95,6 +95,7 @@ export function PairingTable({
   onSort,
   expandedKey,
   onToggle,
+  dense = false,
 }: {
   rows: readonly CodePerfPairingRow[];
   descriptions: CodeDescriptionMap;
@@ -105,9 +106,10 @@ export function PairingTable({
   onSort: (key: PairingSortKey) => void;
   expandedKey: string | null;
   onToggle: (key: string) => void;
+  /** Owned by the view, because the control that sets it is PINNED outside this table's scroller. */
+  dense?: boolean;
 }) {
   const sorted = useMemo(() => sortPairingRows(rows, sort), [rows, sort]);
-  const [dense, setDense] = useState(false);
   const dimYield = immatureWindow;
   const sortProps = (key: PairingSortKey) => ({
     sortKey: key,
@@ -120,24 +122,7 @@ export function PairingTable({
   const columns = dense ? 16 : 13;
 
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs text-ink600">
-          {fmtInt(sorted.length)} pairing{sorted.length === 1 ? '' : 's'} · sorted by {sort.key.replace(/_/g, ' ')}{' '}
-          {sort.direction === 'desc' ? 'high to low' : 'low to high'}
-        </p>
-        <button
-          type="button"
-          aria-pressed={dense}
-          onClick={() => setDense((d) => !d)}
-          className="inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 text-xs font-medium text-ink600 transition-colors hover:bg-teal50 hover:text-teal900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal500"
-        >
-          <Columns3 aria-hidden className="h-3.5 w-3.5" />
-          {dense ? 'Fewer columns' : 'All columns'}
-        </button>
-      </div>
-
-      <LocalTable label="Billing-code pairings">
+    <LocalTable label="Billing-code pairings">
         <thead>
           <tr>
             <LTh stick>Code</LTh>
@@ -295,7 +280,68 @@ export function PairingTable({
             );
           })}
         </tbody>
-      </LocalTable>
+    </LocalTable>
+  );
+}
+
+/**
+ * The table's toolbar — row count, active sort, and the density control.
+ *
+ * ⚠️ IT IS RENDERED BY THE VIEW, PINNED, AND NOT BY THE TABLE (2026-09-10). It used to sit inside
+ * the same box as the table, which put it inside the HORIZONTAL scroller: a `justify-between` row
+ * inside a `w-max` content box right-aligns against the TABLE's width, not the viewport's, so the
+ * "All columns" button lived off-screen and slid past as the reader scrolled sideways looking for it.
+ * Pinned above the scroller it stays where it was reached for. That is also why `dense` is the view's
+ * state — the control and the table it governs are now in different boxes.
+ */
+export function PairingToolbar({
+  count,
+  sort,
+  dense,
+  onDenseChange,
+  chartsOpen,
+  onChartsChange,
+}: {
+  count: number;
+  sort: PairingSort;
+  dense: boolean;
+  onDenseChange: (next: boolean) => void;
+  /** Omit both to hide the sidebar control — the table renders standalone in tests. */
+  chartsOpen?: boolean;
+  onChartsChange?: (next: boolean) => void;
+}) {
+  const btn =
+    'inline-flex min-h-[36px] items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 text-xs font-medium text-ink600 transition-colors hover:bg-teal50 hover:text-teal900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal500';
+  return (
+    <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
+      <p className="text-xs text-ink600">
+        {fmtInt(count)} pairing{count === 1 ? '' : 's'} · sorted by {sort.key.replace(/_/g, ' ')}{' '}
+        {sort.direction === 'desc' ? 'high to low' : 'low to high'}
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        {/* ⚠️ THE TWO LAYOUT CONTROLS SIT TOGETHER, and the sidebar one exists because the sidebar
+            COSTS the table 21rem. Thirteen columns want about 1900px; a 1680px window minus the
+            sidebar leaves roughly 1260, so more of the table sits off-screen than before the charts
+            moved. Rather than choose for the reader, both levers are here: drop the analytical
+            columns, or reclaim the sidebar's width. Neither hides data — the charts are derived from
+            what the table already shows. */}
+        {onChartsChange !== undefined && (
+          <button
+            type="button"
+            aria-expanded={chartsOpen ?? true}
+            aria-controls="cp-charts"
+            onClick={() => onChartsChange(!(chartsOpen ?? true))}
+            className={btn}
+          >
+            <PanelRight aria-hidden className="h-3.5 w-3.5" />
+            {chartsOpen ?? true ? 'Hide charts' : 'Show charts'}
+          </button>
+        )}
+        <button type="button" aria-pressed={dense} onClick={() => onDenseChange(!dense)} className={btn}>
+          <Columns3 aria-hidden className="h-3.5 w-3.5" />
+          {dense ? 'Fewer columns' : 'All columns'}
+        </button>
+      </div>
     </div>
   );
 }

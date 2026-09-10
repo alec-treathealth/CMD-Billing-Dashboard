@@ -41,7 +41,15 @@ import { fmtInt, fmtIsoDate } from './format';
 import { FacilityMixChart, TopPairingsChart, YieldHistogram } from './mini-charts';
 import { KpiGrid, MaturityBanner, Notice, TenantToggle, WindowSelector } from './kpi-grid';
 import { PairDrilldown } from './pair-drilldown';
-import { DEFAULT_PAIRING_SORT, nextSort, pairKeyOf, PairingTable, type PairingSort, type PairingSortKey } from './pairing-table';
+import {
+  DEFAULT_PAIRING_SORT,
+  nextSort,
+  pairKeyOf,
+  PairingTable,
+  PairingToolbar,
+  type PairingSort,
+  type PairingSortKey,
+} from './pairing-table';
 
 type BoardState =
   | { status: 'loading' }
@@ -60,6 +68,11 @@ export function CodePerformanceView({ tenants, defaultTenant }: { tenants: CodeP
   const [facilities, setFacilities] = useState<string[]>([]);
   const [board, setBoard] = useState<BoardState>({ status: 'loading' });
   const [sort, setSort] = useState<PairingSort>(DEFAULT_PAIRING_SORT);
+  // Owned here, not in PairingTable: the control that sets it is PINNED outside the table's scroller.
+  const [dense, setDense] = useState(false);
+  // The sidebar costs the table 21rem, so it is a lever rather than a fixed decision. Not persisted
+  // — the standing rule is no localStorage and no cookies on this surface.
+  const [chartsOpen, setChartsOpen] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [details, setDetails] = useState<Record<string, DetailState>>({});
   const facilityKey = facilities.join(FACILITY_KEY_SEPARATOR);
@@ -70,6 +83,8 @@ export function CodePerformanceView({ tenants, defaultTenant }: { tenants: CodeP
   // promise that is already in flight (Qodo #346 finding 5). Every scope change bumps the generation;
   // a completion whose generation is stale is dropped, success and error alike.
   const scopeGen = useRef(0);
+  /** The revealed drill-down, so opening a row can MOVE the reader to it. See the effect below. */
+  const drilldownRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -92,6 +107,25 @@ export function CodePerformanceView({ tenants, defaultTenant }: { tenants: CodeP
     // facilityKey stands in for the array's identity on purpose (a fresh array each render).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tenant, window, facilityKey]);
+
+  /**
+   * OPENING A ROW NAVIGATES TO WHAT IT OPENED.
+   *
+   * The drill-down renders BELOW a full-height table inside the same scroller, so expanding a row
+   * used to reveal it off-screen: the chevron changed direction and nothing else appeared to happen,
+   * and the reader had to scroll a 13-column table's worth of rows to find what they had just asked
+   * for. This moves FOCUS to the panel rather than only scrolling it, which does three jobs at once
+   * — the browser scrolls it into view, a screen reader's reading position follows it instead of
+   * staying on the chevron, and `scroll-mt` on the section keeps it clear of the sticky header.
+   *
+   * Runs on expand ONLY; collapsing leaves focus where the reader put it. `expanded` is the pairing
+   * key, so re-opening a DIFFERENT row re-fires and re-navigates, which is what a reader clicking
+   * down a list wants.
+   */
+  useEffect(() => {
+    if (expanded === null) return;
+    drilldownRef.current?.focus();
+  }, [expanded]);
 
   const rowsByKey = useMemo(() => {
     const m = new Map<string, CodePerfPairingRow>();
@@ -212,55 +246,108 @@ export function CodePerformanceView({ tenants, defaultTenant }: { tenants: CodeP
 
           <KpiGrid board={ready} />
 
-          {/* ── THE ONE SCROLL AREA ──────────────────────────────────────────────────────────────
-              `min-h-0` is load-bearing: a flex child's default `min-height:auto` refuses to shrink
-              below its content, so without it `flex-1` resolves to CONTENT height and the document
-              scrolls again — the exact defect this layout replaces. `overflow-auto` on this one
-              element is also what makes the table's `sticky` header and identity column resolve,
-              since sticky positions against the nearest scrollport. */}
-          <div className="min-h-0 flex-1 overflow-auto">
-            <div className="space-y-3 pb-1 pr-0.5">
-              <div className="grid gap-2 lg:grid-cols-3">
-                <TopPairingsChart rows={ready.rows} />
-                <YieldHistogram rows={ready.rows} />
-                {/* `facilityOptions` is the PICKER's vocabulary and ignores the facility filter by
-                    design, so the chart is handed the active selection and scopes itself to it —
-                    otherwise it draws every site while the KPIs and table show two. */}
-                <FacilityMixChart options={ready.facilityOptions} facilitiesApplied={ready.facilitiesApplied} />
-              </div>
+          {/* ── TWO COLUMNS: the table reads, the charts stay visible ────────────────────────────
+              The charts used to stack ABOVE the table, which cost ~300px of vertical space on a
+              route that bounds itself to the viewport — so the table opened with about three rows
+              showing and everything was a scroll. On a 1800px surface that space is available
+              HORIZONTALLY. Below `lg` they stack, because a 21rem sidebar beside a 13-column table
+              is not a phone layout.
 
-              <PairingTable
-                rows={ready.rows}
-                descriptions={ready.descriptions}
-                summary={ready.summary}
-                immatureWindow={ready.immatureWindow}
+              ⚠️ `min-w-0` ON BOTH FLEX ITEMS, and it is the horizontal twin of the `min-h-0` note
+              below. A flex item's default `min-width:auto` refuses to shrink below its CONTENT's
+              min-content width, and this column contains a `w-max` table — so without it the column
+              grew wider than `main`, `main` overflowed, and the DOCUMENT scrolled sideways, carrying
+              the pinned KPI header off-screen with it. The symptom read as "the KPIs move when I
+              scroll the table", which sounds like a sticky bug and is a min-width bug. */}
+          <div className="flex min-h-0 flex-1 flex-col gap-3 lg:flex-row">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
+              {/* PINNED above the scroller — see the note on PairingToolbar for why it cannot live
+                  inside it. */}
+              <PairingToolbar
+                count={ready.rows.length}
                 sort={sort}
-                onSort={(k: PairingSortKey) => setSort((s) => nextSort(s, k))}
-                expandedKey={expanded}
-                onToggle={toggle}
+                dense={dense}
+                onDenseChange={setDense}
+                chartsOpen={chartsOpen}
+                onChartsChange={setChartsOpen}
               />
 
-              {expanded && expandedRow && (
-                <section aria-label="Pairing drill-down" className="space-y-2">
-                  <h2 className="text-base font-semibold text-ink900">
-                    {expandedRow.hcpcs ?? 'No procedure code'}
-                    {expandedRow.loc_suffix ? ` (${expandedRow.loc_suffix})` : ''} × {expandedRow.revcode ?? 'No revenue code'}
-                  </h2>
-                  {(!detail || detail.status === 'loading') && (
-                    <div className="space-y-2" aria-busy="true">
-                      <Skeleton className="h-6 w-1/2" />
-                      <Skeleton className="h-40 w-full" />
-                    </div>
-                  )}
-                  {detail?.status === 'error' && <Notice tone="warn">The drill-down could not be loaded right now.</Notice>}
-                  {detail?.status === 'ready' && (
-                    <PairDrilldown detail={detail.detail} summary={ready.summary} freshness={ready.freshness} dim={ready.immatureWindow} />
-                  )}
-                </section>
-              )}
+              {/* ⚠️ `min-h-0` is load-bearing: a flex child's default `min-height:auto` refuses to
+                  shrink below its content, so without it `flex-1` resolves to CONTENT height and the
+                  document scrolls again. `overflow-auto` on this one element is also what makes the
+                  table's `sticky` header and identity column resolve, since sticky positions against
+                  the nearest scrollport. */}
+              <div className="min-h-0 min-w-0 flex-1 overflow-auto">
+                <div className="space-y-3 pb-1">
+                  <PairingTable
+                    rows={ready.rows}
+                    descriptions={ready.descriptions}
+                    summary={ready.summary}
+                    immatureWindow={ready.immatureWindow}
+                    sort={sort}
+                    onSort={(k: PairingSortKey) => setSort((s) => nextSort(s, k))}
+                    expandedKey={expanded}
+                    onToggle={toggle}
+                    dense={dense}
+                  />
 
-              <DefinitionsPanel rows={ready.rows} descriptions={ready.descriptions} />
+                  {expanded && expandedRow && (
+                    <section
+                      ref={drilldownRef}
+                      tabIndex={-1}
+                      aria-label="Pairing drill-down"
+                      className="scroll-mt-12 space-y-2"
+                    >
+                      <h2 className="text-base font-semibold text-ink900">
+                        {expandedRow.hcpcs ?? 'No procedure code'}
+                        {expandedRow.loc_suffix ? ` (${expandedRow.loc_suffix})` : ''} × {expandedRow.revcode ?? 'No revenue code'}
+                      </h2>
+                      {(!detail || detail.status === 'loading') && (
+                        <div className="space-y-2" aria-busy="true">
+                          <Skeleton className="h-6 w-1/2" />
+                          <Skeleton className="h-40 w-full" />
+                        </div>
+                      )}
+                      {detail?.status === 'error' && <Notice tone="warn">The drill-down could not be loaded right now.</Notice>}
+                      {detail?.status === 'ready' && (
+                        <PairDrilldown
+                          detail={detail.detail}
+                          summary={ready.summary}
+                          freshness={ready.freshness}
+                          dim={ready.immatureWindow}
+                          tenant={ready.tenant}
+                        />
+                      )}
+                    </section>
+                  )}
+
+                  <DefinitionsPanel rows={ready.rows} descriptions={ready.descriptions} />
+                </div>
+              </div>
             </div>
+
+            {/* A LABELLED COMPLEMENTARY LANDMARK, not a styled div. `<aside aria-label>` is what puts
+                these charts in a screen reader's landmark list, so they can be jumped to and skipped
+                past instead of being read as a wall of buttons between the toolbar and the table. */}
+            {/* ⚠️ CONDITIONALLY RENDERED, not `hidden`. The `hidden` ATTRIBUTE is a UA-level
+                `display:none`, and this element carries `display:flex` from a class — the class wins
+                on specificity, so a `hidden` aside would stay visible and the collapse would appear
+                to do nothing. Nothing is lost by unmounting it: every figure in these charts is
+                derived from the table that remains on screen. */}
+            {chartsOpen && (
+            <aside
+              id="cp-charts"
+              aria-label="Summary charts"
+              className="flex min-h-0 shrink-0 flex-col gap-2 overflow-auto lg:w-[21rem]"
+            >
+              <TopPairingsChart rows={ready.rows} limit={6} />
+              <YieldHistogram rows={ready.rows} />
+              {/* `facilityOptions` is the PICKER's vocabulary and ignores the facility filter by
+                  design, so the chart is handed the active selection and scopes itself to it —
+                  otherwise it draws every site while the KPIs and table show two. */}
+              <FacilityMixChart options={ready.facilityOptions} facilitiesApplied={ready.facilitiesApplied} limit={6} />
+            </aside>
+            )}
           </div>
         </>
       )}

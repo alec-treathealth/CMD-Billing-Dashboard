@@ -26,6 +26,7 @@ import type {
   CodePerfPairDetail,
   CodePerfPayerRow,
   CodePerfSummary,
+  CodePerfTenant,
 } from '@/lib/code-performance/contract';
 
 import { fmtDays, fmtInt, fmtIsoDate, fmtMoney, fmtMonth, fmtPct } from './format';
@@ -35,7 +36,27 @@ import { LocalTable, LTd, LTh } from './local-table';
 const cell = (column: string, v: unknown): string => displayCell(column, v, false);
 
 // Functional chart colours (design-system: charts keep multi-series colours; brand vars stay on chrome).
-const CHART = { billed: '#135E5A', allowedRate: '#E2674F', incomplete: '#E4E9E6', grid: '#E4E9E6' } as const;
+/**
+ * ⚠️ THE BARS FOLLOW THE TENANT, AND THEY DID NOT (2026-09-10). This was one constant with
+ * `billed: '#135E5A'` — the CONSOLIDATED teal — so the drill-down chart painted teal on every
+ * tenant while every other visual on the route resolves `--brand-*` from `data-view`. On Indigo the
+ * whole page is violet and this chart was BXR-adjacent teal; on BXR it should be navy and was also
+ * teal. A tenant's number wearing another tenant's colour is the exact confusion `data-view` exists
+ * to prevent.
+ *
+ * It is literal hex rather than `var(--brand-ink)` because recharts passes these into SVG
+ * `fill`/`stroke` ATTRIBUTES, where a CSS variable is unreliable — which is why this module is the
+ * one the source sweep exempts from the no-hex rule. The values MIRROR globals.css's
+ * `[data-view=...]` blocks; if those change, change these.
+ *
+ * The rate LINE stays coral on every tenant on purpose: it is the second series and has to remain
+ * distinguishable from the bars, and BXR's own accent is a brass that would sit too close to them.
+ */
+export const CHART_BY_TENANT: Record<CodePerfTenant, { billed: string; allowedRate: string }> = {
+  bxr: { billed: '#1a1a2e', allowedRate: '#e2674f' },
+  indigo: { billed: '#5b2a9e', allowedRate: '#e2674f' },
+};
+const CHART_NEUTRAL = { incomplete: '#E4E9E6', grid: '#E4E9E6' } as const;
 
 function MetricHeaders({ summary, dim }: { summary: CodePerfSummary; dim: boolean }) {
   return (
@@ -175,7 +196,17 @@ export function firstIncompleteMonth(months: readonly CodePerfMonthRow[]): strin
   return months.find((m) => m.incomplete)?.month ?? null;
 }
 
-export function MonthlyChart({ months, freshness }: { months: CodePerfMonthRow[]; freshness: CodePerfFreshness }) {
+export function MonthlyChart({
+  months,
+  freshness,
+  tenant,
+}: {
+  months: CodePerfMonthRow[];
+  freshness: CodePerfFreshness;
+  /** Selects the bar colour so a tenant's chart wears its own brand — see CHART_BY_TENANT. */
+  tenant: CodePerfTenant;
+}) {
+  const CHART = { ...CHART_BY_TENANT[tenant], ...CHART_NEUTRAL };
   const data = months.map((m) => ({ ...m, label: fmtMonth(m.month) }));
   const firstIncomplete = firstIncompleteMonth(months);
   const last = months[months.length - 1];
@@ -225,14 +256,19 @@ export function PairDrilldown({
   summary,
   freshness,
   dim,
+  tenant,
 }: {
   detail: CodePerfPairDetail;
   summary: CodePerfSummary;
   freshness: CodePerfFreshness;
   dim: boolean;
+  /** Selects the chart's bar colour — see CHART_BY_TENANT. */
+  tenant: CodePerfTenant;
 }) {
   return (
-    <div className="space-y-6 rounded-lg border border-teal200 bg-teal50/30 p-4">
+    // The panel wash follows the tenant too. `bg-[var(--brand-soft)]` SOLID, never with an alpha
+    // suffix — `bg-[var(--x)]/30` emits no rule at all (repo-wide guard).
+    <div className="space-y-6 rounded-lg border border-line bg-[var(--brand-soft)] p-4">
       <section className="space-y-2">
         <h3 className="text-sm font-semibold text-ink900">Payers</h3>
         <PayerTable rows={detail.payers} summary={summary} dim={dim} />
@@ -243,7 +279,7 @@ export function PairDrilldown({
       </section>
       <section className="space-y-2">
         <h3 className="text-sm font-semibold text-ink900">By month</h3>
-        <MonthlyChart months={detail.monthly} freshness={freshness} />
+        <MonthlyChart months={detail.monthly} freshness={freshness} tenant={tenant} />
       </section>
     </div>
   );
