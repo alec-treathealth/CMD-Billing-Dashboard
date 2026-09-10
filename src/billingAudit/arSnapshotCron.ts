@@ -311,8 +311,8 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
       // overnight drop has no benign explanation. It can only ever be tightened; loosening it means
       // deciding that halving a facility's book unremarked is acceptable.
       const baseline = lastClaimsSeen.get(`${entity}:${customer.customerId}`) ?? 0;
-      const floor = baseline > 0 ? Math.floor(baseline * (deps.emptyRegressionRatio ?? AR_EMPTY_REGRESSION_RATIO)) : 0;
-      const shortfall = mapped.claims.length === 0 || (baseline > 0 && mapped.claims.length < floor);
+      const threshold = baseline > 0 ? baseline * (deps.emptyRegressionRatio ?? AR_EMPTY_REGRESSION_RATIO) : 0;
+      const shortfall = mapped.claims.length === 0 || (baseline > 0 && mapped.claims.length < threshold);
       if (shortfall && !deps.expectedEmptyCustomerIds.has(customer.customerId)) {
         const hasLive = await withTenant(deps.writeDb, entity, async (client) => {
           const res = await client.query<{ has_rows: boolean }>(
