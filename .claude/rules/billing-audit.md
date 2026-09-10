@@ -228,7 +228,13 @@ left alone by a purge.
 -- would compare a text column to an integer and abort the transaction with
 -- "operator does not exist: text = integer" before deleting anything.
 --
---   psql -v entity="'af504ab6-...'" -v cust=10033951 -f purge.sql
+-- ⚠ PASS BOTH VALUES BARE. `-v` does NOT dequote, and :'name' escapes-and-wraps whatever it holds,
+-- so a pre-quoted value is quoted twice: `-v entity="'af504…'"` loses the shell's double quotes and
+-- leaves the single ones, and :'entity' then expands to '''af504…'''::uuid → "invalid input syntax
+-- for type uuid". It fails safely (inside `begin;`, before any delete) but an operator who hits it
+-- starts improvising quoting mid-way through an irreversible PHI delete, which is the real hazard.
+--
+--   psql -v entity=af504ab6-3dcd-4aa4-a93c-27bc58de4088 -v cust=10033951 -f purge.sql
 set role claims_admin;
 begin;
 -- Capture (entity, claim, patient) TRIPLES before deleting ar_claim: four tables are reachable only
@@ -260,22 +266,45 @@ delete from claims.ar_snapshot_run where business_entity_id = :'entity'::uuid an
 commit;
 ```
 
-⚠ **TRAP 0 — EVERY PREDICATE CARRIES `business_entity_id`, AND A CMD ID ALONE IS NOT A KEY.** Every
-table in this plane is unique on `(business_entity_id, cmd_*_id)`, never on the CMD id by itself —
-CMD's SEQNOs are per-customer-database, so two accounts can legitimately hold the same claim id. A
-purge matching child rows on `cmd_claim_id` alone would therefore reach another customer's — and,
-once a second tenant exists, another TENANT's — remits, status events, work and change history. And
-nothing else would stop it: this runs as `claims_admin`, which bypasses RLS, so the entity predicate
-in the statement is the only isolation there is.
-**Measured 2026-09-10: zero collisions today, and that is not reassurance.** `ar_claim` currently
-holds exactly ONE `business_entity_id` — Indigo's snapshot endpoint 404s, so no Indigo rows exist —
-which is the only reason the cross-tenant case cannot fire yet. Enabling Indigo is a named
-follow-up. Re-run the collision counts before trusting any purge:
+⚠ **TRAP 0 — A CMD ID ALONE IS NOT A KEY, AND `business_entity_id` ONLY CLOSES HALF THE GAP.** Every
+table here is unique on `(business_entity_id, cmd_*_id)`, never on the CMD id by itself — CMD's
+SEQNOs are per-customer-database, so two accounts can legitimately hold the same claim id. A purge
+matching child rows on `cmd_claim_id` alone would reach another account's remits, status events,
+work rows and change history, and nothing else would stop it: this runs as `claims_admin`, which
+bypasses RLS, so the statement's own predicate is the only isolation there is.
+
+⚠ **BUT DO NOT READ THE ENTITY PREDICATE AS SOLVING THIS.** All 19 roster rows are
+`businessEntityId: BXR_ENTITY_ID` (`arConfig.ts`), so across the BXR accounts `business_entity_id` is
+a **constant** and contributes zero isolation between facilities. It closes the cross-TENANT half
+only — real once Indigo lands. The cross-FACILITY half is closed by `cmd_customer_id`, and the four
+claim-reachable tables (`ar_remit`, `ar_claim_status_event`, `ar_claim_work`, `ar_claim_event`) do
+not carry that column at all. **So if the collision check below ever returns non-zero, this
+documented purge cannot safely run as written** — it would need those four scoped through a join to
+`ar_charge` (which does carry `cmd_customer_id`), and that is a change to make deliberately, not
+under time pressure during an offboarding.
+
+**RUN THIS BEFORE TRUSTING ANY PURGE — and note which table it reads:**
 
 ```sql
-select count(*) from (select cmd_claim_id from claims.ar_claim
-                       group by cmd_claim_id having count(distinct cmd_customer_id) > 1) x;
+-- ar_charge, grouped by (entity, claim): it is unique on cmd_charge_id, so one claim legitimately
+-- has many rows and the HAVING can actually fire. Measured 2026-09-10: 0, with groups reaching 45
+-- rows — a real zero, not an empty grouping.
+select count(*) from (select business_entity_id, cmd_claim_id from claims.ar_charge
+                       group by business_entity_id, cmd_claim_id
+                      having count(distinct cmd_customer_id) > 1) x;
 ```
+
+⚠ **DO NOT run that check against `ar_claim` — it is STRUCTURALLY INCAPABLE of answering.** This file
+carried exactly that version until 2026-09-10 and reported "zero collisions" from it. `ar_claim` is
+unique on `(business_entity_id, cmd_claim_id)`, so grouping by `cmd_claim_id` yields at most one row
+per group (measured: max group size **1**) and `count(distinct cmd_customer_id) > 1` can never be
+true. It was a tautology wearing a measurement's clothes.
+
+Worse, that version misdescribes how a collision would actually appear. Two accounts sharing a claim
+id do **not** produce two rows: the upsert key is `(business_entity_id, cmd_claim_id)` and the update
+set includes `cmd_customer_id` (`arSnapshotWrite.ts`), so the second facility's ingest **overwrites**
+the first's row and the claim silently changes owner. That is a data-integrity failure in its own
+right, independent of any purge, and `ar_claim` cannot show it to you.
 
 ⚠ **TRAP 1 — `ar_patient` must NOT be deleted by `cmd_customer_id`, even though it has that column.**
 The table is `unique (business_entity_id, cmd_patient_id)`: one row per patient per TENANT, with
@@ -295,8 +324,21 @@ purpose. `ar_claim_note.cmd_customer_id` is `not null` on every row and is stamp
 ingest and `ar_add_note`, so scoping by customer is correct AND complete. Verified by measurement:
 WRC's 13 notes are 2 claim-level + 11 patient-level, and all 13 carry the customer id.
 
-⚠ **TRAP 3 — remove the facility from `AR_SNAPSHOT_CUSTOMERS` (`src/billingAudit/arConfig.ts`) in the
-same change**, or the next 14:05 ingest re-creates everything the purge just deleted.
+⚠ **TRAP 3 — TAKE THE FACILITY OFF THE ROSTER IN THE SAME CHANGE**, or the next 14:05 ingest
+re-creates everything the purge just deleted. This is the one instruction whose failure silently
+undoes the whole purge.
+
+**There are TWO edit points, and for 17 of the 19 accounts it is not the obvious one.**
+`AR_SNAPSHOT_CUSTOMERS` (`src/billingAudit/arConfig.ts`) is
+`[...AUDIT_CONSOLIDATED_CUSTOMERS, TREAT_CO, HOUSTON_MH]` — so only those last two are removable
+there. The other 17, **including WRC (10033951), the worked example above**, live in
+`AUDIT_CONSOLIDATED_CUSTOMERS` (`src/billingAudit/auditConfig.ts`) and can only be removed from that
+list.
+
+⚠ And removing one from the audit roster also drops it from the `billing-audit-consolidated` cron,
+which is a **separate product decision**, not a side effect of retention. If that account should
+keep its claim audit while leaving AR, the rosters need splitting first — do that deliberately
+rather than discovering it after the ingest re-populates the plane.
 
 Every statement above was **rehearsed read-only** in its `select count(*)` form on 2026-09-10 and
 resolves correctly. Do that again before running it for real: nothing here is reversible and this

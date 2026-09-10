@@ -113,3 +113,49 @@ test('the migration header carries the same ratified window as the rule file', (
   assert.match(header, /within 90 days/);
   assert.ok(!/unratified/i.test(header), 'the migration header does not still call it unratified');
 });
+
+test('the documented psql invocation passes BOTH values bare — pre-quoting breaks it', () => {
+  // `-v` does not dequote, and :'name' escapes-and-wraps whatever it holds, so a pre-quoted value is
+  // quoted twice: -v entity="'af504…'" loses the shell's double quotes, keeps the single ones, and
+  // :'entity' expands to '''af504…'''::uuid -> "invalid input syntax for type uuid". It aborts inside
+  // `begin;` so nothing is deleted, but an operator then improvises quoting mid-PHI-delete.
+  // Read the RAW block: the invocation lives in a `--` comment, which stripSql would remove.
+  const raw = purgeBlock();
+  const inv = raw.split('\n').find((l) => /psql .*-v /.test(l));
+  assert.ok(inv, 'the block documents how to invoke it');
+  const entity = /-v\s+entity=(\S+)/.exec(inv)?.[1];
+  const cust = /-v\s+cust=(\S+)/.exec(inv)?.[1];
+  assert.ok(entity && cust, `both parameters are shown: ${inv.trim()}`);
+  for (const [name, v] of [['entity', entity], ['cust', cust]] as const) {
+    assert.ok(!/^["']/.test(v), `-v ${name}= must be bare, got ${v}`);
+  }
+});
+
+test('the collision check reads ar_charge, never ar_claim, because ar_claim cannot answer', () => {
+  // ar_claim is unique on (business_entity_id, cmd_claim_id), so grouping by cmd_claim_id yields at
+  // most one row per group and `count(distinct cmd_customer_id) > 1` can never be true. This file
+  // shipped exactly that query and reported "zero collisions" from it — a tautology, not a
+  // measurement. ar_charge is unique on cmd_charge_id, so one claim has many rows and it can fire.
+  const section = doc.slice(doc.indexOf('TRAP 0'), doc.indexOf('TRAP 1'));
+  const blocks = [...section.matchAll(/```sql\n([\s\S]*?)```/g)].map((m) => m[1]!);
+  const checks = blocks.filter((b) => /count\(distinct cmd_customer_id\)\s*>\s*1/.test(b));
+  assert.equal(checks.length, 1, 'exactly one collision check is offered');
+  const sql = checks[0]!;
+  assert.match(sql, /from claims\.ar_charge/, 'reads ar_charge');
+  assert.ok(!/from claims\.ar_claim\b/.test(sql), 'must NOT read ar_claim — it cannot answer');
+  assert.match(sql, /group by business_entity_id, cmd_claim_id/, 'grouped so the HAVING can fire');
+  // And the trap must keep explaining why, or the next person "simplifies" it back.
+  assert.match(section, /STRUCTURALLY INCAPABLE/, 'the dead-query warning survives');
+  assert.match(section, /overwrites/, 'and the row-overwrite consequence');
+});
+
+test('TRAP 3 names BOTH roster edit points, not just the obvious one', () => {
+  // AR_SNAPSHOT_CUSTOMERS spreads AUDIT_CONSOLIDATED_CUSTOMERS, so 17 of 19 accounts — including
+  // WRC, the doc's own worked example — are only removable in auditConfig.ts. Getting this wrong
+  // means the next 14:05 ingest silently re-creates everything the purge deleted.
+  const trap = doc.slice(doc.indexOf('TRAP 3'));
+  const section = trap.slice(0, 1800);
+  assert.match(section, /arConfig\.ts/);
+  assert.match(section, /auditConfig\.ts/, 'the roster that actually holds the 17 audit accounts');
+  assert.match(section, /billing-audit-consolidated/, 'the coupled cron is disclosed');
+});
