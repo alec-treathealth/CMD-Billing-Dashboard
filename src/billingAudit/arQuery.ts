@@ -461,13 +461,48 @@ export function buildArClaimPatientQuery(cmdClaimId: string, entityIds: readonly
 }
 
 /** Freshness: the latest successful run per customer for the tenant, plus the oldest as-of among them. */
+/**
+ * The freshness chip's numbers — and, since 2026-09-10, its TRIPWIRE.
+ *
+ * ⚠ THE ORIGINAL VERSION COULD ONLY EVER LOOK HEALTHY, which is why this is the shape it is. It read
+ * `distinct on (cmd_customer_id) … where status in ('ok','empty')` — i.e. only SUCCESSFUL runs — so a
+ * cron that had been failing every night for a week still displayed the last good `snapshot_as_of`
+ * and said nothing. Combined with there being no alerting in this repo at all, a permanently broken
+ * ingest was invisible in the product; the only way to notice was to think to query the run log.
+ *
+ * So two facts are added, both from rows the old query deliberately excluded:
+ *   last_attempt_at — max(started_at) over ALL runs, whatever their status. This is what goes stale
+ *                     when the cron stops running, as opposed to when it stops SUCCEEDING.
+ *   failed_recent   — runs in the last 36h whose status is neither 'ok' nor 'empty'. 36h and not 24h
+ *                     because the schedule is daily: a 24h window straddles the boundary and flickers
+ *                     depending on when the page is loaded.
+ * `running` is excluded from failed_recent — a run in flight is not a failure, and the cron's own
+ * guard already bounds how long one may claim to be running.
+ */
 export function buildArFreshnessQuery(entityIds: readonly string[]): { sql: string; params: unknown[] } {
   return {
     sql:
-      `select count(*)::int as customers, min(r.snapshot_as_of)::text as oldest_as_of, max(r.snapshot_as_of)::text as newest_as_of, ` +
-      `max(r.finished_at)::text as last_run_finished_at ` +
-      `from (select distinct on (cmd_customer_id) cmd_customer_id, snapshot_as_of, finished_at from claims.ar_snapshot_run ` +
-      `where business_entity_id = any($1::uuid[]) and status in ('ok', 'empty') order by cmd_customer_id, finished_at desc) r`,
+      `select (select count(*)::int from (select distinct on (cmd_customer_id) cmd_customer_id from claims.ar_snapshot_run ` +
+      `where business_entity_id = any($1::uuid[]) and status in ('ok', 'empty') order by cmd_customer_id, finished_at desc) c) as customers, ` +
+      `(select min(snapshot_as_of)::text from (select distinct on (cmd_customer_id) cmd_customer_id, snapshot_as_of from claims.ar_snapshot_run ` +
+      `where business_entity_id = any($1::uuid[]) and status in ('ok', 'empty') order by cmd_customer_id, finished_at desc) o) as oldest_as_of, ` +
+      `(select max(snapshot_as_of)::text from claims.ar_snapshot_run where business_entity_id = any($1::uuid[]) and status in ('ok', 'empty')) as newest_as_of, ` +
+      `(select max(finished_at)::text from claims.ar_snapshot_run where business_entity_id = any($1::uuid[]) and status in ('ok', 'empty')) as last_run_finished_at, ` +
+      // Deliberately NOT filtered by status: this is the one number that goes stale when the cron
+      // stops running at all, which is the failure the old query could not represent.
+      `(select max(started_at)::text from claims.ar_snapshot_run where business_entity_id = any($1::uuid[])) as last_attempt_at, ` +
+      // count(DISTINCT cmd_customer_id), not count(*): the run log holds one row per ATTEMPT, so a
+      // facility that failed twice in 36h (two daily failures, or a failure plus a manual retry) was
+      // reported to the operator as TWO failing facilities. The banner says "N facilities", so the
+      // number has to be facilities.
+      `(select count(distinct cmd_customer_id)::int from claims.ar_snapshot_run where business_entity_id = any($1::uuid[]) ` +
+      `and status not in ('ok', 'empty', 'running') and started_at > now() - interval '36 hours') as failed_recent, ` +
+      // Staleness decided by the DATABASE clock, not the browser's. The alternative — shipping the
+      // timestamp and diffing it client-side — needs a post-mount clock to stay hydration-safe, and
+      // then an operator in a skewed timezone can see a different alarm state than the server would.
+      // A boolean from now() has one answer for everyone.
+      `(select coalesce(max(started_at) < now() - interval '36 hours', true) from claims.ar_snapshot_run ` +
+      `where business_entity_id = any($1::uuid[])) as attempt_stale`,
     params: [entityIdsOrThrow(entityIds)],
   };
 }

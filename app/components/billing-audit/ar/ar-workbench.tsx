@@ -106,8 +106,39 @@ export function ArWorkbench({ view, canRevealPhi, canWork, seed }: ArWorkbenchPr
   }, [view]);
 
   const freshness = options?.freshness ?? null;
-  if (options !== null && freshness === null) {
+  /**
+   * Two independent conditions, either of which means the pipe is broken rather than merely quiet:
+   * a failed run in the last 36h, or NO ATTEMPT at all in 36h. The second is the one the old chip
+   * could not express — it read successful runs only, so a cron that stopped firing looked identical
+   * to one that had just succeeded. 36h and not 24h because the schedule is daily and a 24h window
+   * straddles the boundary, flickering with the time of day the page happens to be loaded. Both
+   * conditions are evaluated against the DATABASE clock (see buildArFreshnessQuery), so this is
+   * pure and needs no client clock.
+   */
+  const ingestAlarm = ((): string | null => {
+    if (!freshness) return null;
+    if (freshness.failed_recent > 0) {
+      const n = freshness.failed_recent;
+      return `${n} facilit${n === 1 ? 'y' : 'ies'} failed to ingest in the last 36 hours.`;
+    }
+    if (!freshness.attempt_stale) return null;
+    const at = freshness.last_attempt_at;
+    if (at === null) return 'No ingest has ever been attempted for this tenant.';
+    return `The last ingest attempt was ${shortDate(at)} — the daily 14:05 UTC run has not fired since.`;
+  })();
+  // "No snapshot yet" is now `customers === 0`, not `freshness === null` — freshness is always built
+  // when the run log answers (see loadArOptions). The ingest ALARM renders above this empty state
+  // rather than being replaced by it: a tenant whose every attempt has failed needs to be told the
+  // pipe is broken, not told to go ask CMD to enable snapshots. That inversion was the bug.
+  const hasSnapshot = freshness !== null && freshness.customers > 0;
+  if (options !== null && !hasSnapshot) {
     return (
+      <div className="space-y-4">
+        {ingestAlarm ? (
+          <p role="alert" className="rounded-md border border-status-warn/40 bg-status-warn/10 px-3 py-2 text-xs text-ink900">
+            <span className="font-semibold">AR ingest needs attention.</span> {ingestAlarm}
+          </p>
+        ) : null}
       <div className="rounded-xl border border-line bg-card p-10 text-center">
         <h2 className="ths-h text-lg font-semibold text-ink900">No AR snapshot for this tenant yet</h2>
         <p className="mx-auto mt-2 max-w-xl text-sm text-ink600">
@@ -117,17 +148,31 @@ export function ArWorkbench({ view, canRevealPhi, canWork, seed }: ArWorkbenchPr
           ask CMD to enable data snapshots for this account.
         </p>
       </div>
+      </div>
     );
   }
 
   return (
     <div className="space-y-4">
-      {freshness ? (
-        <p className="text-xs text-ink400">
-          Snapshot as of <span className="ths-num text-ink600">{shortDate(freshness.newest_as_of)}</span>
-          {freshness.oldest_as_of && freshness.oldest_as_of.slice(0, 10) !== (freshness.newest_as_of ?? '').slice(0, 10) ? <> (oldest facility {shortDate(freshness.oldest_as_of)})</> : null}
-          {' · '}{freshness.customers} facilit{freshness.customers === 1 ? 'y' : 'ies'} · refreshed daily from CMD&rsquo;s customer data snapshot.
-        </p>
+      {hasSnapshot && freshness ? (
+        <>
+          <p className="text-xs text-ink400">
+            Snapshot as of <span className="ths-num text-ink600">{shortDate(freshness.newest_as_of)}</span>
+            {freshness.oldest_as_of && freshness.oldest_as_of.slice(0, 10) !== (freshness.newest_as_of ?? '').slice(0, 10) ? <> (oldest facility {shortDate(freshness.oldest_as_of)})</> : null}
+            {' · '}{freshness.customers} facilit{freshness.customers === 1 ? 'y' : 'ies'} · refreshed daily from CMD&rsquo;s customer data snapshot.
+          </p>
+          {/* THE TRIPWIRE. This repo has NO alerting, and the line above reads from successful runs
+              only — so a cron failing every night still showed a confident "snapshot as of" and said
+              nothing. These two conditions are the difference between "the data is old" (which the
+              date already tells you) and "the pipe is broken" (which nothing did). Rendered as a
+              banner rather than a tooltip because the whole point is that nobody was looking. */}
+          {ingestAlarm ? (
+            <p role="alert" className="rounded-md border border-status-warn/40 bg-status-warn/10 px-3 py-2 text-xs text-ink900">
+              <span className="font-semibold">AR ingest needs attention.</span> {ingestAlarm} The claims below are
+              still the last good snapshot — they are not wrong, but they are not moving.
+            </p>
+          ) : null}
+        </>
       ) : null}
       <AgingStrip
         bands={summary?.bands ?? []}

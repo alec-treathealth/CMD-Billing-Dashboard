@@ -385,9 +385,19 @@ project-side, `prj_vPJxHFny6OS9gU32swXMn3XJsog3`):
 per-commit **Preview** deployments — identical in kind to any feature branch, at
 unmemorable URLs. It has **no privileged status in Vercel at all**.
 
-So **browser-test on the feature branch's own preview URL**, not on staging.
-Every push to every branch already builds one, so a PR's preview is the test
-surface and no persistent branch is required to get one.
+⚠ **BROWSER-TEST LOCALLY FIRST — RULED BY ALEC 2026-09-10.** This block used to read "browser-test
+on the feature branch's own preview URL", and that made the preview the FIRST place a change was
+ever seen: the first look cost a commit, a push and a deploy, and every finding landed after the
+branch was already public. **Run the app locally and look there before opening the PR.** A local
+run is a FULL preview — real auth, real data — once `app/.env.local` carries the two PUBLIC
+`NEXT_PUBLIC_SUPABASE_*` values; `.claude/rules/nextjs-app.md` has the runbook, the failure mode
+when they are missing (the app renders chrome with no data and looks broken), and the warning that
+`npm run dev` clobbers `.next` and breaks a gate test until you rebuild.
+
+The preview URL is still worth a look, as the SECOND one — it is the only place the Vercel build
+environment, cron behaviour, and the real domain / installed-PWA origin can be checked. Every push
+to every branch builds one, and no persistent branch is required to get it (which is what this
+paragraph originally existed to say, and remains true).
 
 ### Staging discipline — RETIRED 2026-08-14; historical record only
 

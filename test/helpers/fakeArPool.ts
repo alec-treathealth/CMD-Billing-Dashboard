@@ -24,6 +24,8 @@ export interface FakeArPoolOpts {
   liveRows?: Set<string>;
   /** customerId → last successful finished_at (ISO), for the stalest-first ordering pre-pass. */
   lastOkAt?: Record<string, string>;
+  /** customerId → claims_seen of the last successful run, the proportional guard's baseline. */
+  lastClaimsSeen?: Record<string, number>;
 }
 
 /** Count VALUES tuples in a multi-row insert: every tuple starts with `($n`. */
@@ -51,7 +53,14 @@ export function fakeArPool(opts: FakeArPoolOpts = {}) {
           return { rows: [{ fresh: opts.fresh?.has(String(params?.[1])) ?? false }], rowCount: 1 };
         }
         if (/from claims\.ar_snapshot_run/i.test(sql) && /as last_ok/i.test(sql)) {
-          const rows = Object.entries(opts.lastOkAt ?? {}).map(([cmd_customer_id, last_ok]) => ({ cmd_customer_id, last_ok }));
+          // The prefetch now also carries claims_seen of the LAST successful run — the baseline the
+          // proportional empty-regression guard compares against.
+          const keys = new Set([...Object.keys(opts.lastOkAt ?? {}), ...Object.keys(opts.lastClaimsSeen ?? {})]);
+          const rows = [...keys].map((cmd_customer_id) => ({
+            cmd_customer_id,
+            last_ok: opts.lastOkAt?.[cmd_customer_id] ?? null,
+            claims_seen: opts.lastClaimsSeen?.[cmd_customer_id] ?? null,
+          }));
           return { rows, rowCount: rows.length };
         }
         if (/from claims\.ar_snapshot_run/i.test(sql) && /as running/i.test(sql)) {

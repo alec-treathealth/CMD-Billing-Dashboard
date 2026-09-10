@@ -28,7 +28,7 @@ import type { Db } from '../collections/db.js';
 import type { CmdCustomerTarget } from '../collections/cmdExplorerCron.js';
 import type { CmdSnapshotResult } from '../collections/cmdSnapshot.js';
 import { withTenant } from '../veris/withTenant.js';
-import { AR_SNAPSHOT_BUDGET_MS, AR_SNAPSHOT_STALENESS_MS } from './arConfig.js';
+import { AR_EMPTY_REGRESSION_RATIO, AR_SNAPSHOT_BUDGET_MS, AR_SNAPSHOT_STALENESS_MS } from './arConfig.js';
 import { mapSnapshot, type ArMapped } from './arSnapshotMap.js';
 import { writeArSnapshot, type ArWriteContext, type ArWriteStats } from './arSnapshotWrite.js';
 import { parseSnapshotZip } from './snapshotParse.js';
@@ -53,6 +53,8 @@ export interface ArSnapshotCronDeps {
   now?: () => number;
   budgetMs?: number;
   stalenessMs?: number;
+  /** Fraction of the last good claims_seen below which a snapshot is a regression. Default 0.5. */
+  emptyRegressionRatio?: number;
 }
 
 export interface ArCustomerReport {
@@ -143,21 +145,30 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
   // ahead of everything, so onboarding a facility does not wait behind 18 fresh ones. Ties keep
   // roster order, so a first-ever run is processed exactly as before.
   const lastOkAt = new Map<string, number>();
+  /** claims_seen of each customer's LAST successful run — the baseline for the proportional guard. */
+  const lastClaimsSeen = new Map<string, number>();
   const entities = [...new Set(deps.customers.map((c) => c.businessEntityId).filter((e): e is string => typeof e === 'string' && e !== ''))];
   for (const entity of entities) {
     const rows = await withTenant(deps.writeDb, entity, async (client) => {
-      const res = await client.query<{ cmd_customer_id: string; last_ok: string | null }>(
-        `select cmd_customer_id, max(finished_at) as last_ok from claims.ar_snapshot_run ` +
+      // distinct on, not max(): this pass needs the claims_seen OF the latest successful run, which a
+      // group-by cannot give you — max(claims_seen) would be the largest run the customer ever had.
+      const res = await client.query<{ cmd_customer_id: string; last_ok: string | null; claims_seen: number | null }>(
+        `select distinct on (cmd_customer_id) cmd_customer_id, finished_at as last_ok, claims_seen ` +
+          `from claims.ar_snapshot_run ` +
           `where business_entity_id = $1 and status in ('ok', 'empty') and finished_at is not null ` +
-          `group by cmd_customer_id`,
+          `order by cmd_customer_id, finished_at desc`,
         [entity],
       );
       return res.rows;
     });
     for (const r of rows) {
-      if (r.last_ok === null) continue;
-      const t = Date.parse(String(r.last_ok));
-      if (Number.isFinite(t)) lastOkAt.set(`${entity}:${r.cmd_customer_id}`, t);
+      const key = `${entity}:${r.cmd_customer_id}`;
+      if (r.last_ok !== null) {
+        const t = Date.parse(String(r.last_ok));
+        if (Number.isFinite(t)) lastOkAt.set(key, t);
+      }
+      const seen = r.claims_seen === null ? null : Number(r.claims_seen);
+      if (seen !== null && Number.isFinite(seen) && seen > 0) lastClaimsSeen.set(key, seen);
     }
   }
   const ordered = deps.customers
@@ -284,12 +295,30 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
       parsedCharges = mapped.charges.length;
       parsedAsOf = mapped.snapshotAsOf;
 
-      // EMPTY-REGRESSION GUARD. A structurally valid snapshot that maps to ZERO claims for a customer
-      // that has live rows is a broken export (or a closed account), not a book that emptied overnight.
-      // Writing it would stale-mark every live claim and record a `fresh` run that blocks the re-pull
-      // for 20 hours. Record it as an error with a fixed label, write NOTHING, and let the next run
-      // retry — an account that genuinely emptied is retired by adding it to expectedEmptyCustomerIds.
-      if (mapped.claims.length === 0 && !deps.expectedEmptyCustomerIds.has(customer.customerId)) {
+      // EMPTY-REGRESSION GUARD, now PROPORTIONAL. A structurally valid snapshot that maps to zero —
+      // or to far fewer claims than the last good run — is a broken or truncated export, not a book
+      // that emptied overnight. Writing it would stale-mark the missing claims and record a `fresh`
+      // run that blocks the re-pull for 20 hours, so the money would drop off the queue and every
+      // KPI until someone noticed by eye.
+      //
+      // ⚠ WHY ZERO WAS NOT ENOUGH: the original guard fired only on `claims.length === 0`, so a
+      // TRUNCATED export — 3 of 11,979 claims, which is a far more likely CMD failure than a
+      // perfectly empty file — sailed through, stale-marked the rest of the book, and closed `ok`.
+      // The threshold catches the shape the zero-check was blind to.
+      //
+      // The ratio is deliberately loose (AR_EMPTY_REGRESSION_RATIO, 0.5). A claim stays in CMD's
+      // snapshot until CMD stops reporting it, so payments do NOT shrink the claim COUNT — a 50%
+      // overnight drop has no benign explanation. It can only ever be tightened; loosening it means
+      // deciding that halving a facility's book unremarked is acceptable.
+      const baseline = lastClaimsSeen.get(`${entity}:${customer.customerId}`) ?? 0;
+      // ⚠ NOT FLOORED. `Math.floor(baseline * ratio)` moved the boundary for every odd baseline: at
+      // baseline 7 the floor was 3, so `3 < 3` was false and a THREE-claim snapshot — 43% of the
+      // book — was accepted and stale-marked the missing four. Compare against the real product, so
+      // the documented rule ("fewer than half") is what actually runs. Exactly half still passes:
+      // 50 < 50 is false, which is the intended boundary.
+      const floor = baseline * (deps.emptyRegressionRatio ?? AR_EMPTY_REGRESSION_RATIO);
+      const shortfall = mapped.claims.length === 0 || (baseline > 0 && mapped.claims.length < floor);
+      if (shortfall && !deps.expectedEmptyCustomerIds.has(customer.customerId)) {
         const hasLive = await withTenant(deps.writeDb, entity, async (client) => {
           const res = await client.query<{ has_rows: boolean }>(
             `select exists (select 1 from claims.ar_claim where business_entity_id = $1 and cmd_customer_id = $2 and in_latest_snapshot) as has_rows`,
@@ -297,7 +326,13 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
           );
           return res.rows[0]?.has_rows === true;
         });
-        if (hasLive) throw new StageError('empty_regression', new Error('snapshot mapped to zero claims for a customer with live rows'));
+        if (hasLive) {
+          throw new StageError(
+            'empty_regression',
+            // Counts only — no cell values — so this is safe for the cron's logger.
+            new Error(`snapshot mapped ${mapped.claims.length} claims against a last-good ${baseline} (floor ${floor.toFixed(1)})`),
+          );
+        }
       }
 
       // Any writer batch may commit before a later one fails, so the cache bust must not depend on the

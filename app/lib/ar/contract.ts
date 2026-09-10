@@ -62,6 +62,16 @@ export interface ArFreshness {
   oldest_as_of: string | null;
   newest_as_of: string | null;
   last_run_finished_at: string | null;
+  /** max(started_at) over ALL runs regardless of status — goes stale when the cron stops RUNNING. */
+  last_attempt_at: string | null;
+  /** Runs in the last 36h that ended in neither 'ok' nor 'empty'. `running` is not a failure. */
+  failed_recent: number;
+  /**
+   * True when no run has even STARTED in 36h — decided by the database clock, so every viewer sees
+   * the same answer regardless of their timezone, and no post-mount clock is needed to stay
+   * hydration-safe. True when there has never been a run at all.
+   */
+  attempt_stale: boolean;
 }
 
 export interface ArSummary {

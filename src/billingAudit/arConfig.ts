@@ -43,6 +43,17 @@ export const AR_SNAPSHOT_CUSTOMERS: readonly CmdCustomerTarget[] = [
  */
 export const AR_EXPECTED_EMPTY_CUSTOMERS: ReadonlySet<string> = new Set([]);
 
+/**
+ * A snapshot mapping to fewer than this FRACTION of the last good run's claims_seen is treated as a
+ * regression: nothing is written and the run is recorded as an error, so the next pass retries.
+ *
+ * 0.5 is loose on purpose. A claim stays in CMD's snapshot until CMD stops reporting it, so payments
+ * do not shrink the claim COUNT — there is no benign reason for a facility's book to halve overnight.
+ * The number can be TIGHTENED freely; loosening it is a decision that halving a book unremarked is
+ * acceptable, and should be argued rather than nudged.
+ */
+export const AR_EMPTY_REGRESSION_RATIO = 0.5;
+
 /** A customer pulled OK inside this window is skipped — the snapshot is rebuilt once a day. */
 export const AR_SNAPSHOT_STALENESS_MS = 20 * 3_600_000;
 

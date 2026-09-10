@@ -74,9 +74,58 @@ push that adds an env-dependent import or a new server-only dependency.
 - Local builds with `.env` present mask Vercel-only bundler failures. For a
   high-risk change, build with `.env` moved aside.
 
+## Browser-test LOCALLY, before the PR (ruled 2026-09-10)
+
+⚠ **This supersedes "browser-test on the feature branch's preview URL."** That rule made the
+preview the FIRST place a change was ever seen, which means the first look costs a commit, a
+push and a deploy — and any finding arrives after the branch is public. Look locally first;
+the preview becomes confirmation, not discovery.
+
+A local run is a **full** preview — real auth, real data — once the app env carries the two
+PUBLIC Supabase values. Everything else it needs is already in `app/.env.local`:
+
+```bash
+cd app && PORT=3001 npm run dev     # http://localhost:3001, then sign in at /login
+```
+
+`app/.env.local` must contain (both are public by design — they ship to every browser in every
+deploy; see `lib/supabase/env.ts`. They are NOT the service-role key):
+
+```
+NEXT_PUBLIC_SUPABASE_URL=https://dbpabchpvipipkzkogta.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=<the project's publishable key>
+```
+
+Use the `PUBLISHABLE_KEY` name, not the legacy `ANON_KEY`: Vercel sets that one, so local
+resolves the same branch of `supabaseAnonKey()` production does. Fetch the values with the
+Supabase MCP (`get_project_url` / `get_publishable_keys`) — never paste them from a deploy log.
+
+**Without those two vars the page LIES to you in a specific way.** `supabaseAuthConfigured()`
+returns false, `dashboardAccess()` falls back to `super_admin` with `user: null`, and every
+tenant-scoped reader then fails closed on the null principal — so the app renders its chrome
+with NO data and NO PHI-gated furniture, and looks like a rendering bug. If a surface is
+mysteriously empty locally, check this before debugging the surface. The tell is
+`/dashboard/collections` returning **200 instead of a 307 to `/login`**.
+
+⚠ **LOCAL DEV TALKS TO PRODUCTION.** The `CLAIMS_*_DATABASE_URL` entries already point there;
+adding auth just completes the picture. Signing in is a real session over real PHI and writes
+are real writes — "Reveal all" inserts `claims.access_audit` rows, inviting a user sends an
+actual email. Read freely; think before clicking anything that writes.
+
+⚠ **`npm run dev` CLOBBERS `.next`, WHICH BREAKS A TEST IN THE GATE.** `tenant-scope.test.tsx`
+reads the built stylesheet out of `app/.next/static/css` to prove Tailwind actually EMITTED the
+responsive classes (the `.lg\:inline` trap). It skips when `.next` is absent, but dev-mode CSS
+is present-and-trivial, so it **fails** rather than skips. So the two workflows do not compose:
+run the dev server for the browser pass, then **stop it and re-run `npm run build` before
+`npm test`**, or that test reports a defect that is not there.
+
 ## Verifying a deploy
 
 Vercel MCP returns 403 here. Check deploy status with `gh` commit-status instead.
+
+The preview URL still earns a look for the things local cannot show: the Vercel build
+environment (see the build traps above — a local `.env` masks failures), cron behaviour, and
+the real domain / installed-PWA origin. It is the second look now, not the first.
 
 ## Maintenance gates
 

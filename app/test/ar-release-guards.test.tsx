@@ -129,3 +129,36 @@ test('the AR page no longer links Facility Resolution, and no longer seeds the I
     assert.ok(code.includes(kept), `${kept} still seeds the AR queue`);
   }
 });
+
+// ── The ingest tripwire (2026-09-10) ─────────────────────────────────────────────────────────────
+test('the workbench raises an ALARM when the ingest is failing or has stopped firing', () => {
+  const src = strip(read('components/billing-audit/ar/ar-workbench.tsx'));
+  // Two independent conditions, because "old data" and "broken pipe" are different failures and the
+  // date line already covers the first.
+  assert.match(src, /freshness\.failed_recent > 0/, 'a recent failure raises it');
+  assert.match(src, /freshness\.attempt_stale/, 'so does no attempt at all');
+  assert.match(src, /role="alert"/, 'announced, not tucked into a tooltip');
+  // The alarm must not be derived from a browser clock — the DB decides, so every viewer agrees.
+  assert.ok(!/Date\.now\(\)[^;]*36|nowMs[^;]*36/.test(src), 'staleness is not computed client-side');
+  // And it must say the claims are still trustworthy, or an operator reads it as "the data is wrong".
+  assert.match(src, /still the last good snapshot/);
+});
+
+test('Qodo #357-1: a tenant whose ingest NEVER succeeded still sees the alarm', () => {
+  // The bug this pins: `freshness` was only built when customers > 0, and customers counts
+  // SUCCESSFUL runs — so a tenant whose every attempt failed had freshness nulled, the workbench
+  // returned "No AR snapshot for this tenant yet", and the failure alarm never rendered. The one
+  // case the tripwire exists for was the one case it could not show.
+  const server = strip(read('lib/ar/server.ts'));
+  assert.match(server, /const freshness: ArFreshness \| null = fr0\s*$/m, 'built whenever the row exists');
+  assert.ok(!/fr0 && Number\(fr0\.customers \?\? 0\) > 0/.test(server), 'no longer gated on successful runs');
+
+  const wb = strip(read('components/billing-audit/ar/ar-workbench.tsx'));
+  // "No snapshot" is now a distinct question from "is the ingest healthy".
+  assert.match(wb, /const hasSnapshot = freshness !== null && freshness\.customers > 0/);
+  assert.match(wb, /if \(options !== null && !hasSnapshot\)/, 'the empty state keys on snapshot availability');
+  // And the alarm must render INSIDE that branch, above the empty state — not be replaced by it.
+  const branch = wb.slice(wb.indexOf('if (options !== null && !hasSnapshot)'), wb.indexOf('No AR snapshot for this tenant yet'));
+  assert.match(branch, /ingestAlarm \?/, 'the alarm survives the empty-state path');
+  assert.match(branch, /role="alert"/);
+});

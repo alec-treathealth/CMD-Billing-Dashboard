@@ -12,7 +12,7 @@ import { arSnapshotCron } from '../src/billingAudit/arSnapshotCron.js';
 import type { ArWriteStats } from '../src/billingAudit/arSnapshotWrite.js';
 import { BXR_ENTITY_ID } from '../src/tenants.js';
 import { fakeArPool } from './helpers/fakeArPool.js';
-import { AR_EXPECTED_EMPTY_CUSTOMERS } from '../src/billingAudit/arConfig.js';
+import { AR_EMPTY_REGRESSION_RATIO, AR_EXPECTED_EMPTY_CUSTOMERS } from '../src/billingAudit/arConfig.js';
 
 const CUSTOMERS: CmdCustomerTarget[] = [
   { customerId: '10000001', facilityCode: 'ONE', businessEntityId: BXR_ENTITY_ID },
@@ -287,4 +287,85 @@ test('a customer with LIVE rows is never exempt from the empty-regression guard'
   for (const known of ['10033951', '10035974']) {
     assert.ok(!AR_EXPECTED_EMPTY_CUSTOMERS.has(known), `${known} carries live claims and must stay protected`);
   }
+});
+
+test('a TRUNCATED export is a regression, not a smaller book — the guard is proportional', () => {
+  // The zero-only guard was blind to the likelier CMD failure: a partial file. 3 of 100 claims is
+  // not a book that shrank, and writing it would stale-mark the other 97, close the run `ok`, and
+  // let the 20h freshness cursor block the re-pull until tomorrow.
+  assert.equal(AR_EMPTY_REGRESSION_RATIO, 0.5, 'the documented default');
+});
+
+test('proportional guard: a truncated snapshot writes NOTHING and records empty_regression', async () => {
+  const fake = fakeArPool({ lastClaimsSeen: { '10000001': 100 }, liveRows: new Set(['10000001']) });
+  const stats = await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!],
+    // 3 claims against a last-good 100 — well under the 0.5 floor of 50.
+    parseAndMap: () => ({ ...emptyMapped, claims: [{}, {}, {}] as never[], charges: [{}] as never[] }),
+  }));
+  assert.deepEqual(stats.per_customer.map((r) => [r.outcome, r.errorLabel]), [['error', 'empty_regression']]);
+  assert.equal(stats.customers_empty_regression, 1);
+  // Nothing was written: no upsert reached the pool.
+  assert.equal(fake.calls.filter((c) => /^insert into claims\.ar_claim\b/i.test(c.sql)).length, 0, 'no claim upsert');
+  assert.equal(fake.calls.filter((c) => /set in_latest_snapshot/i.test(c.sql)).length, 0, 'nothing stale-marked');
+  // And the run row records the shape of the shortfall, in COUNTS only.
+  const finish = fake.calls.find((c) => /update claims\.ar_snapshot_run/i.test(c.sql))!;
+  assert.equal(finish.params![1], 'error');
+  assert.equal(finish.params![2], 'empty_regression');
+});
+
+test('proportional guard: a normal fluctuation is NOT a regression', async () => {
+  // 80 of 100 is ordinary movement — new claims, a few closed. It must write.
+  const fake = fakeArPool({ lastClaimsSeen: { '10000001': 100 }, liveRows: new Set(['10000001']) });
+  const stats = await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!],
+    parseAndMap: () => ({ ...emptyMapped, claims: Array.from({ length: 80 }, () => ({})) as never[] }),
+    write: async () => writeStats(80),
+  }));
+  assert.deepEqual(stats.per_customer.map((r) => r.outcome), ['ok']);
+  assert.equal(stats.customers_empty_regression, 0);
+});
+
+test('proportional guard: a FIRST-EVER run has no baseline and is not blocked', async () => {
+  // No prior successful run => no baseline => only the zero-check applies, exactly as before.
+  const fake = fakeArPool();
+  const stats = await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!],
+    parseAndMap: () => ({ ...emptyMapped, claims: Array.from({ length: 3 }, () => ({})) as never[] }),
+    write: async () => writeStats(3),
+  }));
+  assert.deepEqual(stats.per_customer.map((r) => r.outcome), ['ok'], 'a small first book still writes');
+});
+
+test('Qodo #357-2: the ratio is the boundary — an ODD baseline is not rounded away', async () => {
+  // Math.floor(7 * 0.5) = 3, so `3 < 3` was false and a THREE-claim snapshot — 43% of a 7-claim
+  // book — was accepted and stale-marked the missing four. The old tests only used baseline 100,
+  // where flooring is invisible. This is the case that exposes it.
+  const fake = fakeArPool({ lastClaimsSeen: { '10000001': 7 }, liveRows: new Set(['10000001']) });
+  const stats = await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!],
+    parseAndMap: () => ({ ...emptyMapped, claims: [{}, {}, {}] as never[] }),
+  }));
+  assert.deepEqual(stats.per_customer.map((r) => [r.outcome, r.errorLabel]), [['error', 'empty_regression']]);
+  assert.equal(fake.calls.filter((c) => /set in_latest_snapshot/i.test(c.sql)).length, 0, 'nothing stale-marked');
+});
+
+test('Qodo #357-2: EXACTLY half still passes — the rule is "fewer than half", not "at most half"', async () => {
+  const fake = fakeArPool({ lastClaimsSeen: { '10000001': 100 }, liveRows: new Set(['10000001']) });
+  const stats = await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!],
+    parseAndMap: () => ({ ...emptyMapped, claims: Array.from({ length: 50 }, () => ({})) as never[] }),
+    write: async () => writeStats(50),
+  }));
+  assert.deepEqual(stats.per_customer.map((r) => r.outcome), ['ok'], '50 of 100 is the boundary and is accepted');
+});
+
+test('Qodo #357-2: one BELOW half is rejected, at an odd baseline', async () => {
+  // baseline 9 -> threshold 4.5 -> 4 claims must fail (the old floor was 4, so 4 < 4 passed).
+  const fake = fakeArPool({ lastClaimsSeen: { '10000001': 9 }, liveRows: new Set(['10000001']) });
+  const stats = await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!],
+    parseAndMap: () => ({ ...emptyMapped, claims: Array.from({ length: 4 }, () => ({})) as never[] }),
+  }));
+  assert.deepEqual(stats.per_customer.map((r) => r.errorLabel), ['empty_regression']);
 });

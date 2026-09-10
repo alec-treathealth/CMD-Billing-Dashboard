@@ -48,10 +48,18 @@ const COLS: readonly Col[] = [
   { key: 'age', label: 'Age', sort: 'age' },
   { key: 'denial', label: 'Denial' },
   { key: 'remit', label: '835 · error' },
-  { key: 'notes', label: 'Notes', sort: 'last_note_at' },
   { key: 'work', label: 'Work', sort: 'work_status' },
   { key: 'assignee', label: 'Assignee' },
   { key: 'followup', label: 'Follow-up', sort: 'cmd_followup_date' },
+  // NOTES IS LAST, DELIBERATELY (Alec, 2026-09-10). It is the only free-text column and the only
+  // one with no width ceiling, so wherever it sits it pushes everything after it far to the right —
+  // with Notes in the middle, Work/Assignee/Follow-up ended up separated from the rest of the row
+  // by a band of whitespace as wide as the longest note on the page. Last, it can run as long as
+  // it likes and nothing is stranded behind it.
+  // ⚠ COLS drives ONLY the header row; the body cells below are written out by hand in source
+  // order. These two orders are not linked by anything but this comment — move a column here and
+  // you MUST move its <TableCell> too, or every cell after it renders under the wrong heading.
+  { key: 'notes', label: 'Notes', sort: 'last_note_at' },
 ];
 
 const CELL = 'px-2.5 py-1.5 align-middle whitespace-nowrap';
@@ -232,7 +240,17 @@ export function ArQueueTable({ view, canRevealPhi, filter, sort, onSort, initial
                     ) : null}
                     {!r.last_835_status && !r.last_error_code ? <span className="text-ink400">—</span> : null}
                   </TableCell>
-                  <TableCell className={`${CELL} text-xs`}>
+                  <TableCell className={CELL}><WorkChip status={r.work_status} /></TableCell>
+                  <TableCell className={`${CELL} text-xs text-ink600`}>{r.assignee_email ? r.assignee_email.split('@')[0] : <span className="text-ink400">—</span>}</TableCell>
+                  <TableCell className={`${CELL} ths-num text-xs ${overdue ? 'font-semibold text-status-danger' : 'text-ink600'}`}>{followup ? shortDate(followup) : <span className="text-ink400">—</span>}</TableCell>
+                  {/* max-w is what makes the inner `truncate` DO anything. truncate is
+                      overflow-hidden + ellipsis + nowrap, all of which need a width to resolve
+                      against; in a table cell with no ceiling the cell just grows to the longest
+                      note on the page. That was survivable while Notes sat mid-row (its neighbours
+                      capped it); as the LAST column nothing constrains it, so the cap moves here
+                      explicitly. 32rem is the widest that still leaves the ellipsis visible at
+                      1440px without the table needing a horizontal scroll of its own. */}
+                  <TableCell className={`${CELL} max-w-[32rem] text-xs`}>
                     {/* Gated on `note` as well as the counters. cmd_note_count DOES include
                         patient-level notes (arSnapshotMap.ts sums claim + patient), so today the two
                         agree exactly — measured 25,043 vs 25,043 open claims, 0 divergent. But the
@@ -258,9 +276,6 @@ export function ArQueueTable({ view, canRevealPhi, filter, sort, onSort, initial
                       </>
                     ) : <span className="text-ink400">none</span>}
                   </TableCell>
-                  <TableCell className={CELL}><WorkChip status={r.work_status} /></TableCell>
-                  <TableCell className={`${CELL} text-xs text-ink600`}>{r.assignee_email ? r.assignee_email.split('@')[0] : <span className="text-ink400">—</span>}</TableCell>
-                  <TableCell className={`${CELL} ths-num text-xs ${overdue ? 'font-semibold text-status-danger' : 'text-ink600'}`}>{followup ? shortDate(followup) : <span className="text-ink400">—</span>}</TableCell>
                 </TableRow>
               );
             })}
