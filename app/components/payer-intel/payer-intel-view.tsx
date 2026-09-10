@@ -2,7 +2,8 @@
 
 /**
  * The /payer-intel client island — one route, two view states:
- *   IDLE   — ambient: gainers rail · decliners rail · search · starred/recent · census (compact)
+ *   IDLE   — ambient: gainers rail · search · starred/recent · census (compact)
+ *            (the decliners rail was removed 2026-09-10 — see idle-rails.tsx)
  *   RESULT — hero · ON FILE chips · top-payer/facility drills · percentage band · placement ·
  *            CPT×rev rollup · charge-line grid · census (compact) · AI cohort read
  *
@@ -25,7 +26,6 @@ import gsap from 'gsap';
 import type { QualifyPolicyTapeItem } from '../../lib/qualify/board';
 import type {
   PayerIntelBoard,
-  PayerIntelDeclinerItem,
   PayerIntelFacetKey,
   PayerIntelGridPage,
   PayerIntelGridSort,
@@ -49,7 +49,7 @@ import {
   watchPayerIntelSubject,
 } from '../../lib/payer-intel/actions';
 import { generatePayerIntelAiRead } from '../../lib/payer-intel/ai-actions';
-import { PayerIntelGainersRail, PayerIntelDeclinersRail } from './idle-rails';
+import { PayerIntelGainersRail } from './idle-rails';
 import { PayerIntelCensusPanel } from './census-panel';
 import { PayerIntelSavedSearches } from './saved-searches';
 import { PayerIntelSearchBar, type PayerIntelSearchBarSubmit } from './search-bar';
@@ -452,13 +452,6 @@ export function PayerIntelView({
     },
     [transitionToResult],
   );
-  const seedFromDecliner = useCallback(
-    (item: PayerIntelDeclinerItem) => {
-      // The rail's facility label IS the rollup text — exactly what the filter matches.
-      transitionToResult({ facilities: [item.facility] });
-    },
-    [transitionToResult],
-  );
 
   const onSubmit = useCallback(
     (s: PayerIntelSearchBarSubmit) => {
@@ -528,12 +521,6 @@ export function PayerIntelView({
             asOf={board.gainers.asOf}
             deltaDays={board.gainers.deltaDays}
             onSeed={seedFromGainer}
-          />
-          <PayerIntelDeclinersRail
-            items={board.decliners.items}
-            windowDays={board.decliners.windowDays}
-            thresholdPts={board.decliners.thresholdPts}
-            onSeed={seedFromDecliner}
           />
           <div className={SPLIT}>
             <div className="min-w-0 space-y-7">

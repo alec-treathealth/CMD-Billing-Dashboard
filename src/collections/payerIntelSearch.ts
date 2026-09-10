@@ -13,7 +13,7 @@
  *
  * DOLLAR POSTURE, per builder (R-AMOUNTS is enforced in the app core, but projection is the first
  * gate): the gainers rail projects NO dollar column (same posture as buildPolicyTapeQuery). The
- * decliners rail and placement table DO project dollar sums — they are stripped for
+ * the placement table DOES project dollar sums — stripped for
  * admissions_seat sessions at the core's single choke point, mirroring Qualify's
  * stripSnapshotAmounts pattern (module-private, applied LAST).
  */
@@ -31,14 +31,6 @@ import { QUALIFY_TAPE_DELTA_DAYS, QUALIFY_TAPE_TOP_N } from './qualifyRatingHist
 
 // ── Tunables ─────────────────────────────────────────────────────────────────────────────────────
 
-/** Decliners rail: minimum drop in % collected (points over the window pair) before a facility is
- *  "losing ground". Spec-fixed at ≥5 pts / 90d; a smaller drop is noise at these line counts. */
-export const PAYER_INTEL_DECLINE_THRESHOLD_PTS = 5;
-/** Decliners rail window (days). Current window = trailing N; prior = the N before it. */
-export const PAYER_INTEL_DECLINE_WINDOW_DAYS = 90;
-/** Line floor, applied to BOTH windows: a facility thin in either one can manufacture a 40-point
- *  "decline" out of two claims. */
-export const PAYER_INTEL_DECLINE_MIN_LINES = 3;
 
 /**
  * The CLIENT floor a window must clear before this tab will put a score on it — SCALED BY THE
@@ -51,7 +43,8 @@ export const PAYER_INTEL_DECLINE_MIN_LINES = 3;
  * suppressed most real movement rather than most noise. Scaling ties the confidence bar to how
  * much time the window actually had to accumulate people.
  *
- * Applies to BOTH rails (the decliners' two windows and the gainers' rating horizon), so the two
+ * Applies to the gainers' rating horizon (it applied to the decliners' two windows too until that
+ * rail was removed 2026-09-10), so the
  * halves of the board agree on what "enough to score" means.
  *
  * ⚠ NOT the same knob as `COHORT_MIN_PATIENTS` (5, cmdExplorerQuery.ts) and it must not be
@@ -81,7 +74,7 @@ export const PAYER_INTEL_COMBO_TOP_N = 12;
  * The shipped tape picks top-N by ABSOLUTE delta (Alec-ruled — "Policies on the Move" mixes both
  * directions) and must not change. This rail's contract is different: gainers only, biggest gain
  * first, so the fork (a) adds `cur.rating > prev.rating` and (b) orders the LIMIT by the SIGNED
- * delta. Filtering the shipped query's output would under-fill the rail in a decliner-heavy
+ * delta. Filtering the shipped query's output would under-fill the rail in a decline-heavy
  * period because its LIMIT runs before any sign filter.
  *
  * NON-DOLLAR projection by construction (the buildPolicyTapeQuery posture): the daily table
@@ -94,7 +87,8 @@ export function buildPayerIntelGainersQuery(opts?: {
   limit?: number;
 }): { sql: string; params: unknown[] } {
   const deltaDays = Math.min(Math.max(Math.trunc(opts?.deltaDays ?? QUALIFY_TAPE_DELTA_DAYS), 1), 3650);
-  // The window-scaled client floor (1 / 2 / 3 by horizon) — the SAME rule the decliners rail
+  // The window-scaled client floor (1 / 2 / 3 by horizon) — the rule the decliners rail also
+  // carried before it was removed 2026-09-10
   // applies, so the two halves of the board agree on what "enough to score" means. The shipped
   // Qualify tape keeps its flat QUALIFY_TAPE_MIN_MEMBERS; this is a fork, not an edit.
   const minMembers = Math.min(
@@ -137,158 +131,9 @@ export function buildPayerIntelGainersQuery(opts?: {
 
 // ── 2. Facilities losing ground (IDLE rail #2) ───────────────────────────────────────────────────
 
-/** One decliner row. `billed_current` is a DOLLAR SUM — core strips it for amounts-blind sessions.
- *  `decline_reason` does not exist here: NO server-side attribution logic exists in this repo
- *  (verified 2026-08-17), so per the build spec the tick renders WITHOUT a why-tag.
- *  TODO(payer-intel): decline_reason attribution (payer-mix shift / zero-paid concentration /
- *  thin volume) is a net-new analysis service — design it server-side; never fabricate client-side. */
-export interface PayerIntelDeclinerRow {
-  facility: string;
-  facility_code: string | null;
-  care_setting: 'IP' | 'OP' | 'BOTH' | null;
-  /** % collected of billed (paid ÷ billed × 100, 2dp), per window. Payment-date windows — both
-   *  endpoints aggregate PAYMENTS RECEIVED in the window, the house idiom (buildFacilityTrendQuery,
-   *  buildBookKpisQuery), which sidesteps the claim-maturity distortion a service-date window has. */
-  pct_current: number | null;
-  pct_prior: number | null;
-  /** cur − prior; ≤ −threshold by construction. */
-  delta_pts: number;
-  line_count: number;
-  distinct_members: number;
-  /** sum(charge_amount) in the CURRENT window — dollars; stripped for admissions_seat. */
-  billed_current: number;
-}
 
-/**
- * Per-facility % collected of billed, trailing window vs the window before it, DECLINERS ONLY.
- *
- * Two window pairs (one scan each — the buildBookKpisQuery "split the scans" lesson) joined on
- * facility, then thresholded. Floors apply to BOTH windows so a facility thin in either cannot
- * fake a cliff. The 'No Facility' placeholder is excluded — a rail naming a place nobody was
- * treated is noise (same ruling as the tape context query, 2026-08-12).
- *
- * The facilities/aliases crosswalk (the FACILITY_DIM_JOINS shape, restated — this module does not
- * import qualifyQuery.ts, same boundary qualifyRatingHistory.ts keeps) resolves care_setting for
- * the tick's IP/OP tag; unmapped facilities ride with null rather than being dropped.
- *
- * ── NESTED AGGREGATION, NOT count(distinct) (measured 2026-08-24) ────────────────────────────────
- * Each window aggregates in TWO steps: `<alias>_m` groups to (facility, member_id_bidx), then
- * `<alias>` rolls those groups up to facility. That is not stylistic. `count(distinct x)` has no
- * hash path in Postgres, so it forced a GroupAggregate over input sorted by
- * (facility, member_id_bidx) — note the sort carried a column the GROUP BY never used — and at the
- * shipped work_mem BOTH windows spilled. Cross-tenant [BXR, INDIGO], the default 90d window:
- *
- *   BEFORE  Sort → `external merge  Disk: 5160kB` + `4424kB`, ~9.4 MB temp I/O per execution
- *           4060 ms cold / 476 ms warm
- *   AFTER   HashAggregate, `Batches: 1`, 2065 kB + 2193 kB, ZERO temp I/O
- *           280 ms warm
- *
- * WHY the hash fits where the sort did not: a Sort gets `work_mem` (3500 kB measured), a
- * HashAggregate gets `work_mem * hash_mem_multiplier` (2 → 7000 kB). The rewrite does not shrink
- * the work, it moves it into the larger budget. Headroom at 90d is ~3.2x. Stress-measured past the
- * reachable ceiling and still `Batches: 1` — 180d peaks at 2961 kB, 365d at 4369 kB (1.6x) — but
- * PAYER_INTEL_WINDOW_DAYS_OPTIONS is [7, 14, 30, 90] and every caller clamps through
- * clampPayerIntelWindowDays, so neither is reachable without a contract change. The 365-day clamp
- * below is therefore defensive, not a live path.
- *
- * Equivalence to the previous shape was verified on live data — all 9 projected columns, both
- * EXCEPT ALL directions empty, ordered sequence identical — and it also holds by construction:
- * charge_amount is numeric(12,2) and insurance_payments is numeric, and numeric addition is exact
- * and associative, so sum(sum(x)) === sum(x) with the single ::float8 cast still applied last.
- *
- * ⚠ `members` MUST KEEP ITS `filter (where member_id_bidx is not null)`. The guard is what makes
- * the rewrite exact: `count(distinct x)` SKIPS nulls, but `count(*)` over the inner groups does
- * NOT — a null member_id_bidx forms its own group and would be counted as a member, letting a
- * facility clear the `members >= $5` floor one member early. And the filter belongs on the OUTER
- * count ONLY: excluding null-member rows inside `<alias>_m` instead would also drop their
- * charge_amount / insurance_payments / line count from the sums, silently changing billed, paid
- * and lines. Measured 2026-08-24: 0 null member_id_bidx rows of 500,477, and the column is not
- * declared NOT NULL — so this is a live invariant, not a schema guarantee.
- */
-export function buildFacilityDeclinersQuery(
-  entityIds: string[],
-  opts?: { windowDays?: number; thresholdPts?: number; limit?: number },
-): { sql: string; params: unknown[] } {
-  assertEntityScope(entityIds, 'payerIntelSearch.buildFacilityDeclinersQuery');
-  const windowDays = Math.min(Math.max(Math.trunc(opts?.windowDays ?? PAYER_INTEL_DECLINE_WINDOW_DAYS), 7), 365);
-  const thresholdPts = Math.min(Math.max(opts?.thresholdPts ?? PAYER_INTEL_DECLINE_THRESHOLD_PTS, 0), 100);
-  const limit = Math.min(Math.max(Math.trunc(opts?.limit ?? PAYER_INTEL_DECLINE_TOP_N), 1), 50);
-  // Inner: one row per (facility, member). This is the grain that lets `members` be a count(*).
-  const memberAgg = (alias: string, fromExpr: string, toExpr: string) =>
-    `${alias}_m as (` +
-    'select facility, member_id_bidx, ' +
-    'sum(charge_amount) as ca, ' +
-    'sum(insurance_payments) as ip, ' +
-    'count(*) as ln ' +
-    `from ${CMD_EXPLORER_CHARGE_ROLLUP} ` +
-    'where business_entity_id = any($1::uuid[]) ' +
-    `and payment_received >= ${fromExpr} and payment_received < ${toExpr} ` +
-    "and facility is not null and btrim(facility) <> '' " +
-    'and facility <> $3 ' +
-    'group by facility, member_id_bidx)';
-  // Outer: roll the member groups up to the facility. `members` counts GROUPS, not rows, and the
-  // null filter is what keeps that identical to the count(distinct) it replaced — see the header.
-  const windowAgg = (alias: string) =>
-    `${alias} as (` +
-    'select facility, ' +
-    'sum(ca)::float8 as billed, ' +
-    'sum(ip)::float8 as paid, ' +
-    'sum(ln)::int as lines, ' +
-    '(count(*) filter (where member_id_bidx is not null))::int as members ' +
-    `from ${alias}_m ` +
-    'group by facility)';
-  const sql =
-    'with ' +
-    memberAgg('cur', "current_date - $2::int", 'current_date') +
-    ', ' +
-    windowAgg('cur') +
-    ', ' +
-    memberAgg('prior', "current_date - ($2::int * 2)", 'current_date - $2::int') +
-    ', ' +
-    windowAgg('prior') +
-    ', paired as (' +
-    'select cur.facility, cur.billed, cur.lines, cur.members, ' +
-    'case when cur.billed > 0 then round((cur.paid / cur.billed * 100)::numeric, 2)::float8 end as pct_current, ' +
-    'case when prior.billed > 0 then round((prior.paid / prior.billed * 100)::numeric, 2)::float8 end as pct_prior ' +
-    'from cur join prior on prior.facility = cur.facility ' +
-    'where cur.lines >= $4::int and prior.lines >= $4::int ' +
-    'and cur.members >= $5::int and prior.members >= $5::int' +
-    ') ' +
-    'select p.facility, ' +
-    'coalesce(fe.facility_code, a.facility_code) as facility_code, ' +
-    'f.care_setting, ' +
-    'p.pct_current, p.pct_prior, ' +
-    'round((p.pct_current - p.pct_prior)::numeric, 1)::float8 as delta_pts, ' +
-    'p.lines as line_count, p.members as distinct_members, ' +
-    'p.billed as billed_current ' +
-    'from paired p ' +
-    'left join collections.facilities fe on upper(fe.facility_name) = upper(p.facility) ' +
-    'left join collections.cmd_facility_aliases a on upper(a.facility_text) = upper(p.facility) ' +
-    'left join collections.facilities f on f.facility_code = coalesce(fe.facility_code, a.facility_code) ' +
-    'where p.pct_current is not null and p.pct_prior is not null ' +
-    'and (p.pct_prior - p.pct_current) >= $6 ' +
-    'order by (p.pct_current - p.pct_prior) asc, p.billed desc ' +
-    'limit $7::int';
-  return {
-    sql,
-    params: [
-      entityIds,
-      windowDays,
-      QUALIFY_NO_FACILITY_SQL,
-      PAYER_INTEL_DECLINE_MIN_LINES,
-      // Window-SCALED, not a constant: 1 client at 7d, 2 at 14d, 3 at 30d and beyond (the
-      // 2026-08-17 ruling on payerIntelMinClientsFor). Both windows must clear it.
-      payerIntelMinClientsFor(windowDays),
-      thresholdPts,
-      limit,
-    ],
-  };
-}
 
-// ── 3. Placement table (RESULT: "Where this policy places") ─────────────────────────────────────
 
-/** One placement row: this SEARCH's cohort at one facility. Dollar fields (`paid_per_patient`,
- *  `billed`) are stripped for amounts-blind sessions at the core choke point. */
 export interface PayerIntelPlacementRow {
   facility: string;
   facility_code: string | null;

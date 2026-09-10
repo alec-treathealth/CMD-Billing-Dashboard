@@ -89,21 +89,7 @@ export type PayerIntelFacetKey = 'payer' | 'prefix' | 'facility' | 'employer' | 
 
 // ── IDLE board ───────────────────────────────────────────────────────────────────────────────────
 
-/** One "facilities losing ground" tick. `billedCurrent` is null for amounts-blind viewers.
- *  `declineReason` is ALWAYS null in v1 — no server-side attribution exists; the tick renders
- *  without a why-tag rather than fabricating one (build-spec rule). */
-export interface PayerIntelDeclinerItem {
-  facility: string;
-  facilityCode: string | null;
-  careSetting: 'IP' | 'OP' | 'BOTH' | null;
-  pctCurrent: number | null;
-  pctPrior: number | null;
-  deltaPts: number;
-  lineCount: number;
-  distinctMembers: number;
-  billedCurrent: number | null;
-  declineReason: string | null;
-}
+
 
 export type PayerIntelCensusStatus = 'full' | 'open';
 
@@ -141,11 +127,6 @@ export interface PayerIntelBoard {
   /** Reuses the Qualify tape result shape verbatim — same enrichment, same fail-soft posture
    *  (`available:false` ⟺ mig 0093 absent; applied-but-empty ⟺ items: []). */
   gainers: QualifyPolicyTapeResult;
-  decliners: {
-    items: PayerIntelDeclinerItem[];
-    windowDays: number;
-    thresholdPts: number;
-  };
   census: {
     rows: PayerIntelCensusRow[];
     /** The newest synced_at across rows — the strip's "live from admissions boards" stamp. */

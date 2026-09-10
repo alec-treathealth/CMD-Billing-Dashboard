@@ -17,7 +17,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { PayerIntelDeclinersRail, PayerIntelGainersRail } from '../components/payer-intel/idle-rails';
+import { PayerIntelGainersRail } from '../components/payer-intel/idle-rails';
 import { PayerIntelCensusPanel } from '../components/payer-intel/census-panel';
 import { PayerIntelSavedSearches } from '../components/payer-intel/saved-searches';
 import {
@@ -32,50 +32,13 @@ import { PayerIntelPointerBanner } from '../components/payer-intel/pointer-banne
 import { PayerIntelAiDock } from '../components/payer-intel/ai-dock';
 import type {
   PayerIntelCensusRow,
-  PayerIntelDeclinerItem,
   PayerIntelResult,
   PayerIntelSavedSearch,
 } from '../lib/payer-intel/contract';
 
-const DECLINER: PayerIntelDeclinerItem = {
-  facility: 'MHC SAN DIEGO',
-  facilityCode: '10024431',
-  careSetting: 'IP',
-  pctCurrent: 22.4,
-  pctPrior: 31.8,
-  deltaPts: -9.4,
-  lineCount: 340,
-  distinctMembers: 41,
-  billedCurrent: 339000,
-  declineReason: null,
-};
 
-test('decliners rail: a blind tick renders NO dollar; a capable tick renders the compact figure', () => {
-  const blind = renderToStaticMarkup(
-    <PayerIntelDeclinersRail items={[{ ...DECLINER, billedCurrent: null }]} windowDays={90} thresholdPts={5} />,
-  );
-  assert.doesNotMatch(blind, /\$/);
-  assert.match(blind, /340 ln/);
-  const capable = renderToStaticMarkup(
-    <PayerIntelDeclinersRail items={[DECLINER]} windowDays={90} thresholdPts={5} />,
-  );
-  assert.match(capable, /\$339K/);
-});
 
-test('decliners rail: the spec-fixed empty state renders "nothing to chase"', () => {
-  const html = renderToStaticMarkup(<PayerIntelDeclinersRail items={[]} windowDays={90} thresholdPts={5} />);
-  assert.match(html, /No facility is down more than 5 pts in 90 days — nothing to chase\./);
-});
 
-test('decliners rail: movement carries words + arrow, never hue alone; no fabricated why-tag', () => {
-  const html = renderToStaticMarkup(
-    <PayerIntelDeclinersRail items={[DECLINER]} windowDays={90} thresholdPts={5} onSeed={() => {}} />,
-  );
-  assert.match(html, /▼ −9\.4/);
-  assert.match(html, /down 9\.4 points/); // the accessible name on the seed button
-  // No attribution service exists — no why-tag text may render.
-  assert.doesNotMatch(html, /payer-mix|zero-paid ↑|seasonal/);
-});
 
 test('rails source: BOTH rails run the marquee machine (the 2026-08-17 "make them move" ruling)', () => {
   const here = dirname(fileURLToPath(import.meta.url));

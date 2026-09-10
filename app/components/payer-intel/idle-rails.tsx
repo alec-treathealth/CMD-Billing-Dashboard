@@ -1,8 +1,15 @@
 'use client';
 
 /**
- * The two IDLE-state rails — "Policies gaining ground" (dark teal, the tape silhouette) and
- * "Facilities losing ground" (dark WARM ground + coral accents, two-line ticks).
+ * The IDLE-state rail — "Policies gaining ground" (dark teal, the tape silhouette).
+ *
+ * ⚠ "FACILITIES LOSING GROUND" WAS REMOVED 2026-09-10 (Alec) AND SHOULD NOT COME BACK AS IT WAS.
+ * It was the single most expensive read on this tab by an order of magnitude: measured warm,
+ * 167.8ms / 65,402 buffers against 17.3ms / 237 for the gainers rail and under 2ms for census,
+ * facility names and saved searches — and 2,361ms on a cold cache. The five ambient reads run in
+ * one Promise.all, so board latency was effectively THIS query's latency and nothing else's.
+ * If a decliners signal is wanted again it needs a rollup or matview behind it, not a live
+ * window-diff over the charge rollup at page load.
  *
  * MOVING, BY RULING (Alec, 2026-08-17 review: "there's just not movement, they are sitting
  * still") — this supersedes the build spec's static-rail line. Both rails run the SAME machine as
@@ -17,15 +24,12 @@
  * WINDOW-AWARE: both rails render whatever window the board was loaded with — the recency toggle
  * refetches the board, so `windowDays`/`deltaDays` here always names the ACTIVE window.
  *
- * PHI/DOLLARS: gainers items are the tape's non-dollar shape verbatim. Decliner ticks carry ONE
- * dollar (current-window billed) which arrives ALREADY NULL for amounts-blind sessions (core
- * choke point). `declineReason` is null in v1 (no attribution service exists); the tick renders
- * without a why-tag rather than fabricating one.
+ * PHI/DOLLARS: gainers items are the tape's non-dollar shape verbatim — this rail carries no
+ * dollars at all now that the decliner ticks (the only dollar-bearing ones) are gone.
  */
 import type { QualifyPolicyTapeItem } from '../../lib/qualify/board';
 import { TAPE_PALETTE } from '../qualify/tokens';
 import { useMarquee } from '../qualify/useMarquee';
-import type { PayerIntelDeclinerItem } from '../../lib/payer-intel/contract';
 import { fmtMoneyCompact } from './format';
 
 /** The warm dark ground the losing-ground rail sits on. A component-local literal (the FLAT_HEX
@@ -135,120 +139,3 @@ export function PayerIntelGainersRail({
   );
 }
 
-export function PayerIntelDeclinersRail({
-  items,
-  windowDays,
-  thresholdPts,
-  onSeed,
-}: {
-  items: readonly PayerIntelDeclinerItem[];
-  windowDays: number;
-  thresholdPts: number;
-  onSeed?: (item: PayerIntelDeclinerItem) => void;
-}) {
-  const { ref: scrollRef, isOverflowing } = useMarquee<HTMLUListElement>(
-    `${windowDays}-${items[0]?.facility ?? ''}`,
-    items.length,
-  );
-
-  const tick = (d: PayerIntelDeclinerItem, dup: boolean) => {
-    const label =
-      `${d.facility}${d.careSetting ? `, ${d.careSetting === 'BOTH' ? 'IP and OP' : d.careSetting}` : ''}. ` +
-      `Collecting ${d.pctCurrent ?? '—'} percent of billed, down ${Math.abs(d.deltaPts)} points over ${windowDays} days.` +
-      (onSeed ? ' Search this facility.' : '');
-    const microParts = [
-      `${d.lineCount.toLocaleString('en-US')} ln`,
-      ...(d.billedCurrent !== null ? [fmtMoneyCompact(d.billedCurrent)] : []),
-    ];
-    const body = (
-      <>
-        <span className="flex items-center gap-1.5">
-          <span className="whitespace-nowrap text-[13px] font-semibold tracking-wide text-white">{d.facility}</span>
-          {d.careSetting !== null ? (
-            <span
-              className="rounded-full border px-1.5 text-[9px] font-bold uppercase tracking-wider"
-              style={{ color: '#F0917C', borderColor: 'rgba(240,145,124,0.4)' }}
-            >
-              {d.careSetting === 'BOTH' ? 'IP+OP' : d.careSetting}
-            </span>
-          ) : null}
-          <span className="font-display text-[17px] font-medium" style={{ color: '#F0917C' }}>
-            {d.pctCurrent !== null ? `${Math.round(d.pctCurrent)}%` : '—'}
-          </span>
-          <span className="whitespace-nowrap font-mono text-xs font-medium" style={{ color: DOWN_DELTA_HEX }}>
-            ▼ −{Math.abs(d.deltaPts).toFixed(1)}
-          </span>
-        </span>
-        {/* Second micro-line. Sized 12px at white/70, NOT 10px at white/45 (Alec, 2026-08-17:
-            "make the small text ... bigger and easier to see"): white at 45% over this warm-dark
-            ground blends to ≈#938280, which measures 3.7:1 — under the 4.5:1 floor for text this
-            small. 70% blends to ≈#C4BBB9 ≈ 7.2:1, so the readability ask and SC 1.4.3 land in the
-            same change. NO why-tag in v1: decline_reason attribution does not exist server-side,
-            and fabricating one client-side is forbidden by spec.
-            TODO(payer-intel): render `declineReason` here once the attribution service ships. */}
-        <span className="flex items-center gap-2 whitespace-nowrap font-mono text-xs text-white/70">
-          {microParts.join(' · ')}
-        </span>
-      </>
-    );
-    return (
-      <li
-        key={dup ? `dup-${d.facility}` : d.facility}
-        aria-hidden={dup || undefined}
-        data-dup={dup ? 'true' : undefined}
-        className="flex flex-none"
-        style={{ borderRight: `1px solid ${DOWN_LINE}` }}
-      >
-        {onSeed ? (
-          <button
-            type="button"
-            tabIndex={dup ? -1 : undefined}
-            aria-label={dup ? undefined : label}
-            onClick={() => onSeed(d)}
-            className="flex flex-col justify-center gap-0.5 px-4 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal200/70 hover:bg-[rgba(240,145,124,0.06)]"
-          >
-            {body}
-          </button>
-        ) : (
-          <span className="flex flex-col justify-center gap-0.5 px-4 py-2">{body}</span>
-        )}
-      </li>
-    );
-  };
-
-  return (
-    <section aria-label="Facilities losing ground" data-pi-section="decliners">
-      <div className="mb-2 flex items-baseline gap-2 px-0.5">
-        {/* RATING_HEX.danger, not status-danger: small text on the light page ground needs the
-            text-safe darkened value (audit C-5); this heading sits on bg-ground, not the rail. */}
-        <h2 className="font-head text-[15px] font-semibold tracking-tight" style={{ color: '#B64138' }}>
-          Facilities losing ground
-        </h2>
-        <span className="text-xs font-medium uppercase tracking-wide text-ink400">
-          % collected of billed · {windowDays}d · decliners only
-        </span>
-      </div>
-      {items.length === 0 ? (
-        <p className="rounded-xl border border-line bg-surface px-4 py-3 text-sm text-ink600">
-          No facility is down more than {thresholdPts} pts in {windowDays} days — nothing to chase.
-        </p>
-      ) : (
-        <>
-          <div
-            className="overflow-hidden rounded-xl shadow-ths-sm"
-            style={{ background: DOWN_RAIL_HEX, borderTop: '2px solid #E2674F' }}
-          >
-            <ul ref={scrollRef} className="q-marquee flex items-stretch">
-              {items.map((d) => tick(d, false))}
-              {isOverflowing && items.map((d) => tick(d, true))}
-            </ul>
-          </div>
-          <p className="mt-1.5 px-0.5 text-xs text-ink400">
-            Decliners only, ≥{thresholdPts} pts over {windowDays} days on payment-date windows. Drill before acting —
-            a thin window can move without the payer changing anything.
-          </p>
-        </>
-      )}
-    </section>
-  );
-}

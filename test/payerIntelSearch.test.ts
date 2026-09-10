@@ -14,11 +14,8 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  PAYER_INTEL_DECLINE_MIN_LINES,
-  PAYER_INTEL_DECLINE_THRESHOLD_PTS,
   PAYER_INTEL_RECENT_MAX,
   PAYER_INTEL_STARRED_MAX,
-  buildFacilityDeclinersQuery,
   buildPayerIntelCensusQuery,
   buildPayerIntelComboQuery,
   buildPayerIntelDistinctMembersQuery,
@@ -58,67 +55,6 @@ test('gainers: strictly-gainers filter + SIGNED inner order (the fork the shippe
 test('gainers: bounds clamp (a hostile limit cannot exceed 100)', () => {
   const q = buildPayerIntelGainersQuery({ limit: 5000, deltaDays: -3, minMembers: -1 });
   assert.deepEqual(q.params, [1, 0, 100]);
-});
-
-// ── Decliners ────────────────────────────────────────────────────────────────────────────────────
-
-test('decliners: tenant-scoped, floors on BOTH windows, threshold + placeholder exclusion bound', () => {
-  const q = buildFacilityDeclinersQuery(ENTITY_IDS);
-  assertAllBound(q.sql, q.params);
-  assert.match(q.sql, /business_entity_id = any\(\$1::uuid\[\]\)/);
-  assert.match(q.sql, /payment_received >= current_date - \$2::int/);
-  assert.match(q.sql, /cur\.lines >= \$4::int and prior\.lines >= \$4::int/);
-  assert.match(q.sql, /cur\.members >= \$5::int and prior\.members >= \$5::int/);
-  assert.match(q.sql, /\(p\.pct_prior - p\.pct_current\) >= \$6/);
-  assert.ok(q.params.includes('No Facility'), 'the No Facility placeholder is excluded as a bound value');
-  assert.ok(q.params.includes(PAYER_INTEL_DECLINE_THRESHOLD_PTS));
-  assert.ok(q.params.includes(PAYER_INTEL_DECLINE_MIN_LINES));
-  // The client floor is WINDOW-SCALED, not a constant (Alec, 2026-08-17): the default 90d window
-  // binds 3.
-  assert.ok(q.params.includes(payerIntelMinClientsFor(90)));
-  // Reads the CHARGE-GRAIN rollup, never the raw snapshot table.
-  assert.match(q.sql, /from collections\.cmd_explorer_charge_rollup/);
-  assert.doesNotMatch(q.sql, /from collections\.cmd_explorer_rows/);
-});
-
-test('decliners: empty tenant scope throws instead of reading every tenant', () => {
-  assert.throws(() => buildFacilityDeclinersQuery([]), /entity/i);
-});
-
-test('decliners: nested aggregation replaced count(distinct) — the shape that stopped the spill', () => {
-  const q = buildFacilityDeclinersQuery(ENTITY_IDS);
-  assertAllBound(q.sql, q.params);
-  // Each window aggregates twice: to (facility, member) first, then up to facility. count(distinct)
-  // has no hash path, so it forced a GroupAggregate whose sort spilled to disk at the shipped
-  // work_mem (builder header has the measured before/after).
-  assert.match(q.sql, /cur_m as \(select facility, member_id_bidx,[\s\S]*?group by facility, member_id_bidx\)/);
-  assert.match(q.sql, /prior_m as \(select facility, member_id_bidx,[\s\S]*?group by facility, member_id_bidx\)/);
-  assert.doesNotMatch(q.sql, /count\(distinct/, 'count(distinct) is what forced the spilling sort');
-});
-
-test('decliners: a NULL member cannot inflate `members` past the floor — the guard both windows carry', () => {
-  const q = buildFacilityDeclinersQuery(ENTITY_IDS);
-  // ⚠ THE INVARIANT. `count(distinct x)` SKIPS nulls. A bare `count(*)` over the inner groups does
-  // NOT: a null member_id_bidx forms its own (facility, null) group and would be counted as a
-  // member — letting a facility clear the members floor one member early. Both windows guard it.
-  const guarded = [...q.sql.matchAll(/\(count\(\*\) filter \(where member_id_bidx is not null\)\)::int as members/g)];
-  assert.equal(guarded.length, 2, 'both cur and prior must guard the member count');
-  // The floor being protected: `members` is compared to $5 on BOTH windows, and $5 binds the
-  // window-scaled client minimum (3 at the default 90d window).
-  assert.match(q.sql, /cur\.members >= \$5::int and prior\.members >= \$5::int/);
-  assert.equal(q.params[4], payerIntelMinClientsFor(90));
-});
-
-test('decliners: the NULL guard is on the OUTER count only — an inner WHERE would drop dollars', () => {
-  // Filtering null-member ROWS out of cur_m/prior_m would also strip their charge_amount,
-  // insurance_payments and line count from the sums, silently changing billed/paid/lines. The
-  // guard must never migrate into the inner CTE's WHERE clause.
-  const q = buildFacilityDeclinersQuery(ENTITY_IDS);
-  const inner = q.sql.slice(q.sql.indexOf('cur_m as ('), q.sql.indexOf('), cur as ('));
-  assert.doesNotMatch(inner, /member_id_bidx is not null/, 'null-member rows stay in the sums');
-  assert.match(inner, /sum\(charge_amount\) as ca/);
-  assert.match(inner, /sum\(insurance_payments\) as ip/);
-  assert.match(inner, /count\(\*\) as ln/);
 });
 
 // ── row_ids tri-state on every new aggregate path ────────────────────────────────────────────────
@@ -247,7 +183,11 @@ test('client floor scales with the window: 1 at 7d, 2 at 14d, 3 at 30d and beyon
   assert.equal(payerIntelMinClientsFor(Number.NaN), 1);
 });
 
-test('BOTH rails take the scaled floor — the two halves of the board agree on "enough to score"', () => {
+test('the gainers rail takes the window-scaled client floor', () => {
+  // This asserted BOTH rails until 2026-09-10, when the decliners rail was removed for latency
+  // (167.8ms / 65,402 buffers warm, vs 17.3ms for gainers). The scaled floor is still the rule —
+  // there is simply one rail left to hold it. If a decliners signal returns, restore the pairing:
+  // the two halves of the board agreeing on "enough to score" is the property, not the loop.
   for (const [days, expected] of [
     [7, 1],
     [14, 2],
@@ -258,12 +198,6 @@ test('BOTH rails take the scaled floor — the two halves of the board agree on 
       buildPayerIntelGainersQuery({ deltaDays: days }).params[1],
       expected,
       `gainers rail at ${days}d must bind ${expected}`,
-    );
-    assert.ok(
-      buildFacilityDeclinersQuery(['af504ab6-3dcd-4aa4-a93c-27bc58de4088'], { windowDays: days }).params.includes(
-        expected,
-      ),
-      `decliners rail at ${days}d must bind ${expected}`,
     );
   }
 });
