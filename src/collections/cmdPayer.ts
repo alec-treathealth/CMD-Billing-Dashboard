@@ -220,7 +220,19 @@ interface ZipEntry {
   data: Buffer;
 }
 
-function readZip(buf: Buffer): ZipEntry[] {
+/**
+ * One entry LOCATED in the central directory but not yet decompressed. `comp` is a zero-copy
+ * subarray view of the original ZIP buffer, so holding these costs nothing beyond the ZIP itself.
+ */
+type ZipLocated = { name: string; method: number; comp: Buffer };
+
+/**
+ * Walk the central directory and locate every file entry WITHOUT decompressing it. Extracted from
+ * readZip so there is exactly ONE central-directory parser: the eager reader (readZip, used by the
+ * payer report and the 835 ERA path) and the lazy reader (readZipEntriesLazy, used by the AR
+ * snapshot) cannot drift in their ZIP handling or their error messages.
+ */
+function zipIndex(buf: Buffer): ZipLocated[] {
   const EOCD_SIG = 0x06054b50;
   const CD_SIG = 0x02014b50;
   const LF_SIG = 0x04034b50;
@@ -236,7 +248,7 @@ function readZip(buf: Buffer): ZipEntry[] {
   const cdOffset = buf.readUInt32LE(eocd + 16);
   if (entryCount === 0xffff || cdOffset === 0xffffffff) throw new Error('CMD ZIP64 not supported');
 
-  const entries: ZipEntry[] = [];
+  const located: ZipLocated[] = [];
   let p = cdOffset;
   for (let n = 0; n < entryCount; n++) {
     if (buf.readUInt32LE(p) !== CD_SIG) throw new Error('CMD ZIP: corrupt central directory');
@@ -258,16 +270,22 @@ function readZip(buf: Buffer): ZipEntry[] {
     const lhNameLen = buf.readUInt16LE(localOffset + 26);
     const lhExtraLen = buf.readUInt16LE(localOffset + 28);
     const dataStart = localOffset + 30 + lhNameLen + lhExtraLen;
-    const comp = buf.subarray(dataStart, dataStart + compSize);
-
-    let data: Buffer;
-    if (method === 0) data = Buffer.from(comp);
-    else if (method === 8) data = inflateRawSync(comp);
-    else throw new Error(`CMD ZIP: unsupported compression method ${method}`);
-    entries.push({ name, data });
+    located.push({ name, method, comp: buf.subarray(dataStart, dataStart + compSize) });
   }
-  return entries;
+  return located;
 }
+
+/** Decompress one located entry. Always returns a COPY, never a view on the ZIP buffer. */
+function inflateEntry(e: ZipLocated): Buffer {
+  if (e.method === 0) return Buffer.from(e.comp);
+  if (e.method === 8) return inflateRawSync(e.comp);
+  throw new Error(`CMD ZIP: unsupported compression method ${e.method}`);
+}
+
+function readZip(buf: Buffer): ZipEntry[] {
+  return zipIndex(buf).map((e) => ({ name: e.name, data: inflateEntry(e) }));
+}
+
 
 // --- CSV parsing (RFC-4180-ish: quoted fields, embedded commas/quotes/newlines) -
 /** Parse one CSV string into header + row arrays. Whole-cell PHI — never logged. */
@@ -331,6 +349,25 @@ export function parseReportCsv(text: string): CmdReportRow[] {
 export type CmdZipEntry = { name: string; data: Buffer };
 export function readZipEntries(zip: Buffer): CmdZipEntry[] {
   return readZip(zip);
+}
+
+/**
+ * The LAZY reader: every entry located, none decompressed until its `inflate()` is called.
+ *
+ * WHY IT EXISTS: a CMD customer data snapshot is 32 tables / ~77.5 MB uncompressed, and the AR
+ * mapper reads only 11 of them. `readZipEntries` inflates all 32 up front, so ~23 MB of table text
+ * (B_CREDIT alone is 12.4 MB) was decompressed into Buffers and thrown away on every ingest — a
+ * measured ~83 MB of external memory at the parse step, inside a function whose peak already
+ * matters (see snapshotParse.ts). Locating an entry is just a central-directory walk; the cost is
+ * all in the inflate.
+ *
+ * ⚠ ONE BEHAVIOUR DIFFERENCE, deliberate: an unsupported compression method on an entry nobody
+ * inflates no longer throws, because nothing decompresses it. The eager reader is unchanged and
+ * still rejects such a ZIP up front. Every CMD snapshot entry observed is DEFLATE.
+ */
+export type CmdZipLazyEntry = { name: string; inflate: () => Buffer };
+export function readZipEntriesLazy(zip: Buffer): CmdZipLazyEntry[] {
+  return zipIndex(zip).map((e) => ({ name: e.name, inflate: () => inflateEntry(e) }));
 }
 
 /** Unzip a CMD report payload and parse every .csv entry into row objects. */

@@ -10,7 +10,7 @@
  * are `MM/DD/YYYY`, timestamps `MM/DD/YYYY HH:MM:SS`, money `####.##`, booleans `0/1` (a few
  * lookup tables use `Y/N`). `meta/*.sql` entries are Oracle DDL and are ignored here.
  */
-import { readZipEntries } from '../collections/cmdPayer.js';
+import { readZipEntriesLazy } from '../collections/cmdPayer.js';
 
 export type SnapshotRow = Readonly<Record<string, string>>;
 
@@ -27,6 +27,17 @@ export interface SnapshotTables {
   require(name: string): SnapshotTable;
   /** Every table name present, sorted. */
   names(): string[];
+  /**
+   * Drop a table's parsed rows once the caller is finished with it, so the peak holds only what is
+   * still in use. A LATER `get`/`require` for a released table **THROWS** — it does not return null.
+   *
+   * That choice is the whole point. Returning null would turn a memory optimisation into a
+   * silent-wrong-data bug: `rowsOf()` maps a missing table to `[]`, so a released-then-read table
+   * would quietly contribute zero rows and the ingest would record `ok` over an incomplete book —
+   * the same class of failure that assertSnapshotShape exists to stop. Releasing a table that is
+   * absent, or releasing the same one twice, is a harmless no-op.
+   */
+  release(name: string): void;
 }
 
 /** Parse one tab-delimited text: header first, `\r\n`-tolerant, blank lines skipped, short rows padded. */
@@ -61,34 +72,43 @@ export function parseTsv(text: string): { columns: string[]; rows: SnapshotRow[]
  * it kills the process instead of raising: the run row is never closed and the rest of the
  * roster is skipped for the day.
  *
- * A table is decompressed into rows on FIRST access and cached; its inflated bytes are released
- * at that point so the two representations are never both retained. Tables nobody asks for cost
- * only their buffer. `names()` still reports every table in the snapshot, parsed or not.
+ * A table is DECOMPRESSED AND PARSED on first access and cached; nothing else is touched. A table
+ * nobody asks for is never inflated at all — it costs only its central-directory entry and a
+ * zero-copy view on the ZIP. `names()` still reports every table in the snapshot, read or not.
+ *
+ * The laziness is therefore in TWO layers, and both were needed. Deferring only the row
+ * materialisation still inflated all 32 tables into Buffers up front (~83 MB of external memory
+ * measured at the parse step). `readZipEntriesLazy` defers the inflate as well, so the 21 tables
+ * the mapper never reads cost nothing.
  */
 export function parseSnapshotZip(zip: Buffer): SnapshotTables {
-  const raw = new Map<string, Buffer>();
-  for (const entry of readZipEntries(zip)) {
+  const raw = new Map<string, () => Buffer>();
+  for (const entry of readZipEntriesLazy(zip)) {
     const m = /(?:^|\/)([A-Za-z0-9_]+)\.DAT$/i.exec(entry.name);
     if (!m) continue;
-    raw.set(m[1]!.toUpperCase(), entry.data);
+    raw.set(m[1]!.toUpperCase(), entry.inflate);
   }
   return lazySnapshotTables(raw);
 }
 
 /**
- * The lazy view over a name → inflated-bytes map. Parse-on-access, cached, and the buffer is
- * dropped once its rows exist. `names()` is snapshotted up front so it stays complete as
- * buffers are consumed.
+ * The lazy view over a name → inflate-thunk map. Inflate-and-parse on first access, cached, and the
+ * thunk is dropped once the rows exist so the inflated bytes are garbage immediately. `names()` is
+ * snapshotted up front so it stays complete as thunks are consumed.
  */
-function lazySnapshotTables(raw: Map<string, Buffer>): SnapshotTables {
+function lazySnapshotTables(raw: Map<string, () => Buffer>): SnapshotTables {
   const allNames = [...raw.keys()].sort();
   const parsed = new Map<string, SnapshotTable>();
+  const released = new Set<string>();
   const load = (upper: string): SnapshotTable | null => {
+    if (released.has(upper)) throw new Error(releasedMessage(upper));
     const cached = parsed.get(upper);
     if (cached !== undefined) return cached;
-    const buf = raw.get(upper);
-    if (buf === undefined) return null;
-    const { columns, rows } = parseTsv(buf.toString('utf8'));
+    const inflate = raw.get(upper);
+    if (inflate === undefined) return null;
+    // The Buffer lives only for this statement: parseTsv copies what it needs into strings, and
+    // nothing else holds a reference, so the inflated bytes are collectable on return.
+    const { columns, rows } = parseTsv(inflate().toString('utf8'));
     const table: SnapshotTable = { name: upper, columns, rows };
     parsed.set(upper, table);
     raw.delete(upper); // the rows ARE the retained form now — never hold both
@@ -103,20 +123,46 @@ function lazySnapshotTables(raw: Map<string, Buffer>): SnapshotTables {
       return t;
     },
     names: () => [...allNames],
+    release: (name) => {
+      const upper = name.toUpperCase();
+      if (!raw.has(upper) && !parsed.has(upper)) return; // absent, or already released
+      parsed.delete(upper);
+      raw.delete(upper);
+      released.add(upper);
+    },
   };
 }
 
 /** Wrap an already-built table map (the test fixture path). */
 export function snapshotTablesFrom(tables: ReadonlyMap<string, SnapshotTable>): SnapshotTables {
+  const allNames = [...tables.keys()].sort();
+  const released = new Set<string>();
+  const get = (name: string): SnapshotTable | null => {
+    const upper = name.toUpperCase();
+    if (released.has(upper)) throw new Error(releasedMessage(upper));
+    return tables.get(upper) ?? null;
+  };
   return {
-    get: (name) => tables.get(name.toUpperCase()) ?? null,
+    get,
     require: (name) => {
-      const t = tables.get(name.toUpperCase());
+      const t = get(name);
       if (!t) throw new Error(`snapshot: table ${name.toUpperCase()} is missing`);
       return t;
     },
-    names: () => [...tables.keys()].sort(),
+    names: () => [...allNames],
+    release: (name) => {
+      const upper = name.toUpperCase();
+      if (tables.has(upper)) released.add(upper);
+    },
   };
+}
+
+/** One wording for both implementations, so the fixture path and the live path fail identically. */
+function releasedMessage(upper: string): string {
+  return (
+    `snapshot: table ${upper} was RELEASED and read again — ` +
+    'either stop releasing it in arSnapshotMap, or gather what the second pass needs during the first'
+  );
 }
 
 const MONTH_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];

@@ -54,15 +54,58 @@ time from `dos_from` against the business day (`src/billingAudit/arBuckets.ts` �
 Both were measured on the live roster before release; neither is a guess, and both have a guard
 in code rather than a note asking you to be careful.
 
-**MEMORY is the binding constraint, and the peak belongs to the LARGEST customer.** `parseTsv`
-materialises one JS object per row with a property per column — roughly **13x the source text**.
-CAMH is the worst case: a 6.4 MB ZIP holding **77.5 MB uncompressed across 32 tables**. Parsing all
-32 eagerly retained **1,048 MB of live heap / 1,326 MB RSS**; `arSnapshotMap.ts` reads only **11** of
-them, so B_CREDIT (12.4 MB), CLAIM_ICD_CODE and ICLAIM (4.9 MB each) plus ~14 smaller tables were
-being inflated and thrown away. `parseSnapshotZip` is therefore **LAZY** — parse on first access,
-cached, inflated bytes released at that point — which brought the peak to **903 MB heap / 1,131 MB
-RSS** with byte-identical mapped output. That is still large enough to matter, so
-`app/vercel.json` **pins `memory: 3009`** for `app/api/cron/ar-snapshot/route.ts`.
+**MEMORY IS THE BINDING CONSTRAINT, IT IS UNPINNED, AND LAZINESS DID NOT FIX IT.** Read all three
+sentences before optimising anything here; two of them were learned the expensive way.
+
+`parseTsv` materialises one JS object per row with a property per column — roughly **13x the source
+text**. CAMH is the worst case: a 6.4 MB ZIP holding **77.5 MB uncompressed across 32 tables**, of
+which `arSnapshotMap.ts` reads only **11**.
+
+`parseSnapshotZip` is lazy in two layers — `readZipEntriesLazy` defers the INFLATE, and the table
+view defers the ROW MATERIALISATION — so the 21 unread tables (B_CREDIT 12.4 MB, CLAIM_ICD_CODE and
+ICLAIM 4.9 MB each, plus ~18 smaller) cost nothing. Measured against the live CAMH snapshot:
+
+| stage | eager | lazy |
+|---|---|---|
+| after `parseSnapshotZip` | heap 9 MB / rss 198 MB / **ext 83 MB** | heap 11 MB / rss 135 MB / **ext 10 MB** |
+| **peak** (after `mapSnapshot`) | heap 903 MB / rss **1,131 MB** | heap 908 MB / rss **1,125 MB** |
+
+⚠ **The laziness removed the parse-step spike and left the PEAK essentially unchanged**, because the
+peak is the row objects of the eleven tables the mapper *does* read. Do not reach for laziness again
+expecting the peak to move.
+
+**RELEASE-AFTER-USE is what actually moved it.** Every table is read exactly once, so `mapSnapshot`
+calls `tables.release(name)` after each loop; the ORDER is what does the work, since B_CLAIMSTATUS
+(29 MB of source at CAMH) is parsed late and the saving comes from having already freed B_ACTIVITY,
+B_CHARGE and B_REMITTANCE. B_CLAIM, ICLAIM and B_PATIENT are deliberately NOT released — their rows
+are retained in lookup maps, so releasing would free the wrapper and none of the memory.
+
+Measured on the live CAMH snapshot by capping V8's old space, which is the only test that answers
+"would this OOM" — `heapUsed` after a forced GC does not, because it reports the live set once the
+map is finished rather than the peak during it:
+
+| `--max-old-space-size` | 700 | 900 | 1300 |
+|---|---|---|---|
+| without release-after-use | OOM | **OOM** | OK |
+| with release-after-use | OOM | **OK** | OK |
+
+So the minimum viable old space went from >900 MB to 900 MB, and the post-map live set from 908 MB
+to 393 MB. ⚠ **RSS is a poor proxy here and reads as if nothing improved** (1,125 → 1,086 MB): V8
+does not return freed pages promptly, and RSS still measures ~1,046 MB when the live heap is 12 MB.
+Judge this code by a capped run, never by RSS.
+
+A released table **THROWS** on a second read rather than reading as empty — `rowsOf()` maps a
+missing table to `[]`, so the silent version of this optimisation would have contributed zero rows
+and recorded `ok` over an incomplete book. `release()` on an absent table, or twice, is a no-op.
+
+⚠⚠ **`memory` CANNOT BE PINNED ON THIS PROJECT — do not re-add it.** `app/vercel.json` briefly
+carried `"functions": {"app/api/cron/ar-snapshot/route.ts": {"memory": 3009}}` and the deploy log
+answered plainly: *"Provided `memory` setting in `vercel.json` is ignored on Active CPU billing. You
+can safely remove this setting from your configuration."* It was removed. The lambda count going
+10 → 11 when the block landed is NOT evidence it worked — a distinct config makes Vercel bundle the
+route separately whether or not the memory value is honoured, and that misreading is exactly how the
+pin was reported as working for several hours. So the ~1.1 GB peak runs against whatever Fluid
+Compute provisions, with no ceiling of our choosing.
 
 ⚠ **An OOM here is worse than a timeout and does not look like a failure.** A thrown stage error is
 caught per-customer and closes the run row with a label; an OOM kills the process, so the `running`
