@@ -7,7 +7,10 @@
  *   - FRESHNESS CURSOR: a customer whose latest run finished ok/empty inside `stalenessMs`
  *     (default 20h — CMD rebuilds the snapshot once a day, in the morning ET) is skipped.
  *   - BUDGET GUARD: stop LAUNCHING customers near the wall-clock budget (default 240s under the
- *     300s function); whatever was not reached is simply not-fresh next run.
+ *     300s function); whatever was not reached is simply not-fresh next run. The roster is walked
+ *     STALEST-FIRST (never-ingested first) so a truncated pass rotates instead of starving the same
+ *     tail every day — with a fixed order the 20h freshness window under a 24h schedule means the
+ *     tail is never reached at all. See the comment on `ordered` below.
  *   - PER-CUSTOMER ISOLATION: a customer that throws closes its run row status='error' with a
  *     PHI-SAFE STAGE LABEL (fetch_failed / parse_failed / write_failed) and the loop continues.
  *     404 and 401 are NOT errors — they are recorded as their own statuses (not_configured /
@@ -127,7 +130,47 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
   };
   let wroteSomething = false;
 
-  for (const customer of deps.customers) {
+  // FAIRNESS ORDER — stalest first, never-ingested before everything.
+  //
+  // The budget guard stops LAUNCHING customers near the ceiling, so a pass that runs long leaves a
+  // tail unprocessed. With a FIXED roster order that tail is starved PERMANENTLY rather than merely
+  // delayed, because the freshness window (20h) is shorter than the schedule (24h): at the next run
+  // every customer is stale again, the loop restarts at roster position 1, and the same head
+  // customers consume the same budget. The tail is never reached on any day.
+  //
+  // Ordering by "longest since a successful pull" makes a truncated pass ROTATE: whoever was skipped
+  // yesterday sorts first today. A customer that has never been ingested (no ok/empty run) sorts
+  // ahead of everything, so onboarding a facility does not wait behind 18 fresh ones. Ties keep
+  // roster order, so a first-ever run is processed exactly as before.
+  const lastOkAt = new Map<string, number>();
+  const entities = [...new Set(deps.customers.map((c) => c.businessEntityId).filter((e): e is string => typeof e === 'string' && e !== ''))];
+  for (const entity of entities) {
+    const rows = await withTenant(deps.writeDb, entity, async (client) => {
+      const res = await client.query<{ cmd_customer_id: string; last_ok: string | null }>(
+        `select cmd_customer_id, max(finished_at) as last_ok from claims.ar_snapshot_run ` +
+          `where business_entity_id = $1 and status in ('ok', 'empty') and finished_at is not null ` +
+          `group by cmd_customer_id`,
+        [entity],
+      );
+      return res.rows;
+    });
+    for (const r of rows) {
+      if (r.last_ok === null) continue;
+      const t = Date.parse(String(r.last_ok));
+      if (Number.isFinite(t)) lastOkAt.set(`${entity}:${r.cmd_customer_id}`, t);
+    }
+  }
+  const ordered = deps.customers
+    .map((customer, idx) => ({ customer, idx }))
+    .sort((a, b) => {
+      // Never ingested → -Infinity → sorts first. Equal keys fall back to roster order (stable).
+      const ka = lastOkAt.get(`${a.customer.businessEntityId}:${a.customer.customerId}`) ?? -Infinity;
+      const kb = lastOkAt.get(`${b.customer.businessEntityId}:${b.customer.customerId}`) ?? -Infinity;
+      return ka === kb ? a.idx - b.idx : ka - kb;
+    })
+    .map((x) => x.customer);
+
+  for (const customer of ordered) {
     const entity = customer.businessEntityId;
     if (!entity) throw new Error(`arSnapshotCron: customer ${customer.customerId} has no businessEntityId`);
     const report: ArCustomerReport = {

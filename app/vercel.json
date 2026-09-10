@@ -1,6 +1,9 @@
 {
   "regions": ["sfo1"],
   "installCommand": "cd .. && npm install --prefer-offline --no-audit --no-fund && cd app && npm install --prefer-offline --no-audit --no-fund",
+  "functions": {
+    "app/api/cron/ar-snapshot/route.ts": { "memory": 3009 }
+  },
   "crons": [
     { "path": "/api/cron/pipeline-tick", "schedule": "*/5 * * * *" },
     { "path": "/api/cron/cmd-explorer", "schedule": "0 * * * *" },

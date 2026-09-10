@@ -49,6 +49,38 @@ time from `dos_from` against the business day (`src/billingAudit/arBuckets.ts` �
 31–60d … 1–2yr, plus 0–30 and 2yr+ so the set is exhaustive; NOT the CMD a)–h) labels in
 `ageBucket.ts`).
 
+### The ingest's two capacity limits — MEASURED, not estimated (2026-09-09)
+
+Both were measured on the live roster before release; neither is a guess, and both have a guard
+in code rather than a note asking you to be careful.
+
+**MEMORY is the binding constraint, and the peak belongs to the LARGEST customer.** `parseTsv`
+materialises one JS object per row with a property per column — roughly **13x the source text**.
+CAMH is the worst case: a 6.4 MB ZIP holding **77.5 MB uncompressed across 32 tables**. Parsing all
+32 eagerly retained **1,048 MB of live heap / 1,326 MB RSS**; `arSnapshotMap.ts` reads only **11** of
+them, so B_CREDIT (12.4 MB), CLAIM_ICD_CODE and ICLAIM (4.9 MB each) plus ~14 smaller tables were
+being inflated and thrown away. `parseSnapshotZip` is therefore **LAZY** — parse on first access,
+cached, inflated bytes released at that point — which brought the peak to **903 MB heap / 1,131 MB
+RSS** with byte-identical mapped output. That is still large enough to matter, so
+`app/vercel.json` **pins `memory: 3009`** for `app/api/cron/ar-snapshot/route.ts`.
+
+⚠ **An OOM here is worse than a timeout and does not look like a failure.** A thrown stage error is
+caught per-customer and closes the run row with a label; an OOM kills the process, so the `running`
+row is never closed and the rest of the roster is silently skipped for the day. If you make the
+mapper read more tables, or CMD's export grows, **re-measure the peak** — do not reason about it.
+The cheap win left on the table is a compact row representation (array + shared column index)
+instead of an object per row; it is a real refactor of `SnapshotRow`, not a tweak.
+
+**THE BUDGET IS ~20% OF HEADROOM, AND ORDER IS WHAT MAKES A TRUNCATED PASS SURVIVABLE.** A full
+19-customer pass measured **173.8s** of parse+write (summed run rows) plus a download leg of only a
+few seconds — against a 240s budget under a 300s function. Fine today. But the freshness window
+(20h) is SHORTER than the schedule (24h), so at every run all 19 are stale again: with a fixed
+roster order a pass that ever truncates restarts at position 1 and burns the same budget on the same
+head customers, and **the tail is never reached on any day** — starved permanently, not delayed.
+The loop is therefore walked **stalest-first, never-ingested first**, ties keeping roster order
+(one `max(finished_at)` query per entity, tenant-scoped like every other run-log read). Keep that
+property if you touch the loop; `test/arSnapshotCron.test.ts` pins all three cases.
+
 **What "resolved" means here.** A claim never leaves history: `in_latest_snapshot` flips off when
 CMD's snapshot stops carrying it, `balance` drops to 0 when it pays, and the work disposition
 (`ar_claim_work`) is human-owned and never touched by the ingest — so "worked, then paid" is

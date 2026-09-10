@@ -47,17 +47,63 @@ export function parseTsv(text: string): { columns: string[]; rows: SnapshotRow[]
   return { columns, rows };
 }
 
-/** Build the table map from a snapshot ZIP. Non-`.DAT` entries (the meta SQL) are ignored. */
+/**
+ * Build the table map from a snapshot ZIP. Non-`.DAT` entries (the meta SQL) are ignored.
+ *
+ * ⚠ PARSING IS LAZY, AND THAT IS A MEMORY REQUIREMENT RATHER THAN AN OPTIMISATION. `parseTsv`
+ * materialises one JS object per row with a property per column, which costs ~13x the source
+ * text: measured 2026-09-09 on CAMH (the largest snapshot), eagerly parsing all 32 tables
+ * retained **1,048 MB of live heap / 1,326 MB RSS** from a 6.4 MB ZIP (77.5 MB uncompressed).
+ * `arSnapshotMap.ts` reads only 11 of those tables, so B_CREDIT (12.4 MB), CLAIM_ICD_CODE and
+ * ICLAIM (4.9 MB each) and ~14 smaller tables were being inflated and thrown away. The cron
+ * runs one customer at a time inside a 300s/limited-memory function, so the peak of the LARGEST
+ * customer is the ceiling for the whole roster — an OOM there is worse than a timeout, because
+ * it kills the process instead of raising: the run row is never closed and the rest of the
+ * roster is skipped for the day.
+ *
+ * A table is decompressed into rows on FIRST access and cached; its inflated bytes are released
+ * at that point so the two representations are never both retained. Tables nobody asks for cost
+ * only their buffer. `names()` still reports every table in the snapshot, parsed or not.
+ */
 export function parseSnapshotZip(zip: Buffer): SnapshotTables {
-  const tables = new Map<string, SnapshotTable>();
+  const raw = new Map<string, Buffer>();
   for (const entry of readZipEntries(zip)) {
     const m = /(?:^|\/)([A-Za-z0-9_]+)\.DAT$/i.exec(entry.name);
     if (!m) continue;
-    const name = m[1]!.toUpperCase();
-    const { columns, rows } = parseTsv(entry.data.toString('utf8'));
-    tables.set(name, { name, columns, rows });
+    raw.set(m[1]!.toUpperCase(), entry.data);
   }
-  return snapshotTablesFrom(tables);
+  return lazySnapshotTables(raw);
+}
+
+/**
+ * The lazy view over a name → inflated-bytes map. Parse-on-access, cached, and the buffer is
+ * dropped once its rows exist. `names()` is snapshotted up front so it stays complete as
+ * buffers are consumed.
+ */
+function lazySnapshotTables(raw: Map<string, Buffer>): SnapshotTables {
+  const allNames = [...raw.keys()].sort();
+  const parsed = new Map<string, SnapshotTable>();
+  const load = (upper: string): SnapshotTable | null => {
+    const cached = parsed.get(upper);
+    if (cached !== undefined) return cached;
+    const buf = raw.get(upper);
+    if (buf === undefined) return null;
+    const { columns, rows } = parseTsv(buf.toString('utf8'));
+    const table: SnapshotTable = { name: upper, columns, rows };
+    parsed.set(upper, table);
+    raw.delete(upper); // the rows ARE the retained form now — never hold both
+    return table;
+  };
+  return {
+    get: (name) => load(name.toUpperCase()),
+    require: (name) => {
+      const upper = name.toUpperCase();
+      const t = load(upper);
+      if (!t) throw new Error(`snapshot: table ${upper} is missing`);
+      return t;
+    },
+    names: () => [...allNames],
+  };
 }
 
 /** Wrap an already-built table map (the test fixture path). */

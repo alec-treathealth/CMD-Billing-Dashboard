@@ -106,3 +106,28 @@ test('cmdNumber / cmdMoney / isCmdTrue / cmdText', () => {
   assert.equal(cmdText('  x '), 'x');
   assert.equal(cmdText(' '), null);
 });
+
+test('parseSnapshotZip parses a table only when it is ASKED FOR, and caches it', () => {
+  const zip = buildZip([
+    { name: '10099999/B_CHARGE.DAT', data: Buffer.from('TRANID\tAMOUNT\n900000001\t100.00\n') },
+    { name: '10099999/B_CREDIT.DAT', data: Buffer.from('SEQNO\tAMOUNT\n1\t5.00\n') },
+  ]);
+  const tables = parseSnapshotZip(zip);
+  // names() reports every table in the snapshot whether or not anything has parsed it.
+  assert.deepEqual(tables.names(), ['B_CHARGE', 'B_CREDIT']);
+  const first = tables.require('B_CHARGE');
+  const second = tables.require('B_CHARGE');
+  assert.equal(first, second, 'a parsed table is cached — the same object, not a re-parse');
+  assert.deepEqual(first.rows, [{ TRANID: '900000001', AMOUNT: '100.00' }]);
+  // Still complete after a parse released that table's inflated bytes.
+  assert.deepEqual(tables.names(), ['B_CHARGE', 'B_CREDIT']);
+  // A never-requested table is still readable on demand (laziness is not exclusion).
+  assert.deepEqual(tables.require('B_CREDIT').rows, [{ SEQNO: '1', AMOUNT: '5.00' }]);
+});
+
+test('parseSnapshotZip: a missing table throws by NAME only, after the lazy rewrite', () => {
+  const zip = buildZip([{ name: '10099999/B_CHARGE.DAT', data: Buffer.from('TRANID\n1\n') }]);
+  const tables = parseSnapshotZip(zip);
+  assert.equal(tables.get('B_NOPE'), null);
+  assert.throws(() => tables.require('b_nope'), /table B_NOPE is missing/);
+});

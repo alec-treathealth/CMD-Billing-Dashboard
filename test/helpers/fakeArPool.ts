@@ -22,6 +22,8 @@ export interface FakeArPoolOpts {
   running?: Set<string>;
   /** customerIds that already have live ar_claim rows (the empty-regression guard reports true). */
   liveRows?: Set<string>;
+  /** customerId → last successful finished_at (ISO), for the stalest-first ordering pre-pass. */
+  lastOkAt?: Record<string, string>;
 }
 
 /** Count VALUES tuples in a multi-row insert: every tuple starts with `($n`. */
@@ -47,6 +49,10 @@ export function fakeArPool(opts: FakeArPoolOpts = {}) {
         if (/current_setting/i.test(sql)) return { rows: [{ v: guc }], rowCount: 1 };
         if (/from claims\.ar_snapshot_run/i.test(sql) && /as fresh/i.test(sql)) {
           return { rows: [{ fresh: opts.fresh?.has(String(params?.[1])) ?? false }], rowCount: 1 };
+        }
+        if (/from claims\.ar_snapshot_run/i.test(sql) && /as last_ok/i.test(sql)) {
+          const rows = Object.entries(opts.lastOkAt ?? {}).map(([cmd_customer_id, last_ok]) => ({ cmd_customer_id, last_ok }));
+          return { rows, rowCount: rows.length };
         }
         if (/from claims\.ar_snapshot_run/i.test(sql) && /as running/i.test(sql)) {
           return { rows: [{ running: opts.running?.has(String(params?.[1])) ?? false }], rowCount: 1 };

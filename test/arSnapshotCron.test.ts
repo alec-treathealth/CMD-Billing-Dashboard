@@ -235,3 +235,43 @@ test('a customer without a businessEntityId is a programming error, not a silent
   const fake = fakeArPool();
   await assert.rejects(arSnapshotCron(deps(fake, { customers: [{ customerId: '10000009', facilityCode: 'X' }] })), /no businessEntityId/);
 });
+
+test('the roster is walked STALEST-FIRST so a truncated pass rotates instead of starving a tail', async () => {
+  // ONE pulled most recently, THREE longest ago → THREE, TWO, ONE.
+  const fake = fakeArPool({
+    lastOkAt: {
+      '10000001': '2026-09-09T10:00:00Z',
+      '10000002': '2026-09-08T10:00:00Z',
+      '10000003': '2026-09-01T10:00:00Z',
+    },
+  });
+  const stats = await arSnapshotCron(deps(fake, { customers: CUSTOMERS }));
+  assert.deepEqual(stats.per_customer.map((r) => r.facilityCode), ['THREE', 'TWO', 'ONE']);
+  // The run-start INSERTs prove the ACTUAL launch order, not just the report order.
+  const starts = fake.calls.filter((c) => /insert into claims\.ar_snapshot_run/i.test(c.sql)).map((c) => c.params![1]);
+  assert.deepEqual(starts, ['10000003', '10000002', '10000001']);
+  assert.deepEqual(fake.assertAllScoped(), [], 'the ordering pre-pass is tenant-scoped too');
+});
+
+test('a NEVER-INGESTED customer sorts ahead of every customer that has a successful pull', async () => {
+  // TWO has no run row at all; ONE and THREE do. TWO must go first.
+  const fake = fakeArPool({
+    lastOkAt: { '10000001': '2026-09-01T10:00:00Z', '10000003': '2026-09-02T10:00:00Z' },
+  });
+  const stats = await arSnapshotCron(deps(fake, { customers: CUSTOMERS }));
+  assert.deepEqual(stats.per_customer.map((r) => r.facilityCode), ['TWO', 'ONE', 'THREE']);
+});
+
+test('with no run history at all the order is the roster order — a first-ever pass is unchanged', async () => {
+  const fake = fakeArPool();
+  const stats = await arSnapshotCron(deps(fake, { customers: CUSTOMERS }));
+  assert.deepEqual(stats.per_customer.map((r) => r.facilityCode), ['ONE', 'TWO', 'THREE']);
+});
+
+test('the stalest-first pre-pass runs ONE query per entity, not one per customer', async () => {
+  const fake = fakeArPool();
+  await arSnapshotCron(deps(fake, { customers: CUSTOMERS }));
+  const prePasses = fake.calls.filter((c) => /as last_ok/i.test(c.sql));
+  assert.equal(prePasses.length, 1, 'three BXR customers share one entity → one pre-pass query');
+  assert.equal(prePasses[0]!.params![0], BXR_ENTITY_ID);
+});
