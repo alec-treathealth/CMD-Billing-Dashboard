@@ -12,6 +12,7 @@ import { arSnapshotCron } from '../src/billingAudit/arSnapshotCron.js';
 import type { ArWriteStats } from '../src/billingAudit/arSnapshotWrite.js';
 import { BXR_ENTITY_ID } from '../src/tenants.js';
 import { fakeArPool } from './helpers/fakeArPool.js';
+import { AR_EXPECTED_EMPTY_CUSTOMERS } from '../src/billingAudit/arConfig.js';
 
 const CUSTOMERS: CmdCustomerTarget[] = [
   { customerId: '10000001', facilityCode: 'ONE', businessEntityId: BXR_ENTITY_ID },
@@ -274,4 +275,16 @@ test('the stalest-first pre-pass runs ONE query per entity, not one per customer
   const prePasses = fake.calls.filter((c) => /as last_ok/i.test(c.sql));
   assert.equal(prePasses.length, 1, 'three BXR customers share one entity → one pre-pass query');
   assert.equal(prePasses[0]!.params![0], BXR_ENTITY_ID);
+});
+
+test('a customer with LIVE rows is never exempt from the empty-regression guard', () => {
+  // AR_EXPECTED_EMPTY_CUSTOMERS disables the guard for its members, so a blank CMD export for one
+  // stale-marks every live claim and closes the run as `empty` — a success — with the 20h freshness
+  // cursor then blocking a re-pull. It held the two accounts with the LEAST tolerance for that:
+  // WRC (4 live claims / $35,780) and TREAT_CO (7 / $39,450), measured 2026-09-10.
+  assert.equal(AR_EXPECTED_EMPTY_CUSTOMERS.size, 0, 'no account is currently exempt');
+  // The mechanism is kept for an account that genuinely has no book; the bar is NO live claims.
+  for (const known of ['10033951', '10035974']) {
+    assert.ok(!AR_EXPECTED_EMPTY_CUSTOMERS.has(known), `${known} carries live claims and must stay protected`);
+  }
 });

@@ -171,6 +171,137 @@ read, so a claim can still only ever reach its own patient's notes. One indexed 
 `(business_entity_id, cmd_patient_id, noted_at desc) where cmd_claim_id is null` would cut that if
 it ever matters.
 
+### PHI retention and removal — RATIFIED 2026-09-10
+
+This plane is a **permanent, growing PHI replica**, by design rather than oversight: 2,415 patients'
+encrypted identity, 58,830 claims, 103,367 remits and 15,010 CMD staff notes across 19 accounts,
+refreshed daily. There is **no `delete` statement anywhere in it** — not in `arSnapshotWrite.ts`, not
+in the three definers, not in the cron, not in the CLI. A claim that leaves CMD's snapshot is marked
+`in_latest_snapshot = false` and KEPT, because surfacing claims CMD has stopped reporting is the
+whole point of the queue.
+
+The consequence nothing in the code stated until now: **when a facility offboards, its patients'
+names, DOBs and member ids stay in `claims.ar_patient` indefinitely.** Three accounts left the
+roster in the month CLAUDE.md documents, so this is a live path, not a hypothetical. The only
+removal tool that existed was `0109_ar_management_rollback.sql`, which drops the plane for all 19
+accounts — no per-facility or per-patient path for an amendment or a records request.
+
+**THE WINDOW, RULED BY ALEC 2026-09-10 — this is the policy, not a proposal:**
+
+- **Keep non-current rows for 24 months** from `last_seen_at`, then purge.
+- **Purge an offboarded facility within 90 days** of its removal from `AR_SNAPSHOT_CUSTOMERS`.
+
+24 months is derived from the queue's own bands rather than picked: the tab exposes 1–2yr and 2yr+,
+so any window shorter than two years would delete rows the queue exists to show, and the margin
+above 730 days covers a claim that ages in near the boundary.
+
+Two consequences of the ruling that are easy to miss:
+
+- **A 24-month clock needs something to measure, and `last_seen_at` is the only honest column.**
+  `first_seen_at` would purge a long-lived claim that CMD is still reporting, and `dos_from` is a
+  clinical date that has no bearing on how long we have held the record. `last_seen_at` advances on
+  every ingest that still carries the row, so the clock only starts once CMD stops reporting it.
+- **Nothing enforces this yet, and that is deliberate.** There is no retention cron and none is
+  wanted (see THE MECHANISM below). The window is a stated obligation with a named tool, which is
+  what makes it auditable; a scheduled PHI deleter with no alerting behind it would be a worse
+  failure mode than holding data slightly too long. Whoever offboards a facility runs the purge.
+
+**THE MECHANISM: a scoped migration at offboarding, run by a human.** Deliberately NOT a cron. An
+automatic PHI deleter is a worse failure mode than retention, and this repo has no alerting that
+would notice it misfiring.
+
+**The scoping map matters more than the statements, because the tables do not agree.** Measured from
+0109 rather than assumed:
+
+| Scoped directly by `cmd_customer_id` | Reachable only via `cmd_claim_id` |
+|---|---|
+| `ar_snapshot_run`, `ar_patient`, `ar_claim`, `ar_charge`, `ar_claim_note` | `ar_remit`, `ar_claim_status_event`, `ar_claim_work`, `ar_claim_event` |
+
+`ar_notification_seen` is keyed by `app_user_id` alone — a per-user read cursor, no facility scope,
+left alone by a purge.
+
+```sql
+-- Purge one offboarded facility. Run as claims_admin.
+--
+-- TWO parameters, and BOTH are required: :entity (the tenant uuid) and :cust (the CMD customer id).
+-- psql's :'name' form emits a QUOTED literal — plain :name substitutes raw text, so `-v cust=10033951`
+-- would compare a text column to an integer and abort the transaction with
+-- "operator does not exist: text = integer" before deleting anything.
+--
+--   psql -v entity="'af504ab6-...'" -v cust=10033951 -f purge.sql
+set role claims_admin;
+begin;
+-- Capture (entity, claim, patient) TRIPLES before deleting ar_claim: four tables are reachable only
+-- through it, and the entity must travel with the ids for the reason in trap 0 below.
+create temp table _purge as
+  select business_entity_id, cmd_claim_id, cmd_patient_id
+    from claims.ar_claim
+   where business_entity_id = :'entity'::uuid and cmd_customer_id = :'cust';
+
+delete from claims.ar_claim_event e
+ where (e.business_entity_id, e.cmd_claim_id) in (select business_entity_id, cmd_claim_id from _purge);
+delete from claims.ar_claim_work w
+ where (w.business_entity_id, w.cmd_claim_id) in (select business_entity_id, cmd_claim_id from _purge);
+delete from claims.ar_claim_status_event t
+ where (t.business_entity_id, t.cmd_claim_id) in (select business_entity_id, cmd_claim_id from _purge);
+delete from claims.ar_remit r
+ where (r.business_entity_id, r.cmd_claim_id) in (select business_entity_id, cmd_claim_id from _purge);
+delete from claims.ar_claim_note  where business_entity_id = :'entity'::uuid and cmd_customer_id = :'cust';
+delete from claims.ar_charge      where business_entity_id = :'entity'::uuid and cmd_customer_id = :'cust';
+delete from claims.ar_claim       where business_entity_id = :'entity'::uuid and cmd_customer_id = :'cust';
+-- ar_patient LAST and never by customer alone: see trap 1.
+delete from claims.ar_patient p
+ where (p.business_entity_id, p.cmd_patient_id) in (select business_entity_id, cmd_patient_id from _purge)
+   and not exists (select 1 from claims.ar_claim c
+                    where c.business_entity_id = p.business_entity_id
+                      and c.cmd_patient_id = p.cmd_patient_id
+                      and c.cmd_customer_id <> :'cust');
+delete from claims.ar_snapshot_run where business_entity_id = :'entity'::uuid and cmd_customer_id = :'cust';
+commit;
+```
+
+⚠ **TRAP 0 — EVERY PREDICATE CARRIES `business_entity_id`, AND A CMD ID ALONE IS NOT A KEY.** Every
+table in this plane is unique on `(business_entity_id, cmd_*_id)`, never on the CMD id by itself —
+CMD's SEQNOs are per-customer-database, so two accounts can legitimately hold the same claim id. A
+purge matching child rows on `cmd_claim_id` alone would therefore reach another customer's — and,
+once a second tenant exists, another TENANT's — remits, status events, work and change history. And
+nothing else would stop it: this runs as `claims_admin`, which bypasses RLS, so the entity predicate
+in the statement is the only isolation there is.
+**Measured 2026-09-10: zero collisions today, and that is not reassurance.** `ar_claim` currently
+holds exactly ONE `business_entity_id` — Indigo's snapshot endpoint 404s, so no Indigo rows exist —
+which is the only reason the cross-tenant case cannot fire yet. Enabling Indigo is a named
+follow-up. Re-run the collision counts before trusting any purge:
+
+```sql
+select count(*) from (select cmd_claim_id from claims.ar_claim
+                       group by cmd_claim_id having count(distinct cmd_customer_id) > 1) x;
+```
+
+⚠ **TRAP 1 — `ar_patient` must NOT be deleted by `cmd_customer_id`, even though it has that column.**
+The table is `unique (business_entity_id, cmd_patient_id)`: one row per patient per TENANT, with
+`cmd_customer_id` a mutable attribute stamped by whichever facility's ingest last upserted them. A
+patient treated at two facilities has ONE row carrying ONE of those customer ids, so a
+customer-scoped delete is wrong in both directions — it can remove an identity another facility's
+live claims still reference, and miss a patient who only ever belonged to the purged facility but
+whose row happens to carry a different id.
+**Rehearsed 2026-09-10: the guard is currently a NO-OP** — the `not exists` form and the naive form
+both return 4 rows for WRC, because **0 patients appear at more than one facility today**. It is the
+correct form for the day one does, and that count is the trigger to watch.
+
+⚠ **TRAP 2 — notes are safe to purge by customer, and that is not obvious.** 0110 made CMD-sourced
+notes patient-level, so `cmd_claim_id` is NULL on most of them (1,535 of CAMH's 1,567). A
+claim-only delete would silently leave the note BODIES behind — the exact opposite of a purge's
+purpose. `ar_claim_note.cmd_customer_id` is `not null` on every row and is stamped by both the
+ingest and `ar_add_note`, so scoping by customer is correct AND complete. Verified by measurement:
+WRC's 13 notes are 2 claim-level + 11 patient-level, and all 13 carry the customer id.
+
+⚠ **TRAP 3 — remove the facility from `AR_SNAPSHOT_CUSTOMERS` (`src/billingAudit/arConfig.ts`) in the
+same change**, or the next 14:05 ingest re-creates everything the purge just deleted.
+
+Every statement above was **rehearsed read-only** in its `select count(*)` form on 2026-09-10 and
+resolves correctly. Do that again before running it for real: nothing here is reversible and this
+plane has no soft-delete.
+
 **What "resolved" means here.** A claim never leaves history: `in_latest_snapshot` flips off when
 CMD's snapshot stops carrying it, `balance` drops to 0 when it pays, and the work disposition
 (`ar_claim_work`) is human-owned and never touched by the ingest — so "worked, then paid" is

@@ -42,6 +42,25 @@
 --   (core.business_entity). Applied AFTER 0108 (live ledger max at authoring, 2026-09-09).
 -- Rollback: 0109_ar_management_rollback.sql
 
+-- ─────────────────────────────────────────────────────────────────────────────────────────────────
+-- ⚠ RETENTION: THIS PLANE KEEPS PHI FOREVER UNLESS SOMEONE REMOVES IT.
+--
+-- There is no `delete` anywhere in the AR write path. A claim that leaves CMD's snapshot is marked
+-- in_latest_snapshot = false and KEPT — surfacing claims CMD stopped reporting is the point of the
+-- queue. So when a facility offboards, its patients' names, DOBs and member ids stay in
+-- claims.ar_patient indefinitely, and there is no per-patient path for an amendment or a records
+-- request. The rollback script drops the plane for ALL accounts and is not that path.
+--
+-- RETENTION WINDOW, RULED BY ALEC 2026-09-10: keep non-current rows 24 months from last_seen_at;
+-- purge an offboarded facility within 90 days of its removal from AR_SNAPSHOT_CUSTOMERS. Nothing
+-- enforces this automatically and nothing should — the purge is run by a human at offboarding.
+-- The per-facility purge statements,
+-- their dependency order, and the two traps that make a naive purge wrong — ar_patient is unique per
+-- TENANT so it must not be deleted by customer, and notes are patient-level so a claim-only delete
+-- leaves the bodies behind — are in .claude/rules/billing-audit.md under
+-- "PHI retention and removal". Read that before writing a purge.
+-- ─────────────────────────────────────────────────────────────────────────────────────────────────
+
 set role claims_admin;
 
 -- 1. Run log ------------------------------------------------------------------------------
