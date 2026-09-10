@@ -141,6 +141,56 @@ test('budget exhausted: remaining customers are skipped without a fetch or a run
   assert.deepEqual(stats.per_customer.map((r) => r.outcome), ['ok', 'skipped_budget', 'skipped_budget']);
 });
 
+test('running guard: a customer with a young `running` run is skipped — no START row, no fetch', async () => {
+  const fake = fakeArPool({ running: new Set(['10000002']) });
+  const fetched: string[] = [];
+  const stats = await arSnapshotCron(deps(fake, { fetchSnapshot: async (id) => { fetched.push(id); return ZIP; } }));
+  assert.deepEqual(fetched, ['10000001', '10000003']);
+  assert.equal(stats.customers_skipped_running, 1);
+  assert.deepEqual(stats.per_customer.map((r) => r.outcome), ['ok', 'skipped_running', 'ok']);
+  const starts = fake.calls.filter((c) => /insert into claims\.ar_snapshot_run/i.test(c.sql)).map((c) => c.params![1]);
+  assert.deepEqual(starts, ['10000001', '10000003']);
+});
+
+test('empty-regression guard: zero claims for a customer WITH live rows is an error and writes nothing', async () => {
+  const fake = fakeArPool({ liveRows: new Set(['10000001']) });
+  let writes = 0;
+  const stats = await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!, CUSTOMERS[1]!],
+    parseAndMap: () => emptyMapped,
+    write: async () => { writes += 1; return writeStats(0); },
+  }));
+  // ONE: live rows + zero claims → error/empty_regression, writer never called (no stale mark).
+  // TWO: no live rows + zero claims → empty (a first-ever empty pull), writer called (harmless).
+  assert.deepEqual(stats.per_customer.map((r) => [r.outcome, r.errorLabel]), [['error', 'empty_regression'], ['empty', null]]);
+  assert.equal(writes, 1);
+  assert.equal(stats.customers_empty_regression, 1);
+  assert.equal(stats.customers_failed, 1);
+  const finishes = fake.calls.filter((c) => /update claims\.ar_snapshot_run/i.test(c.sql)).map((c) => [c.params![1], c.params![2]]);
+  assert.deepEqual(finishes, [['error', 'empty_regression'], ['empty', null]]);
+  // An error run is NOT fresh, so the next pass retries — the 20h window never hides the regression.
+  assert.deepEqual(fake.assertAllScoped(), []);
+});
+
+test('empty-regression guard: an EXPECTED-empty customer with live rows still records empty', async () => {
+  const fake = fakeArPool({ liveRows: new Set(['10000003']) });
+  const stats = await arSnapshotCron(deps(fake, { customers: [CUSTOMERS[2]!], parseAndMap: () => emptyMapped, write: async () => writeStats(0) }));
+  assert.equal(stats.per_customer[0]!.outcome, 'empty');
+  assert.equal(stats.customers_empty_regression, 0);
+});
+
+test('a writer that throws mid-way still busts the cache — batches before it may have committed', async () => {
+  const fake = fakeArPool();
+  let revalidated = 0;
+  const stats = await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!],
+    write: async () => { throw new Error('42501 on batch 3'); },
+    revalidate: () => { revalidated += 1; },
+  }));
+  assert.equal(stats.customers_failed, 1);
+  assert.equal(revalidated, 1);
+});
+
 test('a customer without a businessEntityId is a programming error, not a silent unscoped write', async () => {
   const fake = fakeArPool();
   await assert.rejects(arSnapshotCron(deps(fake, { customers: [{ customerId: '10000009', facilityCode: 'X' }] })), /no businessEntityId/);

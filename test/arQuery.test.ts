@@ -9,8 +9,10 @@ import { test } from 'node:test';
 import {
   AR_PAGE_SIZE,
   arSortValue,
+  buildArAssigneeLookupQuery,
   buildArAssigneeOptionsQuery,
   buildArChargeLinesQuery,
+  buildArClaimPatientQuery,
   buildArClaimQuery,
   buildArFacilityOptionsQuery,
   buildArKpiQuery,
@@ -108,7 +110,9 @@ test('queue query: every filter binds a parameter; band filter compiles to DOS b
   assert.equal(sql.includes('CIGNA'), false, 'values never inline');
   // `age desc` (oldest first) flips to dos_from ASC.
   assert.match(sql, /order by c\.dos_from ASC nulls last, c\.id ASC/);
-  assert.match(sql, /c\.cmd_followup_date < \$1::date/);
+  // The overdue predicate reads the SAME effective date the grid shows (work due date, else CMD's).
+  assert.match(sql, /coalesce\(w\.due_on, c\.cmd_followup_date\) < \$1::date/);
+  assert.equal(/ c\.cmd_followup_date < \$1::date/.test(sql), false);
 });
 
 test('queue query: keyset cursor continues after (value, id); null-value cursor walks the NULLS LAST tail', () => {
@@ -147,6 +151,7 @@ test('summary excludes the band filter; KPI includes it; both stay tenant-pinned
   assertParamsAligned(k.sql, k.params);
   assert.match(k.sql, /c\.dos_from <= \(\$1::date - \$\d+::int\)/);
   assert.match(k.sql, /as aged_31_plus_balance/);
+  assert.match(k.sql, /coalesce\(w\.due_on, c\.cmd_followup_date\) < \$1::date\)::int as followup_overdue/);
 });
 
 test('detail builders: claim id validated, tenant pinned, notes include patient-level rows', () => {
@@ -170,7 +175,19 @@ test('detail builders: claim id validated, tenant pinned, notes include patient-
 test('options + notifications: parameterised, bounded, actor excluded', () => {
   const fac = buildArFacilityOptionsQuery(ENT);
   assertParamsAligned(fac.sql, fac.params);
-  assert.match(buildArAssigneeOptionsQuery().sql, /role in \('super_admin', 'admin'\)/);
+  // Assignees are TENANT-scoped: every super_admin plus this tenant's admins; the slug is allowlisted.
+  const asg = buildArAssigneeOptionsQuery('bxr');
+  assertParamsAligned(asg.sql, asg.params);
+  assert.match(asg.sql, /role = 'super_admin' or \(role = 'admin' and entity = \$1\)/);
+  assert.deepEqual(asg.params, ['bxr']);
+  assert.throws(() => buildArAssigneeOptionsQuery('consolidated'), /bxr or indigo/);
+  const look = buildArAssigneeLookupQuery(USER);
+  assertParamsAligned(look.sql, look.params);
+  assert.match(look.sql, /select user_id::text as user_id, email, role, entity from claims\.app_user where user_id = \$1::uuid/);
+  assert.throws(() => buildArAssigneeLookupQuery('me'), /uuid/);
+  const pat = buildArClaimPatientQuery('900000001', ENT);
+  assertParamsAligned(pat.sql, pat.params);
+  assert.match(pat.sql, /select cmd_patient_id from claims\.ar_claim where business_entity_id = any\(\$1::uuid\[\]\) and cmd_claim_id = \$2/);
   const n = buildArNotificationsQuery(USER, ENT, 500);
   assertParamsAligned(n.sql, n.params);
   assert.equal(n.params[2], 100, 'limit clamped');

@@ -64,14 +64,19 @@ export function ArQueueTable({ view, canRevealPhi, filter, sort, onSort, initial
   const [error, setError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<Map<string, { name: string; member: string | null }>>(new Map());
   const seeded = useRef(initialPage != null);
+  // Request generation: Server Actions cannot be aborted, so a late response for a superseded filter /
+  // sort / page must not overwrite the current selection — only the newest request commits.
+  const generation = useRef(0);
   const filterKey = JSON.stringify(filter);
   const [nowMs, setNowMs] = useState<number | null>(null);
   useEffect(() => { setNowMs(Date.now()); }, [rows]);
 
   const load = useCallback(async (target: number, cursorList: (ArCursor | null)[]) => {
+    const gen = ++generation.current;
     setLoading(true);
     setError(null);
     const res = await loadArQueue(view, cursorList[target] ?? null, filter, sort);
+    if (gen !== generation.current) return; // superseded — a newer request owns the state now
     if (!res.ok) { setError(res.error); setLoading(false); return; }
     setRows(res.rows);
     setHasNext(res.nextCursor != null);

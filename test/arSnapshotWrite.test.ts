@@ -95,7 +95,8 @@ test('writeArSnapshot: the stale mark runs last and is scoped to the customer + 
   const updates = fake.calls.filter((c) => /^update claims\.ar_(claim|charge) set in_latest_snapshot = false/i.test(c.sql));
   assert.equal(updates.length, 2);
   assert.deepEqual(updates[0]!.params, [BXR_ENTITY_ID, '10099999', 101]);
-  assert.match(updates[0]!.sql, /last_run_id is distinct from \$3/);
+  assert.match(updates[0]!.sql, /\(last_run_id is null or last_run_id < \$3\)/, 'only OLDER runs are stale-marked (an overlapping newer run keeps its rows)');
+  assert.equal(/is distinct from/.test(updates[0]!.sql), false);
   assert.deepEqual(updates[1]!.params, [BXR_ENTITY_ID, '10099999', '2026-09-09T12:00:00.000Z']);
   assert.match(updates[1]!.sql, /last_seen_at < \$3::timestamptz/);
   const lastInsertIdx = Math.max(...fake.calls.map((c, i) => (/^insert into/i.test(c.sql) ? i : -1)));

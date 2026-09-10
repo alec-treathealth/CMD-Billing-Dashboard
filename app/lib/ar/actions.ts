@@ -29,7 +29,7 @@ import type {
 } from './contract';
 import {
   addArNote, loadArClaimDetail, loadArNotes, loadArNotifications, loadArOptions, loadArQueuePage, loadArSummary,
-  markArNotificationsSeen, revealArPatient, revealArPatients, setArWork, type ArActor,
+  markArNotificationsSeen, resolveArAssignee, revealArPatient, revealArPatients, setArWork, type ArActor,
 } from './server';
 
 const GENERIC = 'AR Management could not be loaded right now.';
@@ -105,7 +105,7 @@ export async function loadArOptionsAction(view: unknown): Promise<ArOptionsResul
   const s = await arScope(view);
   if (!s.ok) return { ok: false, error: s.error };
   try {
-    return { ok: true, options: await loadArOptions(s.scope.entityIds) };
+    return { ok: true, options: await loadArOptions(s.scope.entityIds, s.scope.view) };
   } catch (err) {
     console.error('loadArOptionsAction failed', err instanceof Error ? err.message : '');
     return { ok: false, error: GENERIC };
@@ -127,17 +127,20 @@ export async function loadArClaimDetailAction(view: unknown, claimId: unknown): 
   }
 }
 
-/** Notes carry incidental PHI (rep follow-up text) — gated to canRevealPhi and audited by claim id. */
-export async function loadArNotesAction(view: unknown, claimId: unknown, patientId: unknown): Promise<ArNotesResult> {
+/**
+ * Notes carry incidental PHI (rep follow-up text) — gated to canRevealPhi and audited by claim id.
+ * The patient whose account-level notes are included is DERIVED from the claim server-side; the
+ * action deliberately takes no patient id, so a caller cannot pair a claim with another patient.
+ */
+export async function loadArNotesAction(view: unknown, claimId: unknown): Promise<ArNotesResult> {
   const s = await arScope(view);
   if (!s.ok) return { ok: false, error: s.error };
   if (!s.scope.canRevealPhi) return { ok: false, error: 'Your role does not permit reading follow-up notes.' };
   const cid = cleanClaimId(claimId);
-  const pid = cleanClaimId(patientId);
-  if (!cid || !pid) return { ok: false, error: 'Invalid claim.' };
+  if (!cid) return { ok: false, error: 'Invalid claim.' };
   try {
     await recordAccess({ actorEmail: s.scope.actor.email, actorUserId: s.scope.actor.userId, action: 'read_ar_notes', detail: { cmd_claim_id: cid, view: s.scope.view } });
-    return { ok: true, notes: await loadArNotes(cid, pid, s.scope.entityIds) };
+    return { ok: true, notes: await loadArNotes(cid, s.scope.entityIds) };
   } catch (err) {
     console.error('loadArNotesAction failed', err instanceof Error ? err.message : '');
     return { ok: false, error: 'Notes could not be loaded right now.' };
@@ -201,9 +204,18 @@ export async function setArWorkAction(view: unknown, claimId: unknown, patch: un
   const p = typeof patch === 'object' && patch !== null ? (patch as Record<string, unknown>) : {};
   const status = typeof p.workStatus === 'string' && (AR_WORK_STATUSES as readonly string[]).includes(p.workStatus) ? (p.workStatus as ArWorkStatus) : null;
   if (!status) return { ok: false, error: 'Invalid work status.' };
-  const assigneeUserId = typeof p.assigneeUserId === 'string' && UUID_RE.test(p.assigneeUserId) ? p.assigneeUserId : null;
-  const assigneeEmail = typeof p.assigneeEmail === 'string' && p.assigneeEmail.trim().length >= 3 && p.assigneeEmail.length <= 320 ? p.assigneeEmail.trim().toLowerCase() : null;
-  if ((assigneeUserId === null) !== (assigneeEmail === null)) return { ok: false, error: 'Invalid assignee.' };
+  // The assignee is resolved SERVER-SIDE from the uuid alone: the client's email is ignored, the row
+  // must exist, hold a PHI-capable role, and belong to THIS tenant (super_admins are cross-tenant by role).
+  let assigneeUserId: string | null = null;
+  let assigneeEmail: string | null = null;
+  if (typeof p.assigneeUserId === 'string' && p.assigneeUserId.trim() !== '') {
+    if (!UUID_RE.test(p.assigneeUserId)) return { ok: false, error: 'Invalid assignee.' };
+    const a = await resolveArAssignee(p.assigneeUserId);
+    const inTenant = a !== null && (a.role === 'super_admin' || (a.role === 'admin' && a.entity === s.scope.view));
+    if (!a || !inTenant) return { ok: false, error: 'Assignee must be an admin or super-admin of this tenant.' };
+    assigneeUserId = a.user_id;
+    assigneeEmail = a.email;
+  }
   const dueOn = typeof p.dueOn === 'string' && ISO_DATE.test(p.dueOn) ? p.dueOn : null;
   const resolutionCode = typeof p.resolutionCode === 'string' && p.resolutionCode.trim().length > 0 ? p.resolutionCode.trim().slice(0, 60) : null;
   const clean: ArWorkPatch = { workStatus: status, assigneeUserId, assigneeEmail, dueOn, resolutionCode };

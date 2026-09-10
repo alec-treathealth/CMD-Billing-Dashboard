@@ -197,7 +197,9 @@ export function arBaseConds(filter: ArFilter, entityIds: string[], asOfParam: st
   if (filter.workStatuses) conds.push(`coalesce(w.work_status, 'open') = any(${add(filter.workStatuses)}::text[])`);
   if (filter.assigneeUserIds) conds.push(`w.assignee_user_id = any(${add(filter.assigneeUserIds)}::uuid[])`);
   if (filter.hasDenial) conds.push('c.has_denial');
-  if (filter.followupOverdue) conds.push(`c.cmd_followup_date < ${asOfParam}::date`);
+  // The queue shows the WORK due date when one is set, else CMD's follow-up date — the overdue
+  // predicate must read the same effective date or a red date would vanish under its own filter.
+  if (filter.followupOverdue) conds.push(`coalesce(w.due_on, c.cmd_followup_date) < ${asOfParam}::date`);
   if (filter.minBalance !== undefined) conds.push(`c.balance >= ${add(filter.minBalance)}::numeric`);
   if (filter.claimId) conds.push(`c.cmd_claim_id = ${add(filter.claimId)}`);
   if (filter.patientNameBidx) conds.push(`p.patient_name_bidx = any(${add(filter.patientNameBidx)}::text[])`);
@@ -343,7 +345,7 @@ export function buildArKpiQuery(filter: ArFilter, entityIds: readonly string[], 
     `select count(*)::int as claims, coalesce(sum(c.balance), 0)::text as balance, ` +
     `count(*) filter (where c.has_denial)::int as denied, coalesce(sum(c.balance) filter (where c.has_denial), 0)::text as denied_balance, ` +
     `count(*) filter (where coalesce(w.work_status, 'open') <> 'open')::int as worked, ` +
-    `count(*) filter (where c.cmd_followup_date < ${asOfParam}::date)::int as followup_overdue, ` +
+    `count(*) filter (where coalesce(w.due_on, c.cmd_followup_date) < ${asOfParam}::date)::int as followup_overdue, ` +
     `count(*) filter (where c.cmd_note_count = 0 and un.last_user_note_at is null)::int as never_noted, ` +
     `count(*) filter (where (${asOfParam}::date - c.dos_from) > 30)::int as aged_31_plus, ` +
     `coalesce(sum(c.balance) filter (where (${asOfParam}::date - c.dos_from) > 30), 0)::text as aged_31_plus_balance ` +
@@ -376,11 +378,39 @@ export function buildArPayerOptionsQuery(entityIds: readonly string[]): { sql: s
   };
 }
 
-/** Staff who can be assigned work — the PHI-capable roles (plain `user` cannot see what it would be assigned). */
-export function buildArAssigneeOptionsQuery(): { sql: string; params: unknown[] } {
+const ENTITY_SLUGS = new Set(['bxr', 'indigo']);
+function entitySlugOrThrow(slug: string): string {
+  if (!ENTITY_SLUGS.has(slug)) throw new Error('arQuery: entity slug must be bxr or indigo');
+  return slug;
+}
+
+/**
+ * Staff who can be assigned work IN THIS TENANT: every super_admin (cross-tenant by role) plus the
+ * admins whose `claims.app_user.entity` is this tenant. Entity-scoped so a tenant's staff list never
+ * carries another tenant's administrators; plain `user` cannot be assigned (it cannot see PHI).
+ */
+export function buildArAssigneeOptionsQuery(entitySlug: string): { sql: string; params: unknown[] } {
   return {
-    sql: `select user_id::text as user_id, email, role from claims.app_user where role in ('super_admin', 'admin') order by email`,
-    params: [],
+    sql:
+      `select user_id::text as user_id, email, role from claims.app_user ` +
+      `where role = 'super_admin' or (role = 'admin' and entity = $1) order by email`,
+    params: [entitySlugOrThrow(entitySlug)],
+  };
+}
+
+/** Resolve ONE assignee server-side (the mutation never trusts a client-supplied uuid/email pair). */
+export function buildArAssigneeLookupQuery(userId: string): { sql: string; params: unknown[] } {
+  return {
+    sql: `select user_id::text as user_id, email, role, entity from claims.app_user where user_id = $1::uuid`,
+    params: [userIdOrThrow(userId)],
+  };
+}
+
+/** The patient a claim belongs to — the notes read derives it here rather than trusting the caller. */
+export function buildArClaimPatientQuery(cmdClaimId: string, entityIds: readonly string[]): { sql: string; params: unknown[] } {
+  return {
+    sql: `select cmd_patient_id from claims.ar_claim where business_entity_id = any($1::uuid[]) and cmd_claim_id = $2 limit 1`,
+    params: [entityIdsOrThrow(entityIds), claimIdOrThrow(cmdClaimId)],
   };
 }
 

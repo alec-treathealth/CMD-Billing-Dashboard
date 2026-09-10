@@ -11,7 +11,7 @@
  * PHI: nothing PHI is fetched until the user acts. Notes are fetched only for canRevealPhi roles
  * (they carry incidental PHI) and the identifier reveal is the separate audited action.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { useDialog } from '../../qualify/useDialog';
 import { addArNoteAction, loadArClaimDetailAction, loadArNotesAction, revealArPatientAction, setArWorkAction } from '@/lib/ar/actions';
@@ -72,13 +72,18 @@ export function ClaimDrawer({ view, canRevealPhi, canWork, target, assignees, on
   const [saved, setSaved] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState<number | null>(null);
   useEffect(() => { setNowMs(Date.now()); }, [detail]);
+  // Load token: a late response for a claim that is no longer selected (or a closed drawer) must not
+  // populate the drawer — and must never seed the work form a save could then write to the wrong claim.
+  const loadToken = useRef(0);
 
   const claimId = target?.cmdClaimId ?? null;
 
   const loadAll = useCallback(async (id: string) => {
+    const token = ++loadToken.current;
     setLoading(true);
     setErr(null);
     const res = await loadArClaimDetailAction(view, id);
+    if (token !== loadToken.current) return;
     if (!res.ok) { setErr(res.error); setLoading(false); return; }
     setDetail(res.detail);
     setWork({
@@ -90,7 +95,8 @@ export function ClaimDrawer({ view, canRevealPhi, canWork, target, assignees, on
     setLoading(false);
     if (canRevealPhi) {
       setNotesLoading(true);
-      const n = await loadArNotesAction(view, id, res.detail.claim.cmd_patient_id);
+      const n = await loadArNotesAction(view, id);
+      if (token !== loadToken.current) return;
       setNotes(n.ok ? n.notes : []);
       if (!n.ok) setErr(n.error);
       setNotesLoading(false);
@@ -98,6 +104,7 @@ export function ClaimDrawer({ view, canRevealPhi, canWork, target, assignees, on
   }, [view, canRevealPhi]);
 
   useEffect(() => {
+    loadToken.current += 1; // abandon any in-flight load for the previous claim
     setDetail(null); setNotes(null); setRevealed(null); setErr(null); setNoteDraft(''); setSaved(null);
     if (claimId) void loadAll(claimId);
   }, [claimId, loadAll]);

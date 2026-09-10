@@ -18,6 +18,10 @@ export interface FakeArPoolOpts {
   existingNoteIds?: string[];
   /** Throw on the run-start INSERT for these customerIds (params[1]). */
   failStartFor?: Set<string>;
+  /** customerIds with a `running` run younger than 20 min (the running guard reports true). */
+  running?: Set<string>;
+  /** customerIds that already have live ar_claim rows (the empty-regression guard reports true). */
+  liveRows?: Set<string>;
 }
 
 /** Count VALUES tuples in a multi-row insert: every tuple starts with `($n`. */
@@ -43,6 +47,12 @@ export function fakeArPool(opts: FakeArPoolOpts = {}) {
         if (/current_setting/i.test(sql)) return { rows: [{ v: guc }], rowCount: 1 };
         if (/from claims\.ar_snapshot_run/i.test(sql) && /as fresh/i.test(sql)) {
           return { rows: [{ fresh: opts.fresh?.has(String(params?.[1])) ?? false }], rowCount: 1 };
+        }
+        if (/from claims\.ar_snapshot_run/i.test(sql) && /as running/i.test(sql)) {
+          return { rows: [{ running: opts.running?.has(String(params?.[1])) ?? false }], rowCount: 1 };
+        }
+        if (/from claims\.ar_claim where/i.test(sql) && /as has_rows/i.test(sql)) {
+          return { rows: [{ has_rows: opts.liveRows?.has(String(params?.[1])) ?? false }], rowCount: 1 };
         }
         if (/insert into claims\.ar_snapshot_run/i.test(sql)) {
           if (opts.failStartFor?.has(String(params?.[1]))) throw new Error('start insert boom');

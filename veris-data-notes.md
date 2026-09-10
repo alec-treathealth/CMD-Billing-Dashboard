@@ -4875,3 +4875,22 @@ APPROVED_HIGHER 191.
 (the rules file calls them "not yet open") — keep or retire in `arConfig.ts`; (2) the 14:05 UTC slot is
 inferred from "snapshots are created in the morning Eastern"; confirm the first scheduled run's
 `snapshot_as_of` advanced from 2026-09-08 to 2026-09-09.
+
+### 0111 — `ar_set_work` explicit projection + assignee check (APPLIED LIVE 2026-09-10 04:13 UTC, Qodo #348 round 1)
+
+Ledger `20260910041317`, `apply_migration`. CREATE OR REPLACE of the 0109 definer only: the prior-row read
+is now `select work_status, assignee_email, due_on, resolution_code into …` (the standing "never SELECT *"
+rule — the %rowtype form would have silently widened a runtime definer's projection on the next column
+add), and the assignee uuid must be an existing admin / super_admin app user. Tenant membership of the
+assignee is checked in the Server Action (`setArWorkAction` resolves the uuid server-side and requires
+`role = super_admin` or `admin` with `entity = the clamped view`); the definer has only the entity uuid,
+so it enforces existence + role and the app layer enforces tenancy. Verified at apply: `prosrc` has no
+`select *`, owner `claims_admin`, EXECUTE true for `claims_reader` and false for `public`.
+
+The same Qodo round changed the ingest without a migration: a snapshot missing `B_CHARGE`/`B_CLAIM` is
+`parse_failed` (not an empty book); a ZERO-claim mapping for a customer that still has live rows is
+recorded `error` / `empty_regression` and writes NOTHING (an error run is not fresh, so the next pass
+retries); a `running` run younger than 20 min skips the customer (`skipped_running`); the stale mark
+is `last_run_id < run`, not `<>`, so an overlapping newer run keeps its rows; the cache tag is busted
+whenever a write was attempted (batches commit independently). Assignee options are tenant-scoped
+(`super_admin` ∪ this tenant's `admin`s); the notes read derives the patient from the claim server-side.

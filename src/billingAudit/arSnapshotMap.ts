@@ -261,6 +261,10 @@ interface Activity {
 
 /** Map one parsed snapshot to AR rows. See the header for every rule encoded here. */
 export function mapSnapshot(tables: SnapshotTables): ArMapped {
+  // A snapshot without its two core tables is a BROKEN EXPORT, not an empty book: fail loud (the cron
+  // records parse_failed) instead of mapping to zero claims and stale-marking every live claim.
+  tables.require('B_CHARGE');
+  tables.require('B_CLAIM');
   const skips: Record<string, number> = {};
 
   // Lookups ------------------------------------------------------------------------------------

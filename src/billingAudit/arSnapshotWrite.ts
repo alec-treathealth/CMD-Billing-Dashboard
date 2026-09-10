@@ -290,8 +290,10 @@ export async function writeArSnapshot(db: Db, mapped: ArMapped, ctx: ArWriteCont
   //    their history.
   await withTenant(db, ent, async (client) => {
     const c = await client.query(
+      // `<`, not `<>`: a row a NEWER overlapping run already stamped must never be marked stale by an
+      // older run finishing late (run ids are a monotonic identity). Null = pre-run-log row = older.
       `update claims.ar_claim set in_latest_snapshot = false ` +
-        `where business_entity_id = $1 and cmd_customer_id = $2 and in_latest_snapshot and last_run_id is distinct from $3`,
+        `where business_entity_id = $1 and cmd_customer_id = $2 and in_latest_snapshot and (last_run_id is null or last_run_id < $3)`,
       [ent, ctx.cmdCustomerId, ctx.runId],
     );
     stats.claimsMarkedStale = c.rowCount ?? 0;

@@ -205,6 +205,14 @@ test('summarizeDenials: PR-only remits are not a denial unless CMD flags DENIAL;
   assert.equal(many.items[0]!.c, '108');
 });
 
+test('mapSnapshot REFUSES a snapshot missing a core table — a broken export must not read as an empty book', () => {
+  const t = buildFixture();
+  const noCharges = new Map<string, SnapshotTable>([['B_CLAIM', t.require('B_CLAIM')], ['B_PAYOR', t.require('B_PAYOR')]]);
+  assert.throws(() => mapSnapshot(snapshotTablesFrom(noCharges)), /B_CHARGE is missing/);
+  const noClaims = new Map<string, SnapshotTable>([['B_CHARGE', t.require('B_CHARGE')]]);
+  assert.throws(() => mapSnapshot(snapshotTablesFrom(noClaims)), /B_CLAIM is missing/);
+});
+
 test('mapSnapshot tolerates missing optional tables (a tiny snapshot with no notes/remits/statuses)', () => {
   const t = buildFixture();
   const minimal = new Map<string, SnapshotTable>();

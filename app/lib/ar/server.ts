@@ -15,8 +15,10 @@ import { AR_CACHE_TAG } from '../../../src/billingAudit/arConfig.js';
 import {
   AR_PAGE_SIZE,
   arSortValue,
+  buildArAssigneeLookupQuery,
   buildArAssigneeOptionsQuery,
   buildArChargeLinesQuery,
+  buildArClaimPatientQuery,
   buildArClaimQuery,
   buildArEventsQuery,
   buildArFacilityOptionsQuery,
@@ -114,11 +116,11 @@ export const loadArSummary = unstable_cache(
 );
 
 export const loadArOptions = unstable_cache(
-  async (entityIds: string[]): Promise<ArOptions> => {
+  async (entityIds: string[], entitySlug: string): Promise<ArOptions> => {
     const exec = arExecutor();
     const f = buildArFacilityOptionsQuery(entityIds);
     const p = buildArPayerOptionsQuery(entityIds);
-    const a = buildArAssigneeOptionsQuery();
+    const a = buildArAssigneeOptionsQuery(entitySlug);
     const fr = buildArFreshnessQuery(entityIds);
     const [fac, pay, asg, fresh] = await Promise.all([
       exec.query<Row>(f.sql, f.params),
@@ -177,7 +179,13 @@ export async function loadArClaimDetail(cmdClaimId: string, entityIds: string[],
  * incidental PHI). A note that fails to decrypt is surfaced as a placeholder, never dropped silently
  * — a corrupt row is an operational signal.
  */
-export async function loadArNotes(cmdClaimId: string, cmdPatientId: string, entityIds: string[]): Promise<ArNote[]> {
+export async function loadArNotes(cmdClaimId: string, entityIds: string[]): Promise<ArNote[]> {
+  // The patient is DERIVED from the claim inside the tenant scope — never taken from the caller — so
+  // a claim id can only ever unlock the notes of its own patient.
+  const pq = buildArClaimPatientQuery(cmdClaimId, entityIds);
+  const claim = await arExecutor().query<{ cmd_patient_id: string }>(pq.sql, pq.params);
+  const cmdPatientId = claim.rows[0]?.cmd_patient_id;
+  if (!cmdPatientId) return [];
   const q = buildArNotesQuery(cmdClaimId, cmdPatientId, entityIds);
   const { rows } = await arExecutor().query<ArNoteEncRow>(q.sql, q.params);
   return Promise.all(
@@ -228,6 +236,15 @@ export async function revealArPatients(cmdPatientIds: string[], actor: ArActor, 
       member_id: r.member_id_enc ? await decryptPhi(Buffer.from(r.member_id_enc)) : null,
     })),
   );
+}
+
+export interface ArAssignee { user_id: string; email: string; role: string; entity: string | null }
+
+/** Look an assignee up by uuid — the mutation validates role + tenant against THIS, not the client. */
+export async function resolveArAssignee(userId: string): Promise<ArAssignee | null> {
+  const q = buildArAssigneeLookupQuery(userId);
+  const { rows } = await arExecutor().query<ArAssignee>(q.sql, q.params);
+  return rows[0] ?? null;
 }
 
 /** Add an in-app note: encrypt here, insert via the definer (server-resolved actor), bust the cache. */

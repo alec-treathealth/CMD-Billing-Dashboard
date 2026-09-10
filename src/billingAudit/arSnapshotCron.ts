@@ -30,7 +30,7 @@ import { mapSnapshot, type ArMapped } from './arSnapshotMap.js';
 import { writeArSnapshot, type ArWriteContext, type ArWriteStats } from './arSnapshotWrite.js';
 import { parseSnapshotZip } from './snapshotParse.js';
 
-export type ArCustomerOutcome = 'ok' | 'empty' | 'error' | 'not_configured' | 'unauthorized' | 'skipped_fresh' | 'skipped_budget';
+export type ArCustomerOutcome = 'ok' | 'empty' | 'error' | 'not_configured' | 'unauthorized' | 'skipped_fresh' | 'skipped_budget' | 'skipped_running';
 
 export interface ArSnapshotCronDeps {
   customers: readonly CmdCustomerTarget[];
@@ -72,6 +72,10 @@ export interface ArSnapshotCronStats {
   customers_unauthorized: number;
   customers_skipped_fresh: number;
   customers_skipped_budget: number;
+  /** Another run for the customer is still `running` (started < 20 min ago) — skipped, not started. */
+  customers_skipped_running: number;
+  /** A previously populated customer whose snapshot mapped to ZERO claims: recorded as an error, nothing written. */
+  customers_empty_regression: number;
   claims_upserted: number;
   charges_upserted: number;
   notes_inserted: number;
@@ -89,7 +93,7 @@ interface FinishCounts {
 const EMPTY_WRITE: ArWriteStats = { patients: 0, claims: 0, charges: 0, remits: 0, statusEvents: 0, notesInserted: 0, claimsMarkedStale: 0, chargesMarkedStale: 0 };
 
 /** Fixed PHI-safe stage labels — never a message, URL or cell value. */
-type StageLabel = 'fetch_failed' | 'parse_failed' | 'write_failed';
+type StageLabel = 'fetch_failed' | 'parse_failed' | 'write_failed' | 'empty_regression';
 
 class StageError extends Error {
   constructor(readonly label: StageLabel, cause: unknown) {
@@ -114,6 +118,8 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
     customers_unauthorized: 0,
     customers_skipped_fresh: 0,
     customers_skipped_budget: 0,
+    customers_skipped_running: 0,
+    customers_empty_regression: 0,
     claims_upserted: 0,
     charges_upserted: 0,
     notes_inserted: 0,
@@ -154,6 +160,26 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
     if (fresh) {
       report.outcome = 'skipped_fresh';
       stats.customers_skipped_fresh += 1;
+      stats.per_customer.push(report);
+      continue;
+    }
+
+    // RUNNING GUARD — the cheap mutex. Two invocations for one customer (a manual CLI run beside the
+    // cron, or an overlapping platform retry) would race the stale mark; a `running` row younger than
+    // 20 minutes means another pass owns this customer right now. Older `running` rows are the
+    // never-finished signal of a killed run and do NOT block.
+    const running = await withTenant(deps.writeDb, entity, async (client) => {
+      const res = await client.query<{ running: boolean }>(
+        `select exists (select 1 from claims.ar_snapshot_run ` +
+          `where business_entity_id = $1 and cmd_customer_id = $2 and status = 'running' ` +
+          `and started_at > now() - interval '20 minutes') as running`,
+        [entity, customer.customerId],
+      );
+      return res.rows[0]?.running === true;
+    });
+    if (running) {
+      report.outcome = 'skipped_running';
+      stats.customers_skipped_running += 1;
       stats.per_customer.push(report);
       continue;
     }
@@ -204,6 +230,25 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
         throw new StageError('parse_failed', e);
       }
 
+      // EMPTY-REGRESSION GUARD. A structurally valid snapshot that maps to ZERO claims for a customer
+      // that has live rows is a broken export (or a closed account), not a book that emptied overnight.
+      // Writing it would stale-mark every live claim and record a `fresh` run that blocks the re-pull
+      // for 20 hours. Record it as an error with a fixed label, write NOTHING, and let the next run
+      // retry — an account that genuinely emptied is retired by adding it to expectedEmptyCustomerIds.
+      if (mapped.claims.length === 0 && !deps.expectedEmptyCustomerIds.has(customer.customerId)) {
+        const hasLive = await withTenant(deps.writeDb, entity, async (client) => {
+          const res = await client.query<{ has_rows: boolean }>(
+            `select exists (select 1 from claims.ar_claim where business_entity_id = $1 and cmd_customer_id = $2 and in_latest_snapshot) as has_rows`,
+            [entity, customer.customerId],
+          );
+          return res.rows[0]?.has_rows === true;
+        });
+        if (hasLive) throw new StageError('empty_regression', new Error('snapshot mapped to zero claims for a customer with live rows'));
+      }
+
+      // Any writer batch may commit before a later one fails, so the cache bust must not depend on the
+      // writer resolving — mark the intent BEFORE the first statement.
+      wroteSomething = true;
       let written: ArWriteStats;
       try {
         written = await write(deps.writeDb, mapped, {
@@ -216,7 +261,6 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
       } catch (e) {
         throw new StageError('write_failed', e);
       }
-      wroteSomething = true;
       report.claims = written.claims;
       report.charges = written.charges;
       report.notesInserted = written.notesInserted;
@@ -242,6 +286,7 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
       report.outcome = 'error';
       report.errorLabel = label;
       stats.customers_failed += 1;
+      if (label === 'empty_regression') stats.customers_empty_regression += 1;
       // Ops-only message (never a cell value: the transport + mapper throw structural errors).
       const cause = err instanceof StageError ? err.cause : err;
       console.error(`ar-snapshot: customer ${customer.customerId} (${customer.facilityCode}) ${label}:`, cause instanceof Error ? cause.message : String(cause));
