@@ -126,8 +126,19 @@ export function ArWorkbench({ view, canRevealPhi, canWork, seed }: ArWorkbenchPr
     if (at === null) return 'No ingest has ever been attempted for this tenant.';
     return `The last ingest attempt was ${shortDate(at)} — the daily 14:05 UTC run has not fired since.`;
   })();
-  if (options !== null && freshness === null) {
+  // "No snapshot yet" is now `customers === 0`, not `freshness === null` — freshness is always built
+  // when the run log answers (see loadArOptions). The ingest ALARM renders above this empty state
+  // rather than being replaced by it: a tenant whose every attempt has failed needs to be told the
+  // pipe is broken, not told to go ask CMD to enable snapshots. That inversion was the bug.
+  const hasSnapshot = freshness !== null && freshness.customers > 0;
+  if (options !== null && !hasSnapshot) {
     return (
+      <div className="space-y-4">
+        {ingestAlarm ? (
+          <p role="alert" className="rounded-md border border-status-warn/40 bg-status-warn/10 px-3 py-2 text-xs text-ink900">
+            <span className="font-semibold">AR ingest needs attention.</span> {ingestAlarm}
+          </p>
+        ) : null}
       <div className="rounded-xl border border-line bg-card p-10 text-center">
         <h2 className="ths-h text-lg font-semibold text-ink900">No AR snapshot for this tenant yet</h2>
         <p className="mx-auto mt-2 max-w-xl text-sm text-ink600">
@@ -137,12 +148,13 @@ export function ArWorkbench({ view, canRevealPhi, canWork, seed }: ArWorkbenchPr
           ask CMD to enable data snapshots for this account.
         </p>
       </div>
+      </div>
     );
   }
 
   return (
     <div className="space-y-4">
-      {freshness ? (
+      {hasSnapshot && freshness ? (
         <>
           <p className="text-xs text-ink400">
             Snapshot as of <span className="ths-num text-ink600">{shortDate(freshness.newest_as_of)}</span>

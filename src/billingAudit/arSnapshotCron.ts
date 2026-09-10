@@ -311,7 +311,12 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
       // overnight drop has no benign explanation. It can only ever be tightened; loosening it means
       // deciding that halving a facility's book unremarked is acceptable.
       const baseline = lastClaimsSeen.get(`${entity}:${customer.customerId}`) ?? 0;
-      const floor = baseline > 0 ? Math.floor(baseline * (deps.emptyRegressionRatio ?? AR_EMPTY_REGRESSION_RATIO)) : 0;
+      // ⚠ NOT FLOORED. `Math.floor(baseline * ratio)` moved the boundary for every odd baseline: at
+      // baseline 7 the floor was 3, so `3 < 3` was false and a THREE-claim snapshot — 43% of the
+      // book — was accepted and stale-marked the missing four. Compare against the real product, so
+      // the documented rule ("fewer than half") is what actually runs. Exactly half still passes:
+      // 50 < 50 is false, which is the intended boundary.
+      const floor = baseline * (deps.emptyRegressionRatio ?? AR_EMPTY_REGRESSION_RATIO);
       const shortfall = mapped.claims.length === 0 || (baseline > 0 && mapped.claims.length < floor);
       if (shortfall && !deps.expectedEmptyCustomerIds.has(customer.customerId)) {
         const hasLive = await withTenant(deps.writeDb, entity, async (client) => {
@@ -325,7 +330,7 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
           throw new StageError(
             'empty_regression',
             // Counts only — no cell values — so this is safe for the cron's logger.
-            new Error(`snapshot mapped ${mapped.claims.length} claims against a last-good ${baseline} (floor ${floor})`),
+            new Error(`snapshot mapped ${mapped.claims.length} claims against a last-good ${baseline} (floor ${floor.toFixed(1)})`),
           );
         }
       }

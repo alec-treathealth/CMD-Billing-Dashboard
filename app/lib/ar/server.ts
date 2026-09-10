@@ -133,7 +133,13 @@ export const loadArOptions = unstable_cache(
       exec.query<Row>(fr.sql, fr.params),
     ]);
     const fr0 = fresh.rows[0];
-    const freshness: ArFreshness | null = fr0 && Number(fr0.customers ?? 0) > 0
+    // ⚠ BUILT WHENEVER THE ROW EXISTS — NOT gated on customers > 0, which is what made the ingest
+    // tripwire blind to its own primary case. `customers` counts SUCCESSFUL runs, so a tenant whose
+    // ingest has never once succeeded had freshness nulled, the workbench returned the
+    // "no snapshot yet" empty state, and the failure alarm never rendered. Whether a snapshot EXISTS
+    // (customers > 0) and whether the ingest is HEALTHY are different questions; the row carries
+    // both and the component decides what to show.
+    const freshness: ArFreshness | null = fr0
       ? {
           customers: Number(fr0.customers),
           oldest_as_of: fr0.oldest_as_of === null ? null : String(fr0.oldest_as_of),

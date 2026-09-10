@@ -320,3 +320,15 @@ test('the freshness query reports ATTEMPTS and FAILURES, not just successes', ()
   assert.match(sql, /coalesce\(/, 'never-run reads as stale, not as null');
   assertParamsAligned(sql, params);
 });
+
+test('Qodo #357-3: failures are counted per FACILITY, not per attempt', () => {
+  // The run log holds one row per ATTEMPT, so count(*) reported a facility that failed twice in 36h
+  // — two daily failures, or a failure plus a manual retry — as TWO failing facilities. The banner
+  // renders this number before the word "facilities", so it has to be facilities.
+  const { sql } = buildArFreshnessQuery(ENT);
+  const failed = /\(select count\([^)]*\)::int from claims\.ar_snapshot_run[^)]*failed_recent/.exec(sql)?.[0]
+    ?? sql.slice(sql.indexOf('failed_recent') - 400, sql.indexOf('failed_recent'));
+  assert.match(failed, /count\(distinct cmd_customer_id\)/, 'counted per facility');
+  assert.ok(!/count\(\*\)::int from claims\.ar_snapshot_run where business_entity_id = any\(\$1::uuid\[\]\) and status not in/.test(sql),
+    'the per-attempt count is gone');
+});

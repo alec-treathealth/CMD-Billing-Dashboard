@@ -491,7 +491,11 @@ export function buildArFreshnessQuery(entityIds: readonly string[]): { sql: stri
       // Deliberately NOT filtered by status: this is the one number that goes stale when the cron
       // stops running at all, which is the failure the old query could not represent.
       `(select max(started_at)::text from claims.ar_snapshot_run where business_entity_id = any($1::uuid[])) as last_attempt_at, ` +
-      `(select count(*)::int from claims.ar_snapshot_run where business_entity_id = any($1::uuid[]) ` +
+      // count(DISTINCT cmd_customer_id), not count(*): the run log holds one row per ATTEMPT, so a
+      // facility that failed twice in 36h (two daily failures, or a failure plus a manual retry) was
+      // reported to the operator as TWO failing facilities. The banner says "N facilities", so the
+      // number has to be facilities.
+      `(select count(distinct cmd_customer_id)::int from claims.ar_snapshot_run where business_entity_id = any($1::uuid[]) ` +
       `and status not in ('ok', 'empty', 'running') and started_at > now() - interval '36 hours') as failed_recent, ` +
       // Staleness decided by the DATABASE clock, not the browser's. The alternative — shipping the
       // timestamp and diffing it client-side — needs a post-mount clock to stay hydration-safe, and

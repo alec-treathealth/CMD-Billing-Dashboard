@@ -336,3 +336,36 @@ test('proportional guard: a FIRST-EVER run has no baseline and is not blocked', 
   }));
   assert.deepEqual(stats.per_customer.map((r) => r.outcome), ['ok'], 'a small first book still writes');
 });
+
+test('Qodo #357-2: the ratio is the boundary — an ODD baseline is not rounded away', async () => {
+  // Math.floor(7 * 0.5) = 3, so `3 < 3` was false and a THREE-claim snapshot — 43% of a 7-claim
+  // book — was accepted and stale-marked the missing four. The old tests only used baseline 100,
+  // where flooring is invisible. This is the case that exposes it.
+  const fake = fakeArPool({ lastClaimsSeen: { '10000001': 7 }, liveRows: new Set(['10000001']) });
+  const stats = await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!],
+    parseAndMap: () => ({ ...emptyMapped, claims: [{}, {}, {}] as never[] }),
+  }));
+  assert.deepEqual(stats.per_customer.map((r) => [r.outcome, r.errorLabel]), [['error', 'empty_regression']]);
+  assert.equal(fake.calls.filter((c) => /set in_latest_snapshot/i.test(c.sql)).length, 0, 'nothing stale-marked');
+});
+
+test('Qodo #357-2: EXACTLY half still passes — the rule is "fewer than half", not "at most half"', async () => {
+  const fake = fakeArPool({ lastClaimsSeen: { '10000001': 100 }, liveRows: new Set(['10000001']) });
+  const stats = await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!],
+    parseAndMap: () => ({ ...emptyMapped, claims: Array.from({ length: 50 }, () => ({})) as never[] }),
+    write: async () => writeStats(50),
+  }));
+  assert.deepEqual(stats.per_customer.map((r) => r.outcome), ['ok'], '50 of 100 is the boundary and is accepted');
+});
+
+test('Qodo #357-2: one BELOW half is rejected, at an odd baseline', async () => {
+  // baseline 9 -> threshold 4.5 -> 4 claims must fail (the old floor was 4, so 4 < 4 passed).
+  const fake = fakeArPool({ lastClaimsSeen: { '10000001': 9 }, liveRows: new Set(['10000001']) });
+  const stats = await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!],
+    parseAndMap: () => ({ ...emptyMapped, claims: Array.from({ length: 4 }, () => ({})) as never[] }),
+  }));
+  assert.deepEqual(stats.per_customer.map((r) => r.errorLabel), ['empty_regression']);
+});
