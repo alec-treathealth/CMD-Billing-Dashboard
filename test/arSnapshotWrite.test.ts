@@ -105,6 +105,17 @@ test('writeArSnapshot: the stale mark runs last and is scoped to the customer + 
   assert.equal(stats.claimsMarkedStale, 3);
 });
 
+test('writeArSnapshot: the optional progress object IS the live accumulator (a caller sees partial counts)', async () => {
+  const mapped = mapSnapshot(buildFixture());
+  const fake = fakeArPool();
+  const progress = { patients: 0, claims: 0, charges: 0, remits: 0, statusEvents: 0, notesInserted: 0, claimsMarkedStale: 0, chargesMarkedStale: 0 };
+  const returned = await writeArSnapshot(fake.pool, mapped, ctx, progress);
+  assert.equal(returned, progress, 'the accumulator is returned, not a copy — a mid-write throw leaves it readable');
+  assert.equal(progress.claims, 6);
+  assert.equal(progress.charges, 7);
+  assert.equal(progress.patients, 2);
+});
+
 test('writeArSnapshot: an empty mapping writes nothing but still runs the stale mark', async () => {
   const fake = fakeArPool();
   const stats = await writeArSnapshot(fake.pool, { facilityName: null, snapshotAsOf: null, patients: [], claims: [], charges: [], remits: [], statusEvents: [], notes: [], skips: {} }, ctx);

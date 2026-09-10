@@ -218,9 +218,15 @@ async function noteParams(n: ArNotePlain, ctx: ArWriteContext): Promise<unknown[
 /**
  * Write one customer's mapped snapshot. Each batch is its own short tenant-scoped transaction, so
  * a mid-run failure leaves earlier batches committed and the next run converges (idempotent).
+ *
+ * `progress` is the OPTIONAL live accumulator: pass an object and it is incremented as each batch
+ * COMMITS, so a caller whose write throws mid-way can still record what actually landed. Without it
+ * a partial ingest closes its run row with zeroes and reads, during reconciliation, as "nothing
+ * happened" — which is the same class of dishonest run accounting as counting customers that merely
+ * did not throw. The return value is that same object, so the success path is unchanged.
  */
-export async function writeArSnapshot(db: Db, mapped: ArMapped, ctx: ArWriteContext): Promise<ArWriteStats> {
-  const stats: ArWriteStats = { patients: 0, claims: 0, charges: 0, remits: 0, statusEvents: 0, notesInserted: 0, claimsMarkedStale: 0, chargesMarkedStale: 0 };
+export async function writeArSnapshot(db: Db, mapped: ArMapped, ctx: ArWriteContext, progress?: ArWriteStats): Promise<ArWriteStats> {
+  const stats: ArWriteStats = progress ?? { patients: 0, claims: 0, charges: 0, remits: 0, statusEvents: 0, notesInserted: 0, claimsMarkedStale: 0, chargesMarkedStale: 0 };
   const ent = ctx.businessEntityId;
 
   // 1. Patients (PHI encrypted outside the transaction).

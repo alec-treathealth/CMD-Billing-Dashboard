@@ -44,9 +44,9 @@ export interface ArSnapshotCronDeps {
   expectedEmptyCustomerIds: ReadonlySet<string>;
   /** Bust the AR cache tag after any successful write. */
   revalidate?: () => void | Promise<void>;
-  /** Test seams. */
+  /** Test seams. `write`'s 4th argument is the live progress accumulator (see writeArSnapshot). */
   parseAndMap?: (zip: Buffer) => ArMapped;
-  write?: (db: Db, mapped: ArMapped, ctx: ArWriteContext) => Promise<ArWriteStats>;
+  write?: (db: Db, mapped: ArMapped, ctx: ArWriteContext, progress?: ArWriteStats) => Promise<ArWriteStats>;
   now?: () => number;
   budgetMs?: number;
   stalenessMs?: number;
@@ -207,6 +207,14 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
         );
       });
 
+    // Held OUTSIDE the try so the error path can report what was parsed and what actually committed,
+    // rather than closing a partially-written run with zeroes (Qodo #348 finding 12).
+    const progress: ArWriteStats = { ...EMPTY_WRITE };
+    let parsedClaims = 0;
+    let parsedCharges = 0;
+    let parsedAsOf: string | null = null;
+    let attemptedWrite = false;
+
     try {
       let snap: CmdSnapshotResult;
       try {
@@ -229,6 +237,9 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
       } catch (e) {
         throw new StageError('parse_failed', e);
       }
+      parsedClaims = mapped.claims.length;
+      parsedCharges = mapped.charges.length;
+      parsedAsOf = mapped.snapshotAsOf;
 
       // EMPTY-REGRESSION GUARD. A structurally valid snapshot that maps to ZERO claims for a customer
       // that has live rows is a broken export (or a closed account), not a book that emptied overnight.
@@ -249,6 +260,7 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
       // Any writer batch may commit before a later one fails, so the cache bust must not depend on the
       // writer resolving — mark the intent BEFORE the first statement.
       wroteSomething = true;
+      attemptedWrite = true;
       let written: ArWriteStats;
       try {
         written = await write(deps.writeDb, mapped, {
@@ -257,7 +269,7 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
           facilityCode: customer.facilityCode,
           runId,
           runStartedAt,
-        });
+        }, progress);
       } catch (e) {
         throw new StageError('write_failed', e);
       }
@@ -290,8 +302,22 @@ export async function arSnapshotCron(deps: ArSnapshotCronDeps): Promise<ArSnapsh
       // Ops-only message (never a cell value: the transport + mapper throw structural errors).
       const cause = err instanceof StageError ? err.cause : err;
       console.error(`ar-snapshot: customer ${customer.customerId} (${customer.facilityCode}) ${label}:`, cause instanceof Error ? cause.message : String(cause));
+      // Report what was PARSED and what actually COMMITTED. A write that failed on a later batch has
+      // durable earlier batches; recording zeroes here would hide a partial ingest from reconciliation.
+      report.claims = progress.claims;
+      report.charges = progress.charges;
+      report.notesInserted = progress.notesInserted;
+      stats.claims_upserted += progress.claims;
+      stats.charges_upserted += progress.charges;
+      stats.notes_inserted += progress.notesInserted;
       try {
-        await finish('error', label, { zipBytes: report.zipBytes, snapshotAsOf: null, claimsSeen: 0, chargesSeen: 0, write: null });
+        await finish('error', label, {
+          zipBytes: report.zipBytes,
+          snapshotAsOf: parsedAsOf,
+          claimsSeen: parsedClaims,
+          chargesSeen: parsedCharges,
+          write: attemptedWrite ? progress : null,
+        });
       } catch (e2) {
         console.error(`ar-snapshot: customer ${customer.customerId} run-row close failed:`, e2 instanceof Error ? e2.message : String(e2));
       }

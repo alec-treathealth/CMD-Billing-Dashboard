@@ -191,6 +191,46 @@ test('a writer that throws mid-way still busts the cache — batches before it m
   assert.equal(revalidated, 1);
 });
 
+test('a PARTIAL write closes its run row with the parsed + committed counts, never zeroes', async () => {
+  // The writer commits batch by batch, so a later failure leaves earlier upserts durable. Recording
+  // zeroes would make a partial ingest read as "nothing happened" during reconciliation.
+  const fake = fakeArPool();
+  const stats = await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!],
+    parseAndMap: () => twoClaims,
+    write: async (_db, _m, _ctx, progress) => {
+      // Two batches commit, then the third throws — exactly the shape writeArSnapshot has.
+      if (progress) { progress.claims = 2; progress.charges = 1; progress.notesInserted = 5; progress.patients = 1; }
+      throw new Error('42501 on batch 3');
+    },
+  }));
+  const finish = fake.calls.find((c) => /update claims\.ar_snapshot_run/i.test(c.sql))!;
+  assert.equal(finish.params![1], 'error');
+  assert.equal(finish.params![2], 'write_failed');
+  assert.equal(finish.params![4], '2026-09-09T06:00:00', 'snapshot_as_of from the parsed file');
+  assert.equal(finish.params![5], 2, 'claims_seen = parsed claims');
+  assert.equal(finish.params![6], 1, 'charges_seen = parsed charges');
+  assert.equal(finish.params![7], 1, 'patients_upserted = what committed');
+  assert.equal(finish.params![8], 2, 'claims_upserted = what committed');
+  assert.equal(finish.params![12], 5, 'notes_inserted = what committed');
+  // The run summary counts the committed rows too.
+  assert.equal(stats.claims_upserted, 2);
+  assert.equal(stats.notes_inserted, 5);
+  assert.deepEqual(stats.per_customer.map((r) => [r.outcome, r.claims, r.notesInserted]), [['error', 2, 5]]);
+});
+
+test('a FETCH failure reports no counts — nothing was parsed and nothing was written', async () => {
+  const fake = fakeArPool();
+  await arSnapshotCron(deps(fake, {
+    customers: [CUSTOMERS[0]!],
+    fetchSnapshot: async () => { throw new Error('socket hang up'); },
+  }));
+  const finish = fake.calls.find((c) => /update claims\.ar_snapshot_run/i.test(c.sql))!;
+  assert.equal(finish.params![2], 'fetch_failed');
+  assert.equal(finish.params![5], 0);
+  assert.equal(finish.params![8], 0);
+});
+
 test('a customer without a businessEntityId is a programming error, not a silent unscoped write', async () => {
   const fake = fakeArPool();
   await assert.rejects(arSnapshotCron(deps(fake, { customers: [{ customerId: '10000009', facilityCode: 'X' }] })), /no businessEntityId/);
