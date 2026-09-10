@@ -139,6 +139,9 @@ export const loadArOptions = unstable_cache(
           oldest_as_of: fr0.oldest_as_of === null ? null : String(fr0.oldest_as_of),
           newest_as_of: fr0.newest_as_of === null ? null : String(fr0.newest_as_of),
           last_run_finished_at: fr0.last_run_finished_at === null ? null : String(fr0.last_run_finished_at),
+          last_attempt_at: fr0.last_attempt_at === null || fr0.last_attempt_at === undefined ? null : String(fr0.last_attempt_at),
+          failed_recent: Number(fr0.failed_recent ?? 0),
+          attempt_stale: fr0.attempt_stale === true,
         }
       : null;
     return {

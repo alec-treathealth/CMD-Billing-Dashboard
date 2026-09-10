@@ -29,6 +29,7 @@ import {
   type ArQueueRow,
   buildArLatestNotesQuery,
   buildArPayerOptionsQuery,
+  buildArFreshnessQuery,
 } from '../src/billingAudit/arQuery.js';
 
 const ENT = ['af504ab6-3dcd-4aa4-a93c-27bc58de4088'];
@@ -298,4 +299,24 @@ test('Qodo #353-2: the facility and payer pickers aggregate the SAME population 
   // asOf is REQUIRED, not optional: a picker with no business day cannot bound an age honestly.
   assert.throws(() => buildArFacilityOptionsQuery(ENT, 'not-a-date'));
   assert.throws(() => buildArPayerOptionsQuery(ENT, ''));
+});
+
+test('the freshness query reports ATTEMPTS and FAILURES, not just successes', () => {
+  // The original read `status in ('ok','empty')` only, so a cron failing every night still showed a
+  // confident "snapshot as of" and said nothing — and this repo has no alerting, so that was the
+  // whole detection story. These two facts come from rows the old query deliberately excluded.
+  const { sql, params } = buildArFreshnessQuery(ENT);
+  assert.match(sql, /as last_attempt_at/);
+  assert.match(sql, /as failed_recent/);
+  assert.match(sql, /as attempt_stale/);
+  // last_attempt_at must NOT be status-filtered — it is what goes stale when the cron stops running.
+  const attempt = /\(select max\(started_at\)[^)]*\)[^)]*\) as last_attempt_at/.exec(sql)?.[0] ?? '';
+  assert.ok(attempt.length > 0, 'the attempt subquery is present');
+  assert.ok(!/status in/.test(attempt), 'the attempt clock ignores status, by design');
+  // A run in flight is not a failure.
+  assert.match(sql, /status not in \('ok', 'empty', 'running'\)/);
+  // Staleness is decided by the DB clock so every viewer agrees and no client clock is needed.
+  assert.match(sql, /max\(started_at\) < now\(\) - interval '36 hours'/);
+  assert.match(sql, /coalesce\(/, 'never-run reads as stale, not as null');
+  assertParamsAligned(sql, params);
 });

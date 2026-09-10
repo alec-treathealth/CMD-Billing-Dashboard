@@ -129,3 +129,17 @@ test('the AR page no longer links Facility Resolution, and no longer seeds the I
     assert.ok(code.includes(kept), `${kept} still seeds the AR queue`);
   }
 });
+
+// ── The ingest tripwire (2026-09-10) ─────────────────────────────────────────────────────────────
+test('the workbench raises an ALARM when the ingest is failing or has stopped firing', () => {
+  const src = strip(read('components/billing-audit/ar/ar-workbench.tsx'));
+  // Two independent conditions, because "old data" and "broken pipe" are different failures and the
+  // date line already covers the first.
+  assert.match(src, /freshness\.failed_recent > 0/, 'a recent failure raises it');
+  assert.match(src, /freshness\.attempt_stale/, 'so does no attempt at all');
+  assert.match(src, /role="alert"/, 'announced, not tucked into a tooltip');
+  // The alarm must not be derived from a browser clock — the DB decides, so every viewer agrees.
+  assert.ok(!/Date\.now\(\)[^;]*36|nowMs[^;]*36/.test(src), 'staleness is not computed client-side');
+  // And it must say the claims are still trustworthy, or an operator reads it as "the data is wrong".
+  assert.match(src, /still the last good snapshot/);
+});
