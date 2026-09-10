@@ -26,6 +26,12 @@ import type { AuditScope } from '../../../src/billingAudit/auditConfig';
 import type { DashboardView } from '@/lib/views';
 
 type AuditTab = 'ar' | 'ip' | 'op' | 'billable';
+/**
+ * Whether this route offers scope tabs at all. FALSE since 2026-09-10 — AR Management is the only
+ * view. Flip to true to bring IP Audit / OP Audit / Billable Days back; nothing else needs changing
+ * except restoring the IP/OP seeds in app/billing-audit/page.tsx if you want them pre-painted.
+ */
+const SHOW_SCOPE_TABS = false;
 const TABS: readonly { id: AuditTab; label: string }[] = [
   { id: 'ar', label: 'AR Queue' },
   { id: 'ip', label: 'IP Audit' },
@@ -66,6 +72,16 @@ export function BillingAuditWorkbench(props: BillingAuditWorkbenchProps) {
 
   return (
     <section className="space-y-4">
+      {/* ⚠ THE TAB STRIP IS HIDDEN, NOT DELETED (Alec, 2026-09-10: the other subtabs "provide
+          irrelevant information"). AR Management is the only view this route offers now.
+          `SHOW_SCOPE_TABS = false` is the single switch: the IP/OP audit panels, Billable Days,
+          their components, their Server Actions and their tests are all still here and still
+          compile, so restoring them is flipping this constant rather than rebuilding a feature.
+          The `active` state, the roving-tabindex keyboard handler and the panel branches below are
+          intentionally left intact for the same reason — dead while the strip is hidden, correct
+          the moment it returns. `page.tsx` stops SEEDING the IP/OP grids in the same change, so the
+          hidden panels cost no queries; they fetch on first view if re-enabled. */}
+      {SHOW_SCOPE_TABS ? (
       <div role="tablist" aria-label="Billing audit scope" onKeyDown={onKeyDown} className="flex items-center gap-1 border-b border-line">
         {TABS.map((t) => {
           const selected = t.id === active;
@@ -90,6 +106,7 @@ export function BillingAuditWorkbench(props: BillingAuditWorkbenchProps) {
           );
         })}
       </div>
+      ) : null}
 
       <div role="tabpanel" id={`billing-audit-panel-${active}`} aria-labelledby={`billing-audit-tab-${active}`}>
         {active === 'billable' ? (

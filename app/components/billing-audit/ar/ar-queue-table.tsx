@@ -233,7 +233,13 @@ export function ArQueueTable({ view, canRevealPhi, filter, sort, onSort, initial
                     {!r.last_835_status && !r.last_error_code ? <span className="text-ink400">—</span> : null}
                   </TableCell>
                   <TableCell className={`${CELL} text-xs`}>
-                    {r.cmd_note_count > 0 || lastNote ? (
+                    {/* Gated on `note` as well as the counters. cmd_note_count DOES include
+                        patient-level notes (arSnapshotMap.ts sums claim + patient), so today the two
+                        agree exactly — measured 25,043 vs 25,043 open claims, 0 divergent. But the
+                        counters come from the LAST SNAPSHOT while ar_claim_note accumulates across
+                        runs, so once CMD prunes a note from its export the counter drops while the
+                        note persists, and a proxy gate would hide the very thing being rendered. */}
+                    {r.cmd_note_count > 0 || lastNote || note ? (
                       <>
                         <span className="inline-flex items-baseline gap-1">
                           <span className="ths-num font-semibold text-ink900">{r.cmd_note_count}</span>

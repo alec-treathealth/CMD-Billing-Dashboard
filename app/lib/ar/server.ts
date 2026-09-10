@@ -118,10 +118,12 @@ export const loadArSummary = unstable_cache(
 );
 
 export const loadArOptions = unstable_cache(
-  async (entityIds: string[], entitySlug: string): Promise<ArOptions> => {
+  // asOf enters the CACHE KEY as well as the queries: the option aggregates are age-bounded now, so
+  // a cached set from yesterday would describe a different population than today's queue.
+  async (entityIds: string[], entitySlug: string, asOf: string): Promise<ArOptions> => {
     const exec = arExecutor();
-    const f = buildArFacilityOptionsQuery(entityIds);
-    const p = buildArPayerOptionsQuery(entityIds);
+    const f = buildArFacilityOptionsQuery(entityIds, asOf);
+    const p = buildArPayerOptionsQuery(entityIds, asOf);
     const a = buildArAssigneeOptionsQuery(entitySlug);
     const fr = buildArFreshnessQuery(entityIds);
     const [fac, pay, asg, fresh] = await Promise.all([

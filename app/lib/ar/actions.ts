@@ -116,7 +116,7 @@ export async function loadArOptionsAction(view: unknown): Promise<ArOptionsResul
   const s = await arScope(view);
   if (!s.ok) return { ok: false, error: s.error };
   try {
-    return { ok: true, options: await loadArOptions(s.scope.entityIds, s.scope.view) };
+    return { ok: true, options: await loadArOptions(s.scope.entityIds, s.scope.view, businessDayIso()) };
   } catch (err) {
     console.error('loadArOptionsAction failed', err instanceof Error ? err.message : '');
     return { ok: false, error: GENERIC };

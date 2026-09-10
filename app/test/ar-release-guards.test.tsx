@@ -91,3 +91,41 @@ test('with no error the strip shows real totals, and band shares do not depend o
   const share = (s: string): string[] => (s.match(/width:\s?[\d.]+%/g) ?? []).sort();
   assert.deepEqual(share(selectedHtml), share(html), 'band shares are computed from a band-independent total');
 });
+
+// ── Qodo #353-1 + the subtab ruling (2026-09-10) ─────────────────────────────────────────────────
+test('the note cell is gated on the NOTE itself, not only on the snapshot counters', () => {
+  // cmd_note_count DOES include patient-level notes (arSnapshotMap sums claim + patient), so the
+  // counters and the note channel agree today — measured 25,043 vs 25,043 open claims, 0 divergent.
+  // But the counters come from the LAST SNAPSHOT while ar_claim_note accumulates across runs, so
+  // once CMD prunes a note from its export the counter drops while the note persists. Gating a
+  // render on a proxy instead of the value being rendered is the class of bug, not the count.
+  const src = strip(read('components/billing-audit/ar/ar-queue-table.tsx'));
+  assert.match(src, /r\.cmd_note_count > 0 \|\| lastNote \|\| note \?/, 'the resolved note participates in the gate');
+});
+
+test('the scope tab strip is HIDDEN behind one constant, and the panels still compile', () => {
+  const src = read('components/billing-audit/workbench.tsx');
+  assert.match(src, /const SHOW_SCOPE_TABS = false/, 'one switch, not a deletion');
+  assert.match(strip(src), /\{SHOW_SCOPE_TABS \? \(/, 'the strip is conditional');
+  // The panels are kept on purpose — hiding must not become an irreversible removal.
+  for (const kept of ['BillableDaysPanel', 'ScopePanel', 'ArWorkbench']) {
+    assert.ok(src.includes(kept), `${kept} is still mounted in a branch`);
+  }
+  // ...and the roving-tabindex keyboard contract survives for when the strip returns.
+  assert.match(strip(src), /ArrowRight/);
+});
+
+test('the AR page no longer links Facility Resolution, and no longer seeds the IP/OP grids', () => {
+  const src = read('app/billing-audit/page.tsx');
+  const code = strip(src);
+  // Ruled 2026-09-10. The ROUTE and its own gate are untouched — only the advertisement is gone.
+  assert.ok(!/href=\{`\/billing-audit\/facility-resolution/.test(code), 'no entry link on the AR header');
+  // Three audit-plane queries per render, on a page that cannot display them — and paid again on
+  // every AR note or work write, since those revalidate the tag and re-render this tree.
+  assert.ok(!/loadAuditRows\(/.test(code), 'IP rows are not seeded');
+  assert.ok(!/loadAuditFilterOptions\(/.test(code), 'IP/OP options are not seeded');
+  // The AR seeds remain — the queue must still paint with data on first render.
+  for (const kept of ['loadArQueue(', 'loadArSummaryAction(', 'loadArOptionsAction(']) {
+    assert.ok(code.includes(kept), `${kept} still seeds the AR queue`);
+  }
+});

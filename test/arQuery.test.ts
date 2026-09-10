@@ -28,6 +28,7 @@ import {
   resolveArSort,
   type ArQueueRow,
   buildArLatestNotesQuery,
+  buildArPayerOptionsQuery,
 } from '../src/billingAudit/arQuery.js';
 
 const ENT = ['af504ab6-3dcd-4aa4-a93c-27bc58de4088'];
@@ -176,7 +177,7 @@ test('detail builders: claim id validated, tenant pinned, notes include patient-
 });
 
 test('options + notifications: parameterised, bounded, actor excluded', () => {
-  const fac = buildArFacilityOptionsQuery(ENT);
+  const fac = buildArFacilityOptionsQuery(ENT, AS_OF);
   assertParamsAligned(fac.sql, fac.params);
   // Assignees are TENANT-scoped: every super_admin plus this tenant's admins; the slug is allowlisted.
   const asg = buildArAssigneeOptionsQuery('bxr');
@@ -267,4 +268,34 @@ test('buildArLatestNotesQuery resolves claim-level AND patient-level notes, one 
   // A claim id can only reach its OWN patient's notes: the pair comes from a tenant-scoped read.
   assert.throws(() => buildArLatestNotesQuery([{ cmdClaimId: '900000001', cmdPatientId: 'x' }], ENT), /patient id/);
   assert.throws(() => buildArLatestNotesQuery([{ cmdClaimId: 'nope', cmdPatientId: '80000001' }], ENT), /claim/);
+});
+
+test('Qodo #353-3: a SINGLE-CLAIM read bypasses the age floor so the bell can open a fresh claim', () => {
+  // buildArClaimQuery goes through buildArQueueQuery, so it inherited the aged-only predicate and
+  // the drawer refused any claim younger than 31 days. The notifications bell has no age bound and
+  // legitimately surfaces such a claim (someone noted or assigned it), so it advertised a claim and
+  // then failed to open it. A one-claim read is not the queue.
+  const one = buildArClaimQuery('900000001', ENT, AS_OF).sql;
+  assert.ok(!/dos_from <= \(\$\d+::date - \$\d+::int\)/.test(one), 'no age floor on a by-id read');
+  // The queue keeps it.
+  const list = buildArQueueQuery(null, resolveArFilter({}), resolveArSort({}), 51, ENT, AS_OF).sql;
+  assert.match(list, /\(c\.dos_from is null or c\.dos_from <= \(\$\d+::date - \$\d+::int\)\)/);
+  // And the opt-out is NOT reachable from client input — it is a builder argument, not a filter field.
+  const f = resolveArFilter({ includeAgeFloor: false, ignoreAgeFloor: true } as unknown);
+  assert.ok(!('includeAgeFloor' in f) && !('ignoreAgeFloor' in f), 'the sanitiser drops unknown keys');
+  assert.match(buildArQueueQuery(null, f, resolveArSort({}), 51, ENT, AS_OF).sql, /dos_from <= \(\$\d+::date - \$\d+::int\)/);
+});
+
+test('Qodo #353-2: the facility and payer pickers aggregate the SAME population as the queue', () => {
+  // A picker count is read as "this much money is here". Without the floor, a facility whose only
+  // claims are 0-30 days old was offered with a real-looking count and balance, and selecting it
+  // filtered an aged-only queue to nothing.
+  for (const q of [buildArFacilityOptionsQuery(ENT, AS_OF), buildArPayerOptionsQuery(ENT, AS_OF)]) {
+    assert.match(q.sql, /\(c\.dos_from is null or c\.dos_from <= \(\$2::date - \$3::int\)\)/, 'aged-only floor present');
+    assert.deepEqual(q.params, [ENT, AS_OF, AR_MIN_AGE_DAYS]);
+    assertParamsAligned(q.sql, q.params);
+  }
+  // asOf is REQUIRED, not optional: a picker with no business day cannot bound an age honestly.
+  assert.throws(() => buildArFacilityOptionsQuery(ENT, 'not-a-date'));
+  assert.throws(() => buildArPayerOptionsQuery(ENT, ''));
 });
