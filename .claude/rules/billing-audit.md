@@ -124,6 +124,92 @@ The loop is therefore walked **stalest-first, never-ingested first**, ties keepi
 (one `max(finished_at)` query per entity, tenant-scoped like every other run-log read). Keep that
 property if you touch the loop; `test/arSnapshotCron.test.ts` pins all three cases.
 
+### PHI retention and removal — THE WINDOW IS UNRATIFIED (drafted 2026-09-10)
+
+This plane is a **permanent, growing PHI replica**, by design rather than oversight: 2,415 patients'
+encrypted identity, 58,830 claims, 103,367 remits and 15,010 CMD staff notes across 19 accounts,
+refreshed daily. There is **no `delete` statement anywhere in it** — not in `arSnapshotWrite.ts`, not
+in the three definers, not in the cron, not in the CLI. A claim that leaves CMD's snapshot is marked
+`in_latest_snapshot = false` and KEPT, because surfacing claims CMD has stopped reporting is the
+whole point of the queue.
+
+The consequence nothing in the code stated until now: **when a facility offboards, its patients'
+names, DOBs and member ids stay in `claims.ar_patient` indefinitely.** Three accounts left the
+roster in the month CLAUDE.md documents, so this is a live path, not a hypothetical. The only
+removal tool that existed was `0109_ar_management_rollback.sql`, which drops the plane for all 19
+accounts — no per-facility or per-patient path for an amendment or a records request.
+
+⚠ **THE WINDOW IS ALEC'S CALL AND IS NOT SET.** Pending that ruling the proposed default is: keep
+non-current rows **24 months** from `last_seen_at`; purge an offboarded facility within **90 days**
+of its removal from `AR_SNAPSHOT_CUSTOMERS`. 24 months is derived from the queue's own bands — it
+exposes 1–2yr and 2yr+, so purging inside that would delete rows the tab exists to show — plus a
+margin. A starting point, not a recommendation carrying authority.
+
+**THE MECHANISM: a scoped migration at offboarding, run by a human.** Deliberately NOT a cron. An
+automatic PHI deleter is a worse failure mode than retention, and this repo has no alerting that
+would notice it misfiring.
+
+**The scoping map matters more than the statements, because the tables do not agree.** Measured from
+0109 rather than assumed:
+
+| Scoped directly by `cmd_customer_id` | Reachable only via `cmd_claim_id` |
+|---|---|
+| `ar_snapshot_run`, `ar_patient`, `ar_claim`, `ar_charge`, `ar_claim_note` | `ar_remit`, `ar_claim_status_event`, `ar_claim_work`, `ar_claim_event` |
+
+`ar_notification_seen` is keyed by `app_user_id` alone — a per-user read cursor, no facility scope,
+left alone by a purge.
+
+```sql
+-- Purge one offboarded facility. Run as claims_admin. :cust is the only parameter.
+set role claims_admin;
+begin;
+-- Capture the ids BEFORE deleting ar_claim: four tables can only be reached through it.
+create temp table _purge as
+  select cmd_claim_id, cmd_patient_id from claims.ar_claim where cmd_customer_id = :cust;
+
+delete from claims.ar_claim_event        where cmd_claim_id in (select cmd_claim_id from _purge);
+delete from claims.ar_claim_work         where cmd_claim_id in (select cmd_claim_id from _purge);
+delete from claims.ar_claim_status_event where cmd_claim_id in (select cmd_claim_id from _purge);
+delete from claims.ar_remit              where cmd_claim_id in (select cmd_claim_id from _purge);
+delete from claims.ar_claim_note         where cmd_customer_id = :cust;
+delete from claims.ar_charge             where cmd_customer_id = :cust;
+delete from claims.ar_claim              where cmd_customer_id = :cust;
+-- ar_patient LAST and never by customer alone: see trap 1.
+delete from claims.ar_patient p
+ where p.cmd_patient_id in (select cmd_patient_id from _purge)
+   and not exists (select 1 from claims.ar_claim c
+                    where c.business_entity_id = p.business_entity_id
+                      and c.cmd_patient_id = p.cmd_patient_id
+                      and c.cmd_customer_id <> :cust);
+delete from claims.ar_snapshot_run       where cmd_customer_id = :cust;
+commit;
+```
+
+⚠ **TRAP 1 — `ar_patient` must NOT be deleted by `cmd_customer_id`, even though it has that column.**
+The table is `unique (business_entity_id, cmd_patient_id)`: one row per patient per TENANT, with
+`cmd_customer_id` a mutable attribute stamped by whichever facility's ingest last upserted them. A
+patient treated at two facilities has ONE row carrying ONE of those customer ids, so a
+customer-scoped delete is wrong in both directions — it can remove an identity another facility's
+live claims still reference, and miss a patient who only ever belonged to the purged facility but
+whose row happens to carry a different id.
+**Rehearsed 2026-09-10: the guard is currently a NO-OP** — the `not exists` form and the naive form
+both return 4 rows for WRC, because **0 patients appear at more than one facility today**. It is the
+correct form for the day one does, and that count is the trigger to watch.
+
+⚠ **TRAP 2 — notes are safe to purge by customer, and that is not obvious.** 0110 made CMD-sourced
+notes patient-level, so `cmd_claim_id` is NULL on most of them (1,535 of CAMH's 1,567). A
+claim-only delete would silently leave the note BODIES behind — the exact opposite of a purge's
+purpose. `ar_claim_note.cmd_customer_id` is `not null` on every row and is stamped by both the
+ingest and `ar_add_note`, so scoping by customer is correct AND complete. Verified by measurement:
+WRC's 13 notes are 2 claim-level + 11 patient-level, and all 13 carry the customer id.
+
+⚠ **TRAP 3 — remove the facility from `AR_SNAPSHOT_CUSTOMERS` (`src/billingAudit/arConfig.ts`) in the
+same change**, or the next 14:05 ingest re-creates everything the purge just deleted.
+
+Every statement above was **rehearsed read-only** in its `select count(*)` form on 2026-09-10 and
+resolves correctly. Do that again before running it for real: nothing here is reversible and this
+plane has no soft-delete.
+
 **What "resolved" means here.** A claim never leaves history: `in_latest_snapshot` flips off when
 CMD's snapshot stops carrying it, `balance` drops to 0 when it pays, and the work disposition
 (`ar_claim_work`) is human-owned and never touched by the ingest — so "worked, then paid" is

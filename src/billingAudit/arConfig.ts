@@ -27,11 +27,21 @@ export const AR_SNAPSHOT_CUSTOMERS: readonly CmdCustomerTarget[] = [
 ] as const;
 
 /**
- * Accounts allowed to map to ZERO claims without the run being flagged — the tiny books. Any
- * other account that maps to zero claims is recorded `empty` too, but the cron's per-customer
- * outcome names it so a silently-blank snapshot is visible in the run log.
+ * Accounts allowed to map to ZERO claims without the run being flagged.
+ *
+ * ⚠ EMPTY SINCE 2026-09-10, AND THAT IS THE FIX. It held 10033951 (WRC) and 10035974 (TREAT_CO) as
+ * "the tiny books", but membership here DISABLES the empty-regression guard for exactly those
+ * accounts — and both carry real money: measured 4 live claims / $35,780 and 7 / $39,450. So the
+ * two accounts with the least tolerance for a silent wipe were the only two unprotected: a blank
+ * CMD export for either would have stale-marked every live claim and closed the run as `empty`,
+ * i.e. as a success, with the 20h freshness cursor then blocking a re-pull until the next day.
+ *
+ * The mechanism is kept, not deleted: an account that genuinely has no book belongs here, and
+ * without it the cron records an `error`/`empty_regression` and writes nothing. The bar for adding
+ * one is that it has NO live claims — check before you add, because the cost of being wrong is a
+ * facility's AR disappearing quietly.
  */
-export const AR_EXPECTED_EMPTY_CUSTOMERS: ReadonlySet<string> = new Set(['10033951', '10035974']);
+export const AR_EXPECTED_EMPTY_CUSTOMERS: ReadonlySet<string> = new Set([]);
 
 /** A customer pulled OK inside this window is skipped — the snapshot is rebuilt once a day. */
 export const AR_SNAPSHOT_STALENESS_MS = 20 * 3_600_000;
