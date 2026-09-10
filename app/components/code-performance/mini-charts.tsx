@@ -25,8 +25,16 @@ import { describeCodeSlot } from '../../../src/collections/codePerformanceQuery.
 
 import { fmtInt, fmtMoney, fmtPct } from './format';
 import { MetricHint } from './metric-hint';
+import { pairKeyOf } from './pairing-table';
 
-/** Compact identity for a pairing — "H0015 (IOP) × 0905", the table's label without the descriptions. */
+/**
+ * Compact identity for a pairing — "H0015 (IOP) × 0905", the table's label without the descriptions.
+ *
+ * ⚠️ FOR DISPLAY ONLY. `describeCodeSlot` deliberately maps BOTH a null code and the em-dash no-code
+ * marker to the same visible label, so two distinct query groups can share this string. React keys
+ * come from `pairKeyOf`, which encodes the raw identity with distinct null sentinels (Qodo #350
+ * finding 3). A label is not an identity.
+ */
 function pairLabel(r: CodePerfPairingRow): string {
   const proc = describeCodeSlot('procedure', r.hcpcs).label;
   const rev = describeCodeSlot('revenue', r.revcode).label;
@@ -70,7 +78,7 @@ export function TopPairingsChart({ rows, limit = 6 }: { rows: readonly CodePerfP
               const billedPct = max > 0 ? (r.billed / max) * 100 : 0;
               const collectedPct = r.billed > 0 ? Math.min(100, (r.collected / r.billed) * 100) : 0;
               return (
-                <li key={pairLabel(r)}>
+                <li key={pairKeyOf(r)}>
                   <button
                     type="button"
                     onMouseEnter={() => setActive(i)}
@@ -110,14 +118,44 @@ export function TopPairingsChart({ rows, limit = 6 }: { rows: readonly CodePerfP
   );
 }
 
-/** The allowed-rate buckets, coarse on purpose — the shape of the distribution, not a precise count. */
-const BUCKETS = [
+/**
+ * The allowed-rate bands, coarse on purpose — the shape of the distribution, not a precise count.
+ *
+ * ⚠️ THE SET IS TOTAL OVER THE REALS, AND IT HAS TO BE (Qodo #350 finding 2). The first version ran
+ * `[0,20) … [80,101)` while the denominator counted every non-null rate, so a negative rate or one
+ * above 101 reached the total and appeared in NO bar — the chart silently disagreed with its own
+ * caption. `allowed_rate` is an UNCLAMPED sum-over-sum (`reliable allowed ÷ billed`), and the rollup
+ * does not bound allowed by the charge amount, so both are reachable values rather than bad data.
+ *
+ * So the two edge bands are real bands, not a clamp: values stay unclamped and get shown where they
+ * actually fall. They render only when non-empty, because on a healthy tenant they are zero and two
+ * permanent empty bars would just be noise.
+ */
+const CORE_BANDS = [
   { lo: 0, hi: 20 },
   { lo: 20, hi: 40 },
   { lo: 40, hi: 60 },
   { lo: 60, hi: 80 },
-  { lo: 80, hi: 101 },
+  { lo: 80, hi: 100 },
 ] as const;
+
+/** Band labels, indexed by `yieldBandOf`. Index 0 is underflow and 6 is overflow. */
+export const YIELD_BAND_LABELS = ['<0', '0', '20', '40', '60', '80', '>100'] as const;
+
+/**
+ * Which band a rate falls in: 0 = below zero, 1-5 = the core bands, 6 = above 100.
+ *
+ * TOTAL by construction — every finite number returns exactly one index, which is the property the
+ * render suite asserts. `[80,100]` is closed at the top so an exactly-100% rate is a core band
+ * rather than an overflow; anything strictly above 100 is genuine over-allowed exposure.
+ */
+export function yieldBandOf(rate: number): number {
+  if (rate < 0) return 0;
+  if (rate > 100) return 6;
+  const i = CORE_BANDS.findIndex((b, idx) => rate >= b.lo && (idx === CORE_BANDS.length - 1 ? rate <= b.hi : rate < b.hi));
+  // Unreachable for a finite rate in [0,100]; falls back to the top core band rather than vanishing.
+  return i === -1 ? CORE_BANDS.length : i + 1;
+}
 
 /**
  * ALLOWED-RATE DISTRIBUTION — one tile said "34.10%" for the whole tenant, which hides whether that
@@ -132,39 +170,51 @@ export function YieldHistogram({ rows }: { rows: readonly CodePerfPairingRow[] }
   const [active, setActive] = useState<number | null>(null);
   const rated = rows.filter((r) => r.allowed_rate !== null);
   const unrated = rows.length - rated.length;
-  const counts = BUCKETS.map((b) => rated.filter((r) => (r.allowed_rate as number) >= b.lo && (r.allowed_rate as number) < b.hi).length);
-  const max = counts.length > 0 ? Math.max(...counts) : 0;
+  // One count per band, indexed to match yieldBandOf. Every rated row increments exactly one.
+  const counts = YIELD_BAND_LABELS.map(() => 0);
+  for (const r of rated) counts[yieldBandOf(r.allowed_rate as number)] += 1;
+  // Edge bands appear only when they hold something; the five core bands always do.
+  const shownBands = YIELD_BAND_LABELS.map((_, i) => i).filter((i) => (i === 0 || i === 6 ? (counts[i] ?? 0) > 0 : true));
+  const max = Math.max(...counts);
+
+  const bandDescription = (i: number): string => {
+    if (i === 0) return 'below 0% — allowed is negative';
+    if (i === 6) return 'above 100% — allowed exceeds billed';
+    const b = CORE_BANDS[i - 1];
+    return `${b?.lo}–${b?.hi}%`;
+  };
 
   return (
     <Panel
       title="Allowed-rate distribution"
-      hint="How many pairings fall in each allowed-rate band. A single tenant-wide average hides a bimodal book — contracted work clustered high and out-of-network work clustered low need different action. Pairings with no reliable allowed amount are excluded, not counted as zero."
+      hint="How many pairings fall in each allowed-rate band. A single tenant-wide average hides a bimodal book — contracted work clustered high and out-of-network work clustered low need different action. Pairings with no reliable allowed amount are excluded, not counted as zero. Rates below 0% or above 100% get their own band rather than being clamped or dropped: the ratio is unclamped, so both are real."
     >
       {rated.length === 0 ? (
         <p className="mt-2 text-xs text-ink600">No pairing in this window has a reliable allowed amount.</p>
       ) : (
         <>
           <div className="mt-3 flex h-24 items-end gap-1.5">
-            {BUCKETS.map((b, i) => {
+            {shownBands.map((i) => {
               const n = counts[i] ?? 0;
               const h = max > 0 ? (n / max) * 100 : 0;
+              const edge = i === 0 || i === 6;
               return (
                 <button
-                  key={b.lo}
+                  key={i}
                   type="button"
                   onMouseEnter={() => setActive(i)}
                   onMouseLeave={() => setActive((cur) => (cur === i ? null : cur))}
                   onFocus={() => setActive(i)}
                   onBlur={() => setActive((cur) => (cur === i ? null : cur))}
-                  aria-label={`${b.lo} to ${b.hi === 101 ? 100 : b.hi} percent: ${n} pairings`}
+                  aria-label={`${bandDescription(i)}: ${n} pairings`}
                   className="flex h-full flex-1 flex-col justify-end rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-teal500"
                 >
                   <span className="ths-num mb-0.5 text-center text-[10px] tabular-nums text-ink600">{n}</span>
                   <span
-                    className={`w-full rounded-t ${active === i ? 'bg-[var(--brand-ink)]' : 'bg-[var(--brand-accent)]'}`}
+                    className={`w-full rounded-t ${active === i ? 'bg-[var(--brand-ink)]' : edge ? 'bg-status-warn' : 'bg-[var(--brand-accent)]'}`}
                     style={{ height: `${Math.max(h, n > 0 ? 4 : 1)}%` }}
                   />
-                  <span className="ths-num mt-1 text-center text-[10px] tabular-nums text-ink400">{b.lo}</span>
+                  <span className="ths-num mt-1 text-center text-[10px] tabular-nums text-ink400">{YIELD_BAND_LABELS[i]}</span>
                 </button>
               );
             })}
@@ -172,10 +222,8 @@ export function YieldHistogram({ rows }: { rows: readonly CodePerfPairingRow[] }
           <p aria-live="polite" className="mt-1 text-[11px] leading-snug text-ink600">
             {active !== null ? (
               <>
-                <span className="font-semibold text-ink900">
-                  {BUCKETS[active]?.lo}–{BUCKETS[active]?.hi === 101 ? 100 : BUCKETS[active]?.hi}%
-                </span>{' '}
-                — {fmtInt(counts[active] ?? 0)} of {fmtInt(rated.length)} rated pairings
+                <span className="font-semibold text-ink900">{bandDescription(active)}</span> — {fmtInt(counts[active] ?? 0)} of{' '}
+                {fmtInt(rated.length)} rated pairings
               </>
             ) : (
               <span className="text-ink400">
@@ -197,18 +245,47 @@ export function YieldHistogram({ rows }: { rows: readonly CodePerfPairingRow[] }
  * ⚠️ A NULL FACILITY IS ITS OWN BAR, NEVER DROPPED AND NEVER MERGED. Charges the feed carries with no
  * facility are a real, attributable volume; folding them into another site would misstate that site,
  * and hiding them would make the bars sum to less than the tenant's billed with no explanation.
+ *
+ * ⚠️ IT MUST BE SCOPED TO THE ACTIVE FACILITY SELECTION, AND `facilityOptions` IS NOT (Qodo #350
+ * finding 1). That collection is the PICKER's vocabulary and its query says so in as many words —
+ * "Ignores any facility filter" — because a picker that hid the options you had not chosen yet would
+ * be unusable. Feeding it here unscoped meant that selecting two facilities re-scoped the KPIs and
+ * the table while this chart still drew every site in the tenant, with percentages against an
+ * all-facility denominator.
+ *
+ * Filtering that collection to `facilitiesApplied` is CORRECT rather than a patch, and the reason is
+ * a property of the query: it groups by facility under the same tenant and window predicates and
+ * omits only the facility one, so a given site's `billed` is the same number whether or not other
+ * sites are in scope. Restricting the list therefore yields true per-facility values AND a
+ * denominator equal to the board's own billed total. No second query is needed, and the picker keeps
+ * the full vocabulary it requires.
  */
-export function FacilityMixChart({ options, limit = 8 }: { options: CodePerfBoard['facilityOptions']; limit?: number }) {
+export function FacilityMixChart({
+  options,
+  facilitiesApplied,
+  limit = 8,
+}: {
+  options: CodePerfBoard['facilityOptions'];
+  /** The board's active selection, or null for "all facilities". Scopes this chart to match it. */
+  facilitiesApplied: string[] | null;
+  limit?: number;
+}) {
   const [active, setActive] = useState<number | null>(null);
-  const top = [...options].sort((a, b) => b.billed - a.billed).slice(0, limit);
-  const totalBilled = options.reduce((n, o) => n + o.billed, 0);
+  // A selected set never contains null, and `facility = any($n)` excludes null-facility rows, so
+  // dropping the "No facility" bar under a selection matches what the board itself counted.
+  const scoped =
+    facilitiesApplied === null || facilitiesApplied.length === 0
+      ? options
+      : options.filter((o) => o.facility !== null && facilitiesApplied.includes(o.facility));
+  const top = [...scoped].sort((a, b) => b.billed - a.billed).slice(0, limit);
+  const totalBilled = scoped.reduce((n, o) => n + o.billed, 0);
   const max = top.length > 0 ? Math.max(...top.map((o) => o.billed)) : 0;
-  const rest = options.length - top.length;
+  const rest = scoped.length - top.length;
   const shown = active !== null ? top[active] : undefined;
 
   return (
     <Panel
-      title="Billed by facility"
+      title={facilitiesApplied && facilitiesApplied.length > 0 ? 'Billed by facility (filtered)' : 'Billed by facility'}
       hint="Share of billed by site of service, largest first. The pairing table cannot show this because its grain is the billing code, not the facility. Charges with no facility on the feed are shown as their own bar rather than merged into a site that did not produce them."
     >
       {top.length === 0 ? (
@@ -252,7 +329,8 @@ export function FacilityMixChart({ options, limit = 8 }: { options: CodePerfBoar
               </>
             ) : (
               <span className="text-ink400">
-                {fmtInt(options.length)} facilities{rest > 0 ? ` · ${fmtInt(rest)} smaller not shown` : ''}
+                {fmtInt(scoped.length)} facilit{scoped.length === 1 ? 'y' : 'ies'}
+                {rest > 0 ? ` · ${fmtInt(rest)} smaller not shown` : ''}
               </span>
             )}
           </p>

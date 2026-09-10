@@ -39,9 +39,20 @@ export default async function CodePerformancePage() {
        further down resolves against it; without the bound every descendant falls back to content
        height and the page becomes one long scroll again.
 
-       The height is the viewport minus the 3.5rem (`h-14`) global header. HeaderGate DOES render
-       that header here — `/code-performance` is not in lib/shell.ts's full-page set (/login,
-       /forgot-password, /set-password, /qualify/m) — so the subtraction is not an assumption.
+       The height is the viewport minus the 3.5rem (`h-14`) global header AND the 0.25rem (`h-1`)
+       <TenantScopeRail> the layout renders under it. HeaderGate DOES render both here —
+       `/code-performance` is not in lib/shell.ts's full-page set (/login, /forgot-password,
+       /set-password, /qualify/m) — so neither subtraction is an assumption.
+
+       ⚠️ THE RAIL SUBTRACTION IS UNCONDITIONAL, THOUGH THE RAIL IS NOT (Qodo #350 finding 5). It
+       renders only when a session has a tenant scope (`offered.length > 0`), so an
+       `admissions_seat` would see no rail — but that role is redirected off this route server-side,
+       so on this page the rail is always there in practice. The failure modes are ASYMMETRIC and
+       that is what settles it: under-filling by 4px is invisible, while over-filling by 4px puts a
+       document scrollbar on a route whose entire point is one inner scroll area. Bias toward
+       under-fill. Do not make this conditional to reclaim 4px — <ContentInset> pads only
+       horizontally, so these two are the whole vertical chrome, and a conditional height would have
+       to re-derive the pill's `offeredViews` from a server component to know which case it is in.
 
        `dvh`, not `vh`: on mobile the visual viewport shrinks as the URL bar retracts, and viewport-
        RELATIVE units are also what keep this usable at 200% zoom (WCAG 1.4.4). Never a px height.
@@ -50,7 +61,7 @@ export default async function CodePerformancePage() {
        Claims Desk both use 1800px, so the surface carrying the widest table in the app was ~520px
        NARROWER than its neighbours — the table was clipped at both edges and the leading code column
        scrolled out of reach. 1800px is the house width for a wide-table route. */
-    <main className="mx-auto flex h-[calc(100dvh-3.5rem)] max-w-[1800px] flex-col gap-3 p-6 sm:px-10 sm:pt-4 sm:pb-6">
+    <main className="mx-auto flex h-[calc(100dvh-3.5rem-0.25rem)] max-w-[1800px] flex-col gap-3 p-6 sm:px-10 sm:pt-4 sm:pb-6">
       {/* ONE ROW for the title and the standing disclosure. The SUBTITLE and the FOOTER that used to
           bracket this page are gone, not lost: the methodology sentence ("all ratios are sum-over-sum
           … allowed figures use reliable tiers only") and the raw-payer-name caveat both moved into the

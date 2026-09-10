@@ -223,7 +223,10 @@ export function CodePerformanceView({ tenants, defaultTenant }: { tenants: CodeP
               <div className="grid gap-2 lg:grid-cols-3">
                 <TopPairingsChart rows={ready.rows} />
                 <YieldHistogram rows={ready.rows} />
-                <FacilityMixChart options={ready.facilityOptions} />
+                {/* `facilityOptions` is the PICKER's vocabulary and ignores the facility filter by
+                    design, so the chart is handed the active selection and scopes itself to it —
+                    otherwise it draws every site while the KPIs and table show two. */}
+                <FacilityMixChart options={ready.facilityOptions} facilitiesApplied={ready.facilitiesApplied} />
               </div>
 
               <PairingTable
