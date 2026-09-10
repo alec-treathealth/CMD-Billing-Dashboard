@@ -34,7 +34,7 @@ import { presetWindow, DEFAULT_PRESET } from '@/components/billing-audit/date-pr
 import type { TagOption } from '@/components/billing-audit/tag-picker';
 import { UnprovisionedNotice } from '@/components/dashboard/unprovisioned-notice';
 import { dashboardAccess } from '@/lib/access';
-import { loadAuditRows, loadAuditFilterOptions, type AuditFilter } from '@/lib/actions';
+import type { AuditFilter } from '@/lib/actions';
 import { claimsDeskViews, resolveClaimsDeskView, urlView } from '@/lib/billing-audit/views';
 import { isQualifyOnlyRole, QUALIFY_HOME } from '@/lib/rbac';
 import { loadArOptionsAction, loadArQueue, loadArSummaryAction } from '@/lib/ar/actions';
