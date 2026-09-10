@@ -1,10 +1,12 @@
 'use client';
 
 /**
- * Billing Audit workbench — the client shell hosting four subtabs (IP Audit / OP Audit / Flag
- * Queue / Billable Days) as in-page state (one route, no sub-navigation). Each scope panel holds its own filter
- * state and a keyset-paged work table; the Flag Queue is a real destination, deliberately inert
- * (empty state) until the Phase-3 flag engine computes exceptions into claims.flag.
+ * AR Management workbench — the client shell hosting four subtabs (AR Queue / IP Audit / OP Audit /
+ * Billable Days) as in-page state (one route, no sub-navigation). The AR QUEUE (2026-09-09) is the
+ * default and the tab's reason to exist: the snapshot-fed aged-AR queue with notes and dispositions
+ * (components/billing-audit/ar/). It replaced the inert "Flag Queue" placeholder that had rendered
+ * `PHASE 3 · NOT YET ACTIVATED` since 2026-07. The IP/OP audit panels each hold their own filter state
+ * and a keyset-paged work table, unchanged.
  *
  * `canRevealPhi` threads down (a plain `user` never gets the reveal control; the reveal action is
  * gated server-side regardless). `view` carries the server-resolved tenant scope. The IP panel is
@@ -17,22 +19,27 @@ import { PivotStrip } from './pivot-strip';
 import { PatientDrill, type DrillTarget } from './patient-drill';
 import { DEFAULT_PRESET, type Preset } from './date-presets';
 import { BillableDaysPanel } from './billable-days/panel';
+import { ArWorkbench, type ArSeed } from './ar/ar-workbench';
 import type { TagOption } from './tag-picker';
 import { searchAuditPatients, type AuditCursor, type AuditFilter, type AuditGridRow } from '@/lib/actions';
 import type { AuditScope } from '../../../src/billingAudit/auditConfig';
 import type { DashboardView } from '@/lib/views';
 
-type AuditTab = 'ip' | 'op' | 'flags' | 'billable';
+type AuditTab = 'ar' | 'ip' | 'op' | 'billable';
 const TABS: readonly { id: AuditTab; label: string }[] = [
+  { id: 'ar', label: 'AR Queue' },
   { id: 'ip', label: 'IP Audit' },
   { id: 'op', label: 'OP Audit' },
-  { id: 'flags', label: 'Flag Queue' },
   { id: 'billable', label: 'Billable Days' },
 ];
 
 export interface BillingAuditWorkbenchProps {
   view: DashboardView;
   canRevealPhi: boolean;
+  /** admin / super_admin — may add notes and set work status on the AR queue. */
+  canWork: boolean;
+  /** Server-seeded AR queue data (summary + options + first page) for the default view. */
+  arSeed: ArSeed;
   /** The YTD window the server seeded the IP page with — both panels start here. */
   initialFilter: AuditFilter;
   ipPage: { rows: AuditGridRow[]; nextCursor: AuditCursor | null } | null;
@@ -43,9 +50,9 @@ export interface BillingAuditWorkbenchProps {
 }
 
 export function BillingAuditWorkbench(props: BillingAuditWorkbenchProps) {
-  const { view, canRevealPhi, initialFilter } = props;
-  const [active, setActive] = useState<AuditTab>('ip');
-  const tabRefs = useRef<Record<AuditTab, HTMLButtonElement | null>>({ ip: null, op: null, flags: null, billable: null });
+  const { view, canRevealPhi, canWork, arSeed, initialFilter } = props;
+  const [active, setActive] = useState<AuditTab>('ar');
+  const tabRefs = useRef<Record<AuditTab, HTMLButtonElement | null>>({ ar: null, ip: null, op: null, billable: null });
 
   const onKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
@@ -79,9 +86,6 @@ export function BillingAuditWorkbench(props: BillingAuditWorkbenchProps) {
               ].join(' ')}
             >
               {t.label}
-              {t.id === 'flags' && (
-                <span className="rounded-full bg-ground px-1.5 font-mono text-[10.5px] font-medium text-ink400" title="No flags until Phase 3">0</span>
-              )}
             </button>
           );
         })}
@@ -99,8 +103,10 @@ export function BillingAuditWorkbench(props: BillingAuditWorkbenchProps) {
              BXR glance, forcing a re-upload of all four CSVs to recover work that was never in
              danger. `billableDaysEntityScope.test.tsx` is where that isolation is pinned. */
           <BillableDaysPanel view={view} canRevealPhi={canRevealPhi} />
-        ) : active === 'flags' ? (
-          <FlagQueueEmptyState />
+        ) : active === 'ar' ? (
+          /* Keyed by `view` like the ScopePanels: the queue holds a server-seeded snapshot of one
+             tenant's rows and must be rebuilt on a tenant switch (billingAuditViewRemount.test.tsx). */
+          <ArWorkbench key={view} view={view} canRevealPhi={canRevealPhi} canWork={canWork} seed={arSeed} />
         ) : active === 'ip' ? (
           <ScopePanel
             key={view}
@@ -183,23 +189,6 @@ function ScopePanel({ scope, view, canRevealPhi, initialFilter, facilities, paye
         revealAll={revealAll} onToggleRevealAll={() => setRevealAll((v) => !v)}
       />
       <PatientDrill scope={auditScope} view={view} canRevealPhi={canRevealPhi} target={drillTarget} revealAll={revealAll} onClose={() => setDrillTarget(null)} />
-    </div>
-  );
-}
-
-function FlagQueueEmptyState() {
-  return (
-    <div className="rounded-xl border border-line bg-card p-12 text-center">
-      <span className="mx-auto mb-4 inline-block rounded-full bg-teal50 px-3 py-1 font-mono text-xs text-teal700">
-        PHASE 3 · NOT YET ACTIVATED
-      </span>
-      <h2 className="ths-h text-xl font-semibold">No flags yet</h2>
-      <p className="mx-auto mt-2 max-w-lg text-sm text-muted-foreground">
-        The Flag Queue is live as a destination, but the flag engine hasn&rsquo;t been switched on.
-        Once the ingest soak clears and the facility-scoped resolver is in place, computed exceptions
-        (missing auth, code-vs-decision mismatch, stopped-code-still-billed, stale-at-payer,
-        aged-on-hold) will land here for acknowledge / resolve / dismiss.
-      </p>
     </div>
   );
 }

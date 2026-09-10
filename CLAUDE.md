@@ -55,6 +55,7 @@ cardinality is not subset.
 | AR build plan — the current CMD AR Automation work | `CMD AR Automation — Build Doc v2.md` | 8 |
 | Kipu API recon — endpoints, signing scheme, and how to read a 403 | `docs/KIPU-CLAIMS-DESK-RECON-2026-08-20.md` | 9 |
 | Claims Desk work-queue design — a PROPOSAL awaiting rulings, not shipped behaviour | `docs/CLAIMS-DESK-QUEUE-DESIGN-2026-09-03.md` | 10 |
+| AR Management build plan — the executed 2026-09-09 plan for the snapshot-fed AR queue (migration 0109, `claims.ar_*`) | `docs/superpowers/plans/2026-09-09-ar-management.md` | 11 |
 
 Read-order is a cold-start sequence, not a priority ranking. Path-scoped rules in
 `.claude/rules/` load automatically and are not listed here — see
@@ -66,9 +67,11 @@ Read-order is a cold-start sequence, not a priority ranking. Path-scoped rules i
 > since been TAKEN — 0108 is now the charge-rollup `(business_entity_id, charge_date)` index, applied
 > 2026-09-08, so the desk tables, if ever built, take a NEW number from the live ledger), no
 > `claims.desk_item` / `desk_note` / `desk_event` / `desk_lane_rule`, no
-> `src/billingAudit/deskClassifier.ts`, and no `claims-desk-*` cron route. The Flag Queue
-> subtab still renders the hardcoded `PHASE 3 · NOT YET ACTIVATED` placeholder
-> (`app/components/billing-audit/workbench.tsx:194`) and `auditRowMap.ts:683` still hardcodes
+> `src/billingAudit/deskClassifier.ts`, and no `claims-desk-*` cron route. ⚠ **The Flag Queue
+> subtab and its `PHASE 3 · NOT YET ACTIVATED` placeholder ARE GONE as of 2026-09-09** — the AR
+> Management work (migrations 0109-0111) replaced that subtab with the AR queue, so the line
+> citation this note used to carry (`workbench.tsx:194`) no longer resolves. The proposal's
+> unbuilt-ness is unchanged; only the placeholder it pointed at is. `auditRowMap.ts:683` still hardcodes
 > `last_fu_note: null`. Its §9 decisions (a)–(g) are **unruled**, and §9(c) in particular asks
 > to reverse a recorded PHI-surface reduction — nothing in it is authorised by being
 > registered here.
@@ -365,7 +368,9 @@ installed, so it prints `N` for everything; ask
 ### Vercel branch↔environment binding
 
 There are exactly **two** Vercel environments, and `app/vercel.json` binds
-neither (it carries `regions` / `installCommand` / `crons` only — all binding is
+neither (it carries `regions` / `installCommand` / `functions` / `crons` only — the `functions`
+block arrived 2026-09-10 and pins `memory: 3009` for `app/api/cron/ar-snapshot/route.ts`, whose
+parse peaks at ~1.1 GB RSS on the largest customer; all binding is
 project-side, `prj_vPJxHFny6OS9gU32swXMn3XJsog3`):
 
 | Environment | Bound to | URLs |
@@ -443,7 +448,7 @@ Two **separate** migration planes — never mix the directories:
 
 | Plane | Directory | Next number (as of 2026-08-15) |
 |---|---|---|
-| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0109** — **0108 (`(business_entity_id, charge_date)` btree on `collections.cmd_explorer_charge_rollup`, for /code-performance's per-tenant charge_date windows) APPLIED LIVE 2026-09-08** as ONE autocommit `execute_sql` `CREATE INDEX CONCURRENTLY` + a hand-inserted ledger row `20260908223624` (the 0101/0107 path); 3.7 MB; BXR 6mo pairing query 10,959 ms cold → 254 ms warm, Indigo unchanged (see the 0108 header for what it does NOT fix — heap layout). **0107 (`cmd_charge_rollup_entity_payment_id_desc`) applied live 2026-08-24** (ledger `20260824190400`). **0106 (writer loses SELECT on the `patient_name` CIPHERTEXT, keeps it column-scoped on the conflict key) APPLIED LIVE 2026-08-18 IN TWO LEDGER ROWS** (`0106_..._least_privilege` then `0106b_..._column_scoped_select`) because the first attempt was wrong: I asserted `INSERT ... ON CONFLICT DO NOTHING` needs no SELECT, and it DOES — with a conflict target Postgres must read the conflicting row, so the plain revoke 42501'd the sync immediately. **Verify a privilege claim by RUNNING the statement, not by reading about it.** Both versions are permanent; the `.sql` file holds the final state. **0105 (`collections.cmd_patient_directory` + `_state`) APPLIED LIVE 2026-08-18** via `apply_migration`, and BUILT the same session (`patientDirectorySync.ts --commit`: 686,503 rows scanned, **11,161** directory rows, 0 decrypt failures, 31.6s). Verified as the REAL roles, not just via `has_table_privilege` — the writer actually inserted 11,161 rows, which is the only proof the RLS half works (`postgres` is `rolbypassrls`, so an MCP query is blind to it; this is the check 0066 never got, and its `claims_reader` UPDATE grant on `patient_name_bidx` has been INERT since June as a result — RLS on, no UPDATE policy for that role, so the name backfill has never written a row and the column sits at **7.18%** populated). Its writer policies are PERMISSIVE (`with check (true)`) on purpose, copying 0054's `rollup_refresh_run` shape rather than 0102's GUC-scoped one: the directory is a cross-tenant index rebuilt in ONE pass, so there is no single `app.business_entity_id` for a run — read isolation is unchanged and stays app-layer + reader policy. **0100 AND 0104 ARE BOTH APPLIED LIVE 2026-08-17** (ledger `20260817103441` / `20260817104949`) — note 0104 landed BEFORE 0100 by wall clock, so the ledger is not in file order and `max(version)` is not `max(number)`. **0103 (`grant select (business_entity_id, employer_name)` on `collections.cmd_explorer_rows` to `cmd_rollup_writer`) APPLIED LIVE 2026-08-17** via `apply_migration`. It is the THIRD fix in one chain and each failed differently: 0101's UPDATE grant was INERT (RLS on, no UPDATE policy → zero rows, no error); 0102 added the policy; 0103 grants the SELECT that the UPDATE's own WHERE clause requires — Postgres needs SELECT on every column READ in an UPDATE, and the backfill reads `business_entity_id` + `employer_name`, so `--commit` raised 42501 until this landed. Column-scoped on purpose: table-level SELECT is still **false**, and the writer's readable columns are exactly `business_entity_id, employer_name, row_fingerprint`. **0101 AND 0102 ARE BOTH APPLIED LIVE 2026-08-15**; do not reuse either. **0101** (`cmd_explorer_rows.employer_name` + trigram GIN + partial index + column-scoped `update (employer_name)` grant) went in as **autocommit `execute_sql`, NOT `apply_migration`** — two `CREATE INDEX CONCURRENTLY` — so it left **no ledger row of its own** and one was **inserted by hand** as `20260815103136`. ⚠ An `execute_sql` apply is invisible to the ledger: if you apply that way, insert the row yourself or the next session re-issues your number. **0102** (`cmd_explorer_writer_update` RLS policy) used `apply_migration`, ledger `20260815103354`. **0102 exists because 0101 was incomplete**: the table has RLS enabled and `cmd_rollup_writer` is not `rolbypassrls`, so the column-scoped UPDATE grant matched **zero rows and raised nothing** until an UPDATE policy existed — a GRANT is half the gate (see 0089/0090). Earlier context, re-derived from the live ledger on 2026-08-12: | **0099 (etl_run + pipeline_state) APPLIED LIVE 2026-08-12**, ledger `20260812203336` (it was authored-only when the previous "next = 0100" note was written); **0100 (`facility_assignments_guard` search_path pin, audit P1-13) is AUTHORED on `fix/qualify-audit-wave1`, NOT applied** — apply is gated like any migration. 0098 applied live 2026-08-11 (`20260811040852`); 0096's file is tracked. |
+| Product (`claims`, `collections`) | `supabase/migrations/00NN_*.sql` | **0112** — **0111 (`ar_set_work` explicit projection + assignee must be a staff app_user; Qodo #348 round 1) APPLIED LIVE 2026-09-10 04:13 UTC** (ledger `20260910041317`); **0109 (`claims.ar_*` AR Management plane: 10 tables + 3 definers) and 0110 (`ar_claim_note` patient-level notes) APPLIED LIVE 2026-09-09** via `apply_migration` (ledger `20260909103129` / `20260909104221`; see `veris-data-notes.md` § 0109). **0108 (`(business_entity_id, charge_date)` btree on `collections.cmd_explorer_charge_rollup`, for /code-performance's per-tenant charge_date windows) APPLIED LIVE 2026-09-08** as ONE autocommit `execute_sql` `CREATE INDEX CONCURRENTLY` + a hand-inserted ledger row `20260908223624` (the 0101/0107 path); 3.7 MB; BXR 6mo pairing query 10,959 ms cold → 254 ms warm, Indigo unchanged (see the 0108 header for what it does NOT fix — heap layout). **0107 (`cmd_charge_rollup_entity_payment_id_desc`) applied live 2026-08-24** (ledger `20260824190400`). **0106 (writer loses SELECT on the `patient_name` CIPHERTEXT, keeps it column-scoped on the conflict key) APPLIED LIVE 2026-08-18 IN TWO LEDGER ROWS** (`0106_..._least_privilege` then `0106b_..._column_scoped_select`) because the first attempt was wrong: I asserted `INSERT ... ON CONFLICT DO NOTHING` needs no SELECT, and it DOES — with a conflict target Postgres must read the conflicting row, so the plain revoke 42501'd the sync immediately. **Verify a privilege claim by RUNNING the statement, not by reading about it.** Both versions are permanent; the `.sql` file holds the final state. **0105 (`collections.cmd_patient_directory` + `_state`) APPLIED LIVE 2026-08-18** via `apply_migration`, and BUILT the same session (`patientDirectorySync.ts --commit`: 686,503 rows scanned, **11,161** directory rows, 0 decrypt failures, 31.6s). Verified as the REAL roles, not just via `has_table_privilege` — the writer actually inserted 11,161 rows, which is the only proof the RLS half works (`postgres` is `rolbypassrls`, so an MCP query is blind to it; this is the check 0066 never got, and its `claims_reader` UPDATE grant on `patient_name_bidx` has been INERT since June as a result — RLS on, no UPDATE policy for that role, so the name backfill has never written a row and the column sits at **7.18%** populated). Its writer policies are PERMISSIVE (`with check (true)`) on purpose, copying 0054's `rollup_refresh_run` shape rather than 0102's GUC-scoped one: the directory is a cross-tenant index rebuilt in ONE pass, so there is no single `app.business_entity_id` for a run — read isolation is unchanged and stays app-layer + reader policy. **0100 AND 0104 ARE BOTH APPLIED LIVE 2026-08-17** (ledger `20260817103441` / `20260817104949`) — note 0104 landed BEFORE 0100 by wall clock, so the ledger is not in file order and `max(version)` is not `max(number)`. **0103 (`grant select (business_entity_id, employer_name)` on `collections.cmd_explorer_rows` to `cmd_rollup_writer`) APPLIED LIVE 2026-08-17** via `apply_migration`. It is the THIRD fix in one chain and each failed differently: 0101's UPDATE grant was INERT (RLS on, no UPDATE policy → zero rows, no error); 0102 added the policy; 0103 grants the SELECT that the UPDATE's own WHERE clause requires — Postgres needs SELECT on every column READ in an UPDATE, and the backfill reads `business_entity_id` + `employer_name`, so `--commit` raised 42501 until this landed. Column-scoped on purpose: table-level SELECT is still **false**, and the writer's readable columns are exactly `business_entity_id, employer_name, row_fingerprint`. **0101 AND 0102 ARE BOTH APPLIED LIVE 2026-08-15**; do not reuse either. **0101** (`cmd_explorer_rows.employer_name` + trigram GIN + partial index + column-scoped `update (employer_name)` grant) went in as **autocommit `execute_sql`, NOT `apply_migration`** — two `CREATE INDEX CONCURRENTLY` — so it left **no ledger row of its own** and one was **inserted by hand** as `20260815103136`. ⚠ An `execute_sql` apply is invisible to the ledger: if you apply that way, insert the row yourself or the next session re-issues your number. **0102** (`cmd_explorer_writer_update` RLS policy) used `apply_migration`, ledger `20260815103354`. **0102 exists because 0101 was incomplete**: the table has RLS enabled and `cmd_rollup_writer` is not `rolbypassrls`, so the column-scoped UPDATE grant matched **zero rows and raised nothing** until an UPDATE policy existed — a GRANT is half the gate (see 0089/0090). Earlier context, re-derived from the live ledger on 2026-08-12: | **0099 (etl_run + pipeline_state) APPLIED LIVE 2026-08-12**, ledger `20260812203336` (it was authored-only when the previous "next = 0100" note was written); **0100 (`facility_assignments_guard` search_path pin, audit P1-13) is AUTHORED on `fix/qualify-audit-wave1`, NOT applied** — apply is gated like any migration. 0098 applied live 2026-08-11 (`20260811040852`); 0096's file is tracked. |
 | Veris ML (`staging`, `ref`, `core`, `intel`) | `SQL Schemas/0NN_*.sql` | **039** — **038 (`ref.code_description`: curated CPT/HCPCS/REV labels for /code-performance, 85 rows, all `needs_review = true`, `code_type` vocabulary borrowed VERBATIM from `ref.service_codes` so a later fold is cheap) APPLIED LIVE 2026-09-08** via `apply_migration` (ledger `20260908093315`). **037 (era-835 claim-line grain) is AUTHORED on `feat/era-835-claim-line-grain`, NOT applied — its number is consumed; do not reuse it.** 035/036 (payer-alias ruling + row-count assert) applied live 2026-09-06/07; 032/033/034 applied live 2026-08-10 |
 
 **0097 (Qualify watchers + recent searches) is APPLIED LIVE 2026-08-10** (ledger `20260810120258`),
@@ -632,8 +637,9 @@ Top nav is built from `app/lib/nav-model.ts` — `nav-links.tsx` (bar) and
 `shell/nav-rail.tsx` (rail) both read it, so the two shells cannot disagree.
 The link set is role-dependent:
 
-- `admin` / `user` / unknown — Overview · Collections · Claims Audit (Beta) · Code Performance
-- `super_admin` — Overview · **Payer Intel** · Collections · Claims Desk · Code Performance
+- `admin` / `user` / unknown — Overview · Collections · AR Management (Beta) · Code Performance
+- `super_admin` — Overview · **Payer Intel** · Collections · AR Management · Code Performance
+  (plus the AR **notifications bell** in the header — super_admin only, 2026-09-09)
 - `admissions_seat` — **Payer Intel only** (single-surface persona)
 
 ⚠ **NO ROLE SEES QUALIFY.** These two bullets said "the above plus Qualify (Beta)"
@@ -650,7 +656,8 @@ and must still be reasoned about — they simply have no nav entry.
 Surfaces:
 
 - `/dashboard` (Overview) and `/dashboard/collections` — the primary product.
-- `/billing-audit` (labelled "Claims Desk"), `/payer-intel` and `/qualify` +
+- `/billing-audit` (labelled "AR Management" since 2026-09-09; "Claims Desk" before — the
+  default tab is the snapshot-fed AR Queue, see `.claude/rules/billing-audit.md`), `/payer-intel` and `/qualify` +
   `/qualify/m` — all currently behind a **refactor notice**. Claims Desk and
   Payer Intel share one bypass allowlist (`app/lib/maintenance-bypass.ts`:
   `alec@treathealth.ai` + `ryan@treathealth.ai`, 2026-08-18); **Qualify keeps its
@@ -672,9 +679,9 @@ Surfaces:
   `redirect('/')` stub. `<SearchConsole />` and the `/api/agent` path stay in git
   history; restoring means remounting the page *and* re-adding the nav entry.
 
-`app/vercel.json` declares **23 cron entries across 21 distinct routes**
-(`billing-audit-consolidated` runs on three schedules; the previous 22/20 count
-predated `indigo-era-835`, and 21/19 predated `pipeline-tick`):
+`app/vercel.json` declares **24 cron entries across 22 distinct routes**
+(`billing-audit-consolidated` runs on three schedules; 23/21 predated `ar-snapshot`
+(2026-09-09), 22/20 predated `indigo-era-835`, and 21/19 predated `pipeline-tick`):
 
 | Route | Cadence |
 |---|---|
@@ -688,6 +695,7 @@ predated `indigo-era-835`, and 21/19 predated `pipeline-tick`):
 | `facility-outcomes` | daily 04:10 |
 | `qualify-rating-history` | daily 05:10 — DB-only; inert 500 until mig 0093 applies |
 | `cmd-explorer-catchup` | daily 07:52 |
+| `ar-snapshot` | daily 14:05 — CMD V2 customer data snapshot → `claims.ar_*` (direct GET, no report slot) |
 | `era-835` (BXR) · `indigo-era-835` | daily 08:50 / 09:50 |
 | `vob-sync` | daily 09:17 |
 | `refresh-cmd-payer` | daily 10:50 |

@@ -4821,3 +4821,76 @@ indexes incrementally, so a 3.7 MB two-key btree costs it nothing measurable.
    are a separate decision: an INCLUDE-covering index for index-only scans (price it by its widest
    text column — the 0092 lesson), or a matview laid out in (entity, charge_date) order. Neither
    authored; the matview was explicitly ruled out as the wrong tool.
+
+## 0109 + 0110 — AR Management plane `claims.ar_*` (BOTH APPLIED LIVE 2026-09-09)
+
+Ledger `20260909103129` (`0109_ar_management`) and `20260909104221` (`0110_ar_claim_note_patient_level`),
+both via `apply_migration` (plain transactional DDL, `set role claims_admin`). Applied the same night
+they were authored on Alec's explicit overnight instruction ("execute the scheme … do the whole thing");
+additive only — no existing table changed. Verified at apply: writer INSERT/UPDATE true on the six fact
+tables, INSERT-only on `ar_claim_note` (UPDATE/DELETE false for every non-owner), reader SELECT true on
+all ten, reader INSERT/UPDATE false, EXECUTE on the three definers true for `claims_reader` and false
+for `public`, RLS on all 10 tables, **30 policies** (10 reader + 18 writer + 2 note), owners
+`claims_admin`, `pg_has_role('postgres','claims_admin','SET')` still true.
+
+**0110 exists because a measurement one minute after 0109 landed contradicted 0109's schema**:
+`B_PATNOTES.TYPE=0` rows carry `CLAIM=0` and are PATIENT-level notes — CAMH 1,535 of 1,567 live notes,
+NASH 1,191 of 1,517 — so 0109's `cmd_claim_id NOT NULL` would have dropped ~90% of the rep notes the tab
+exists to surface. 0110 makes it nullable, adds `cmd_patient_id` + a target CHECK + a patient index, and
+re-creates `ar_add_note` to stamp the patient. Filed separately because applied migrations are never
+edited in place, even a minute old.
+
+### The source: CMD V2 customer data snapshot (probed 2026-09-09)
+
+- `GET /v2/account/475729/snapshot` → **404** (the BXR account-level snapshot is not configured).
+- `GET /v2/customer/{c}/snapshot` → **200 ZIP for 19 of 20 BXR accounts** (0.03–6.4 MB each, ~36 MB
+  total); 10030472 (billing umbrella) → **401**. Indigo 10024431 → 404 (2026-08-14, still true).
+- The ZIP is CMD's full per-customer extract: 30 tab-delimited `.DAT` tables + `meta/oracle-create.sql`
+  (Oracle DDL, no comments). Header row first; `MM/DD/YYYY` dates, `MM/DD/YYYY HH:MM:SS` stamps (US/
+  Eastern wall clock, no zone); field counts matched the header on EVERY row of every file.
+- `B_CHARGE.STATUS` is a numeric FK into the customer's own `B_CHARGESTATUS` lookup and is set on ~5%
+  of charges. CMD's `CLAIM AT <payer>` display status is DERIVED; the rule (arSnapshotMap.ts header) was
+  checked three ways on CAMH + NASH and against `claims.audit_row`: **128 of 139 distinct `CLAIM AT …`
+  strings reproduce byte-for-byte**; the 11 audit-only strings are payer-name spellings the snapshot's
+  `B_PAYOR` no longer carries or ` - SECONDARY` variants of claims that have since moved.
+- Union of hand-applied statuses across 20 customers: APPROVED FOR HIGHER PAYMENT · PENDING FOR HIGHER
+  PAYMENT · NEEDS RENEGOTIATING · NEGOTIATE WITH FIRST HEALTH DIRECT · MANAGER ESCALATION - CATHERINE /
+  JESS · SUPERVISOR ESCALATION - TULA · MEDICAL RECORD REQUEST · OPTUM PNI MR REQUEST · MEDICARE PRIMARY ·
+  ON HOLD - CODING RESEARCH · PAID TO MEMBER · WRITE OFF · TERMED INSURANCE · TERMED · PTM · REBILLED ON
+  NEW CLAIM · VOID REQUESTED · NEGOTIATE WITH CIGNA DIRECT. Several are `DELETED=Y` lookup rows still
+  referenced by charges — the mapper keeps deleted lookups for that reason.
+
+### First load (2026-09-09, `npm run ingest:ar-snapshot -- --from-dir … --commit`)
+
+19/19 runs `ok`: **58,830 claims / 78,111 charges / 2,415 patients / 103,367 remits / 70,763 status
+events / 15,010 notes (13,500 patient-level)**; **28,397 open claims = $52,464,876.48**. Per facility
+(open $): KWC 6.13M · LSMH 5.97M · CAMH 5.78M · NASH 5.46M · TBH 4.58M · TREAT_CA 3.61M · DMH 3.46M ·
+TREAT_NV 3.17M · TREAT_TX 2.45M · PCMH 2.19M · TELEHEALTH_MH 2.15M · TREAT_WA 2.12M · LAMH 1.77M ·
+HOUSTON_MH 1.33M · TEEN_MH_TX 1.02M · TREAT_TN 0.96M · FRCA 0.24M · TREAT_CO 0.04M · WRC 0.04M.
+Open claims by category: AT_PAYER 24,219 · OTHER 2,431 (BALANCE DUE OTHER 1,205 + PENDING FOR HIGHER
+PAYMENT + WRITE OFF + escalations) · BALANCE_DUE_PATIENT 985 · NEEDS_RENEGOTIATING 571 ·
+APPROVED_HIGHER 191.
+
+⚠ **HOLD items for Alec:** (1) TREAT_CO and HOUSTON_MH are on the AR roster because they carry real AR
+(the rules file calls them "not yet open") — keep or retire in `arConfig.ts`; (2) the 14:05 UTC slot is
+inferred from "snapshots are created in the morning Eastern"; confirm the first scheduled run's
+`snapshot_as_of` advanced from 2026-09-08 to 2026-09-09.
+
+### 0111 — `ar_set_work` explicit projection + assignee check (APPLIED LIVE 2026-09-10 04:13 UTC, Qodo #348 round 1)
+
+Ledger `20260910041317`, `apply_migration`. CREATE OR REPLACE of the 0109 definer only: the prior-row read
+is now `select work_status, assignee_email, due_on, resolution_code into …` (the standing "never SELECT *"
+rule — the %rowtype form would have silently widened a runtime definer's projection on the next column
+add), and the assignee uuid must be an existing admin / super_admin app user. Tenant membership of the
+assignee is checked in the Server Action (`setArWorkAction` resolves the uuid server-side and requires
+`role = super_admin` or `admin` with `entity = the clamped view`); the definer has only the entity uuid,
+so it enforces existence + role and the app layer enforces tenancy. Verified at apply: `prosrc` has no
+`select *`, owner `claims_admin`, EXECUTE true for `claims_reader` and false for `public`.
+
+The same Qodo round changed the ingest without a migration: a snapshot missing `B_CHARGE`/`B_CLAIM` is
+`parse_failed` (not an empty book); a ZERO-claim mapping for a customer that still has live rows is
+recorded `error` / `empty_regression` and writes NOTHING (an error run is not fresh, so the next pass
+retries); a `running` run younger than 20 min skips the customer (`skipped_running`); the stale mark
+is `last_run_id < run`, not `<>`, so an overlapping newer run keeps its rows; the cache tag is busted
+whenever a write was attempted (batches commit independently). Assignee options are tenant-scoped
+(`super_admin` ∪ this tenant's `admin`s); the notes read derives the patient from the claim server-side.

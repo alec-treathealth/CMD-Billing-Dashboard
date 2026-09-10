@@ -39,10 +39,12 @@ const COLLECTIONS: NavLink = {
   label: 'Collections',
   railIcon: Wallet,
 };
-// Display label "Claims Desk" (2026-07-15) — the route + internal names stay /billing-audit.
+// Display label "AR Management" (2026-09-09, Alec) — the Claims Desk tab was refactored into the
+// snapshot-fed aged-AR queue. The route + internal names stay /billing-audit (billing-audit.md);
+// earlier labels were "Claims Audit" (2026-07) and "Claims Desk" (2026-07-15 → 2026-09-09).
 const CLAIMS_AUDIT: NavLink = {
   href: '/billing-audit',
-  label: 'Claims Desk',
+  label: 'AR Management',
   railIcon: FileSearch,
   isBeta: true,
 };
