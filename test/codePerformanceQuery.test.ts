@@ -16,6 +16,7 @@ import { join } from 'node:path';
 
 import {
   CODE_PERF_WINDOWS,
+  CODE_PERF_WINDOW_KEYS,
   CODE_PERF_DEFAULT_WINDOW,
   CODE_PERF_MATURITY_DAYS,
   CODE_PERF_MATURED_SHARE_FLOOR,
@@ -77,15 +78,27 @@ function allBuilderSql(): Array<[string, string]> {
 // Input clamps
 // ---------------------------------------------------------------------------------------------
 
-test('window: the four presets resolve to their day counts; anything else falls back to 6mo', () => {
-  assert.deepEqual(CODE_PERF_WINDOWS, { '30d': 30, '60d': 60, '90d': 90, '6mo': 180 });
+test('window: the five presets resolve to their day counts; anything else falls back to 6mo', () => {
+  // Set changed 2026-09-11 (Alec): 30d dropped, 45d and 1yr added. 45d is exactly
+  // CODE_PERF_MATURITY_DAYS, so the shortest window is the first one whose charges can have
+  // matured — a 30d window could only ever report velocity, never yield.
+  assert.deepEqual(CODE_PERF_WINDOWS, { '45d': 45, '60d': 60, '90d': 90, '6mo': 180, '1yr': 365 });
   assert.equal(CODE_PERF_DEFAULT_WINDOW, '6mo');
-  for (const k of ['30d', '60d', '90d', '6mo'] as const) assert.equal(resolveCodePerfWindow(k), k);
+  for (const k of ['45d', '60d', '90d', '6mo', '1yr'] as const) assert.equal(resolveCodePerfWindow(k), k);
+  // Render order IS the object order — WindowSelector maps CODE_PERF_WINDOW_KEYS — so ascending
+  // order is a UI contract, not a formatting preference.
+  assert.deepEqual(CODE_PERF_WINDOW_KEYS, ['45d', '60d', '90d', '6mo', '1yr']);
+  // A RETIRED key must fall back, not resolve: anything holding a stale '30d' (a bookmark, a
+  // persisted preference) lands on the default rather than erroring or silently querying 30 days.
+  assert.equal(resolveCodePerfWindow('30d'), '6mo');
   assert.equal(resolveCodePerfWindow('12mo'), '6mo');
   assert.equal(resolveCodePerfWindow(''), '6mo');
-  assert.equal(resolveCodePerfWindow(30), '6mo');
+  assert.equal(resolveCodePerfWindow(45), '6mo');
   assert.equal(resolveCodePerfWindow(undefined), '6mo');
-  assert.equal(resolveCodePerfWindow({ toString: () => '30d' }), '6mo');
+  // A non-string whose toString() is a VALID key must still be rejected — the guard is a typeof
+  // check, not a coercion. (This used to pass '30d', which stopped proving anything once that key
+  // was retired: it would now fall back for the wrong reason.)
+  assert.equal(resolveCodePerfWindow({ toString: () => '45d' }), '6mo');
 });
 
 test('facilities: null means ALL; blanks and non-strings drop; trimmed, de-duped, capped; never []', () => {

@@ -39,7 +39,15 @@ import { CODE_PERF_WINDOW_KEYS } from '../../../src/collections/codePerformanceQ
 import { fmtDays, fmtInt, fmtMoney, fmtPct } from './format';
 import { MetricHint } from './metric-hint';
 
-const WINDOW_LABEL: Record<CodePerfWindow, string> = { '30d': '30d', '60d': '60d', '90d': '90d', '6mo': '6mo' };
+// Labels are the keys verbatim — kept as an explicit Record rather than rendering the key directly
+// so a preset can be relabelled without changing the value that reaches the query.
+const WINDOW_LABEL: Record<CodePerfWindow, string> = {
+  '45d': '45d',
+  '60d': '60d',
+  '90d': '90d',
+  '6mo': '6mo',
+  '1yr': '1yr',
+};
 
 export function MaturityBanner({ maturedShare }: { maturedShare: number | null }) {
   return (

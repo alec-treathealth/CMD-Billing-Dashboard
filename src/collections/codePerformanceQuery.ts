@@ -45,14 +45,14 @@
  *   patient_balance_rate sum(patient_balance_due) / sum(charge_amount) — BXR ONLY, see SUPPRESSION.
  *                        An AR-AGING concept, not a rate: it is the balance OUTSTANDING AS OF TODAY
  *                        after patient payments, so it decays as patients pay and a 6mo window reads
- *                        lower than 30d on the same charges. Label it that way; never place it beside
+ *                        lower than 45d on the same charges. Label it that way; never place it beside
  *                        allowed_rate as though comparable.
  *   payer_concentration  top payer's billed / total billed for the pairing (raw, unaliased payer strings)
  *   facility_spread      max(allowed_rate) − min(allowed_rate) across facilities within the pairing,
  *                        facilities with >= CODE_PERF_FACILITY_MIN_CHARGES charges only
  *
  * ── WINDOWS + MATURITY GUARD ─────────────────────────────────────────────────────────────────────
- * 30d / 60d / 90d / 6mo (=180d), half-open, anchored on the BUSINESS day in America/Los_Angeles —
+ * 45d / 60d / 90d / 6mo (=180d) / 1yr (=365d), half-open, anchored on the BUSINESS day in America/Los_Angeles —
  * computed IN SQL as (now() at time zone 'America/Los_Angeles')::date so the app never reads a clock:
  *   s := business_today − N,  e := business_today,  charge_date >= s AND charge_date < e + 1.
  * Median days-to-money runs 27–44 days and Indigo's charge feed lags ~15 days, so a short window is
@@ -102,8 +102,19 @@ import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
 // Constants
 // ---------------------------------------------------------------------------------------------
 
-/** Window presets → day counts. `6mo` is 180 days by definition here (documented, not calendar). */
-export const CODE_PERF_WINDOWS = { '30d': 30, '60d': 60, '90d': 90, '6mo': 180 } as const;
+/**
+ * Window presets → day counts. `6mo` is 180 days and `1yr` is 365, BY DEFINITION here — fixed day
+ * counts, not calendar arithmetic, so a window never changes length with the month it lands in.
+ *
+ * ⚠ SET CHANGED 2026-09-11 (Alec): 30d dropped, 45d and 1yr added. 45d is not an arbitrary
+ * substitution for 30d — it is exactly CODE_PERF_MATURITY_DAYS below, so the shortest window is now
+ * the first one whose charges can have matured at all. A 30d window could only ever report
+ * velocity and volume, never yield, because nothing in it had reached maturity.
+ *
+ * ⚠ ORDER IS THE RENDER ORDER. CODE_PERF_WINDOW_KEYS derives from this object and WindowSelector
+ * maps over it, so the buttons appear left-to-right exactly as written here. Keep them ascending.
+ */
+export const CODE_PERF_WINDOWS = { '45d': 45, '60d': 60, '90d': 90, '6mo': 180, '1yr': 365 } as const;
 export type CodePerfWindow = keyof typeof CODE_PERF_WINDOWS;
 export const CODE_PERF_WINDOW_KEYS = Object.keys(CODE_PERF_WINDOWS) as CodePerfWindow[];
 export const CODE_PERF_DEFAULT_WINDOW: CodePerfWindow = '6mo';
