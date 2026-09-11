@@ -294,6 +294,24 @@ alter function claims.set_app_user_facilities(uuid, text[], uuid) owner to claim
 revoke all on function claims.set_app_user_facilities(uuid, text[], uuid) from public, anon, authenticated, service_role;
 grant execute on function claims.set_app_user_facilities(uuid, text[], uuid) to claims_reader;
 
+-- Role/entity changes and facility grants must be one transaction. This also preserves the
+-- previous state when grant validation fails for an existing account.
+create or replace function claims.provision_app_user(
+  p_user uuid, p_email text, p_role text, p_entity text, p_codes text[], p_actor uuid
+) returns void
+language plpgsql security definer
+set search_path = claims, collections, pg_temp
+as $$
+begin
+  perform claims.upsert_app_user(p_user, p_email, p_role, p_entity);
+  perform claims.set_app_user_facilities(p_user, p_codes, p_actor);
+end;
+$$;
+
+alter function claims.provision_app_user(uuid, text, text, text, text[], uuid) owner to claims_admin;
+revoke all on function claims.provision_app_user(uuid, text, text, text, text[], uuid) from public, anon, authenticated, service_role;
+grant execute on function claims.provision_app_user(uuid, text, text, text, text[], uuid) to claims_reader;
+
 comment on table claims.app_user_facility is
   'Per-user facility entitlement for the `user` seat (0112). Absence = denial. Tenant coherence is '
   'enforced APP-SIDE (facilityBelongsToEntity); this table validates facility existence only.';

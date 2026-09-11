@@ -20,8 +20,7 @@ import {
   facilityGrantsByUser,
   listAppUsers,
   recordAccess,
-  setAppUserFacilities,
-  upsertAppUser,
+  provisionAppUser,
   type AppEntity,
   type AppRole,
   type ManagedUser,
@@ -308,12 +307,8 @@ export async function setUserRole(
   if (!inScope(gate, target)) return { ok: false, error: 'You may not manage that user.' };
 
   try {
-    await upsertAppUser(targetUserId, target.email, role, entity);
-    // ALWAYS called, including with an empty set. Promoting a `user` to admin must CLEAR their
-    // grants rather than leave rows that would silently take effect again if the role were ever
-    // set back to `user`. 0112's definer permits an empty set for any role precisely so this
-    // clear-on-role-change works without first restoring the old role.
-    await setAppUserFacilities(targetUserId, grant.codes, gate.user.id);
+    // Role/entity and grants must commit together; an empty set also clears stale grants.
+    await provisionAppUser(targetUserId, target.email, role, entity, grant.codes, gate.user.id);
   } catch (err) {
     return { ok: false, error: mutationError(err) };
   }
@@ -442,6 +437,7 @@ export async function inviteUser(
   const redirectTo = `${origin}/auth/confirm?next=/set-password${seatParam}`;
 
   let userId: string | null = null;
+  let newlyCreated = false;
   try {
     const { data, error } = await supabaseAdminClient().auth.admin.inviteUserByEmail(
       normEmail,
@@ -449,6 +445,7 @@ export async function inviteUser(
     );
     if (error) throw error;
     userId = data.user?.id ?? null;
+    newlyCreated = Boolean(userId);
   } catch (err) {
     // Surface the real reason (rate limit, invalid address, GoTrue error) in the server logs — the
     // Admin API error is otherwise swallowed here and invisible in Vercel logs. Staff email/uid only,
@@ -470,8 +467,15 @@ export async function inviteUser(
   if (!userId) return { ok: false, error: 'The invite did not return a user. Please try again.' };
 
   try {
-    await upsertAppUser(userId, normEmail, role, entity);
+    await provisionAppUser(userId, normEmail, role, entity, grant.codes, gate.user.id);
   } catch (err) {
+    if (newlyCreated) {
+      try {
+        await supabaseAdminClient().auth.admin.deleteUser(userId);
+      } catch (cleanupErr) {
+        console.error('[inviteUser] failed to compensate auth account:', cleanupErr);
+      }
+    }
     return { ok: false, error: mutationError(err) };
   }
 
@@ -483,16 +487,6 @@ export async function inviteUser(
     await deleteOrphanAppUsers(normEmail, userId);
   } catch {
     // Non-fatal — the orphan (if any) stays until the next successful invite/cleanup.
-  }
-
-  // Facilities AFTER the role row exists: 0112's definer reads claims.app_user to check the role,
-  // so calling it before upsertAppUser would raise "no such provisioned user".
-  if (grant.codes.length > 0) {
-    try {
-      await setAppUserFacilities(userId, grant.codes, gate.user.id);
-    } catch (err) {
-      return { ok: false, error: mutationError(err) };
-    }
   }
 
   await recordAccess({

@@ -585,6 +585,21 @@ export async function setAppUserFacilities(
   return rows[0]?.set_app_user_facilities ?? 0;
 }
 
+/** Atomically assign the role/entity and replace the complete facility grant set. */
+export async function provisionAppUser(
+  userId: string,
+  email: string,
+  role: AppRole,
+  entity: AppEntity | null,
+  facilityCodes: string[],
+  actorUserId: string,
+): Promise<void> {
+  await readerExecutor().query(
+    'select claims.provision_app_user($1, $2, $3, $4, $5::text[], $6)',
+    [userId, email, role, entity, facilityCodes, actorUserId],
+  );
+}
+
 /** Facility grants for a set of users, for the admin roster. Keyed by user_id. */
 export async function facilityGrantsByUser(): Promise<Record<string, string[]>> {
   const { rows } = await readerExecutor().query<{ app_user_id: string; facility_code: string }>(
