@@ -79,9 +79,9 @@ function allBuilderSql(): Array<[string, string]> {
 // ---------------------------------------------------------------------------------------------
 
 test('window: the five presets resolve to their day counts; anything else falls back to 6mo', () => {
-  // Set changed 2026-09-11 (Alec): 30d dropped, 45d and 1yr added. 45d is exactly
-  // CODE_PERF_MATURITY_DAYS, so the shortest window is the first one whose charges can have
-  // matured — a 30d window could only ever report velocity, never yield.
+  // Set changed 2026-09-11 (Alec): 30d dropped, 45d and 1yr added. See the maturity-boundary test
+  // below for why 45d can never contain a matured charge — and why that is accepted rather than a
+  // defect.
   assert.deepEqual(CODE_PERF_WINDOWS, { '45d': 45, '60d': 60, '90d': 90, '6mo': 180, '1yr': 365 });
   assert.equal(CODE_PERF_DEFAULT_WINDOW, '6mo');
   for (const k of ['45d', '60d', '90d', '6mo', '1yr'] as const) assert.equal(resolveCodePerfWindow(k), k);
@@ -467,4 +467,35 @@ test('shapeCodePerfPairingRow: pg-shaped row → typed row with coerced numbers,
   assert.equal(bxr.write_off_rate.state, 'suppressed');
   assert.ok(!('value' in bxr.write_off_rate), 'BXR write_off value is DISCARDED, not hidden');
   assert.ok(bxr.flags.includes('no_procedure_code') && bxr.flags.includes('no_revenue_code'));
+});
+
+
+test('maturity boundary: 45d is immature-ONLY, and 46 is the first preset that is not', () => {
+  // ⚠ THIS ENCODES AN OFF-BY-ONE THAT WAS ASSERTED BACKWARDS FIRST. The original comment on
+  // CODE_PERF_WINDOWS claimed 45d was "the first window whose charges can have matured". It is the
+  // LAST window whose charges can never have matured, because the two ranges are computed from
+  // opposite ends:
+  //
+  //   window   [today - N + 1, today]                    → earliest = today - N + 1
+  //   matured  charge_date <= today - CODE_PERF_MATURITY_DAYS
+  //
+  // so a preset contains matured dates only when N >= CODE_PERF_MATURITY_DAYS + 1.
+  const firstMatureCapable = CODE_PERF_MATURITY_DAYS + 1;
+  assert.equal(firstMatureCapable, 46, 'maturity is 45 days, so 46 is the smallest capable preset');
+
+  const canContainMatured = (n: number) => -n + 1 <= -CODE_PERF_MATURITY_DAYS;
+
+  // 45d is immature-only — ACCEPTED, ruled by Alec 2026-09-11 after measurement. It is the same
+  // property the 30d preset it replaced had, so nothing regressed; the KPI grid treats an immature
+  // window as a first-class state. Asserted so a later edit cannot quietly reintroduce the claim
+  // that 45d reports yield.
+  assert.equal(canContainMatured(45), false, '45d must be immature-only');
+  assert.equal(canContainMatured(30), false, 'the 30d it replaced had the same property');
+
+  // Every OTHER preset must be yield-capable — that is the line 45d sits just below.
+  for (const key of CODE_PERF_WINDOW_KEYS) {
+    const days = CODE_PERF_WINDOWS[key];
+    if (days === 45) continue;
+    assert.equal(canContainMatured(days), true, `${key} (${days}d) must be able to report yield`);
+  }
 });

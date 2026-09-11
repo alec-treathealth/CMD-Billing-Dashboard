@@ -106,10 +106,28 @@ import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
  * Window presets → day counts. `6mo` is 180 days and `1yr` is 365, BY DEFINITION here — fixed day
  * counts, not calendar arithmetic, so a window never changes length with the month it lands in.
  *
- * ⚠ SET CHANGED 2026-09-11 (Alec): 30d dropped, 45d and 1yr added. 45d is not an arbitrary
- * substitution for 30d — it is exactly CODE_PERF_MATURITY_DAYS below, so the shortest window is now
- * the first one whose charges can have matured at all. A 30d window could only ever report
- * velocity and volume, never yield, because nothing in it had reached maturity.
+ * ⚠ SET CHANGED 2026-09-11 (Alec): 30d dropped, 45d and 1yr added.
+ *
+ * ⚠ 45d CAN NEVER CONTAIN A MATURED CHARGE, AND THAT IS ACCEPTED — RULED BY ALEC 2026-09-11 after
+ * it was measured. The first version of this comment claimed the opposite ("45d is exactly
+ * CODE_PERF_MATURITY_DAYS, so the shortest window is the first one whose charges can have
+ * matured"). That is BACKWARDS, and the off-by-one is worth stating precisely so nobody re-derives
+ * the wrong version:
+ *
+ *   a trailing N-day window is [today - N + 1, today]  → earliest date = today - 44 for N = 45
+ *   a charge is matured when   charge_date <= today - CODE_PERF_MATURITY_DAYS (= today - 45)
+ *   today - 44 > today - 45, so the two ranges are DISJOINT: matured_share is 0 for every 45d query
+ *
+ * N = 46 is the smallest preset whose earliest date reaches the cutoff. Measured live 2026-09-11:
+ * 45d earliest 2026-07-29 vs cutoff 2026-07-28 — short by exactly one day.
+ *
+ * This is NOT a regression. The 30d preset it replaces had the identical property (earliest
+ * today - 29), so the shortest preset has always been immature-only; the KPI grid already treats
+ * that as a first-class state rather than an error. 45d reports velocity and volume, never yield —
+ * which is what the immature-window treatment exists to say.
+ *
+ * Do not "fix" this by bumping 45 to 46 without a new ruling: the value is what was asked for, and
+ * the behaviour is understood rather than accidental.
  *
  * ⚠ ORDER IS THE RENDER ORDER. CODE_PERF_WINDOW_KEYS derives from this object and WindowSelector
  * maps over it, so the buttons appear left-to-right exactly as written here. Keep them ascending.
