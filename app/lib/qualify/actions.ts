@@ -31,6 +31,7 @@ import {
   type CmdEmployerOption,
 } from '@/lib/server';
 import type { QualifyFacilityOption } from '../../../src/collections/cmdExplorerQuery';
+import { UNRESTRICTED_FACILITIES } from '../../../src/collections/facilityScope.js';
 import { memberIdBlindIndex, alphaPrefixBlindIndex, groupNumberBlindIndex, patientNameBlindIndex } from '../../../src/collections/blindIndex';
 import {
   loadQualifyPolicy,
@@ -112,8 +113,16 @@ const realDeps: QualifyDeps = {
   loadBookKpis: loadQualifyBookKpis,
   loadFacilityTrends: loadQualifyFacilityTrends,
   recordAccess,
-  revealRow: (id, actor, entityIds, action) => revealCmdExplorerRow(id, actor, entityIds, action),
-  revealRows: (ids, actor, entityIds, action) => revealCmdExplorerRows(ids, actor, entityIds, action),
+  // ⚠ UNRESTRICTED IS STATED, NOT INHERITED (2026-09-11). These arguments used to be absent, back
+  // when the reveal readers defaulted the facility scope to unrestricted. The default was removed
+  // because it fails OPEN: any caller that forgot the argument reached PHI unscoped, with no type
+  // error. Qualify genuinely IS unrestricted — it is a cross-tenant surface for super_admin and
+  // admissions_seat, and the 0112 facility grant applies only to the `user` seat (R1: Overview +
+  // Collections) — so it says so explicitly and the compiler holds it to that.
+  revealRow: (id, actor, entityIds, action) =>
+    revealCmdExplorerRow(id, actor, entityIds, action, UNRESTRICTED_FACILITIES),
+  revealRows: (ids, actor, entityIds, action) =>
+    revealCmdExplorerRows(ids, actor, entityIds, action, UNRESTRICTED_FACILITIES),
   now: () => new Date(),
   // ── v2 seams (Phases 0/A/B/E) — loaders.ts owns the second reader pool; census binds in Phase G.
   loadPolicy: (token, kind) => loadQualifyPolicy(token, kind),

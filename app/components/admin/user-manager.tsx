@@ -20,6 +20,7 @@ import {
 import type { AppEntity, AppRole } from '@/lib/server';
 import { entityAfterRoleChange, entityForSubmit, isEntityLessRole } from '@/lib/admin/user-form';
 import { ENTITY_LABEL, EntityCell, SELECT_CLASS } from '@/components/admin/entity-cell';
+import { FacilityPicker } from '@/components/admin/facility-picker';
 
 const ROLE_LABEL: Record<AppRole, string> = {
   super_admin: 'Super Admin',
@@ -32,10 +33,12 @@ const ROLE_LABEL: Record<AppRole, string> = {
 interface Draft {
   role: AppRole | '';
   entity: AppEntity | '';
+  /** 0112 facility grant. Meaningful only when role === 'user'; [] means "sees nothing". */
+  facilities: string[];
 }
 
 function draftFromUser(u: ManagedUserDto): Draft {
-  return { role: u.role ?? '', entity: u.entity ?? '' };
+  return { role: u.role ?? '', entity: u.entity ?? '', facilities: [...u.facilityCodes] };
 }
 
 export function UserManager({ initial }: { initial: ManageContext }) {
@@ -54,6 +57,23 @@ export function UserManager({ initial }: { initial: ManageContext }) {
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<AppRole>('user');
   const [inviteEntity, setInviteEntity] = useState<AppEntity | ''>(assignableEntities[0] ?? '');
+  const [inviteFacilities, setInviteFacilities] = useState<string[]>([]);
+
+  /**
+   * Switch the invite form's tenant, dropping any facility selection with it.
+   *
+   * ⚠ THE PICKER HIDES OLD-TENANT SELECTIONS BUT THE PAYLOAD KEPT THEM. FacilityPicker filters its
+   * options to the selected tenant, so after a switch the previous tenant's codes were invisible on
+   * screen and still in `inviteFacilities` — submitted, then rejected by validateFacilityGrant as
+   * foreign, with nothing on screen to explain why. The row editor already cleared on tenant switch
+   * (patchDraft); the invite form did not. This is that parity.
+   */
+  function changeInviteEntity(next: AppEntity | '') {
+    setInviteEntity((prev) => {
+      if (next !== prev) setInviteFacilities([]);
+      return next;
+    });
+  }
   const [inviting, setInviting] = useState(false);
   const [inviteMsg, setInviteMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
@@ -68,16 +88,23 @@ export function UserManager({ initial }: { initial: ManageContext }) {
       setInviteMsg({ kind: 'err', text: 'Choose an entity for this role.' });
       return;
     }
+    // Refused client-side AND server-side: an empty grant is a user who can see nothing, and R4
+    // makes a grant an explicit snapshot rather than a default-to-all.
+    if (inviteRole === 'user' && inviteFacilities.length === 0) {
+      setInviteMsg({ kind: 'err', text: 'Choose at least one facility for this user.' });
+      return;
+    }
     setInviting(true);
     setInviteMsg(null);
     startTransition(async () => {
-      const res = await inviteUser(emailValue, inviteRole, entity);
+      const res = await inviteUser(emailValue, inviteRole, entity, inviteFacilities);
       setInviting(false);
       if (res.ok) {
         const newUser = res.user;
         setUsers((prev) => [newUser, ...prev.filter((u) => u.userId !== newUser.userId)]);
         setDrafts((prev) => ({ ...prev, [newUser.userId]: draftFromUser(newUser) }));
         setInviteEmail('');
+        setInviteFacilities([]);
         setInviteMsg({ kind: 'ok', text: `Invited ${newUser.email}.` });
       } else {
         setInviteMsg({ kind: 'err', text: res.error });
@@ -92,25 +119,55 @@ export function UserManager({ initial }: { initial: ManageContext }) {
       // stale selection is dropped on the switch; a freshly-chosen entity role gets a default.
       if (patch.role !== undefined) {
         next.entity = entityAfterRoleChange(patch.role, next.entity, assignableEntities[0] ?? '');
+        // Leaving the `user` seat drops the grant: it is inert for every other role, and keeping it
+        // in the draft would silently re-apply it if the role were switched back before saving.
+        if (patch.role !== 'user') next.facilities = [];
       }
+      // A tenant switch invalidates every selection — a grant may never span tenants (R3), and the
+      // server rejects a foreign code, so clearing here avoids an error the user cannot see the
+      // cause of.
+      if (patch.entity !== undefined && patch.entity !== prev[userId]!.entity) next.facilities = [];
       return { ...prev, [userId]: next };
     });
   }
 
+  function sameSet(a: readonly string[], b: readonly string[]): boolean {
+    if (a.length !== b.length) return false;
+    const set = new Set(a);
+    return b.every((x) => set.has(x));
+  }
+
   function isDirty(u: ManagedUserDto): boolean {
     const d = drafts[u.userId]!;
-    return d.role !== (u.role ?? '') || d.entity !== (u.entity ?? '');
+    return (
+      d.role !== (u.role ?? '') ||
+      d.entity !== (u.entity ?? '') ||
+      !sameSet(d.facilities, u.facilityCodes)
+    );
   }
 
   function canSave(u: ManagedUserDto): boolean {
     const d = drafts[u.userId]!;
     if (!isDirty(u) || d.role === '') return false;
-    return isEntityLessRole(d.role) || d.entity !== '';
+    if (!isEntityLessRole(d.role) && d.entity === '') return false;
+    // A `user` with no facilities cannot be saved — the server refuses it too.
+    if (d.role === 'user' && d.facilities.length === 0) return false;
+    return true;
   }
 
-  function applyResult(userId: string, role: AppRole | null, entity: AppEntity | null) {
-    setUsers((prev) => prev.map((u) => (u.userId === userId ? { ...u, role, entity } : u)));
-    setDrafts((prev) => ({ ...prev, [userId]: { role: role ?? '', entity: entity ?? '' } }));
+  function applyResult(
+    userId: string,
+    role: AppRole | null,
+    entity: AppEntity | null,
+    facilities: string[] = [],
+  ) {
+    setUsers((prev) =>
+      prev.map((u) => (u.userId === userId ? { ...u, role, entity, facilityCodes: facilities } : u)),
+    );
+    setDrafts((prev) => ({
+      ...prev,
+      [userId]: { role: role ?? '', entity: entity ?? '', facilities },
+    }));
   }
 
   function onSave(u: ManagedUserDto) {
@@ -121,10 +178,10 @@ export function UserManager({ initial }: { initial: ManageContext }) {
     setPendingId(u.userId);
     setRowMsg((m) => ({ ...m, [u.userId]: undefined as never }));
     startTransition(async () => {
-      const res = await setUserRole(u.userId, role, entity);
+      const res = await setUserRole(u.userId, role, entity, d.facilities);
       setPendingId(null);
       if (res.ok) {
-        applyResult(u.userId, role, entity);
+        applyResult(u.userId, role, entity, role === 'user' ? d.facilities : []);
         setRowMsg((m) => ({ ...m, [u.userId]: { kind: 'ok', text: 'Saved' } }));
       } else {
         setRowMsg((m) => ({ ...m, [u.userId]: { kind: 'err', text: res.error } }));
@@ -182,8 +239,15 @@ export function UserManager({ initial }: { initial: ManageContext }) {
                 onChange={(e) => {
                   const nextRole = e.target.value as AppRole;
                   setInviteRole(nextRole);
-                  // Keep the entity coherent with the new role (clears it for entity-less roles).
-                  setInviteEntity((prev) => entityAfterRoleChange(nextRole, prev, assignableEntities[0] ?? ''));
+                  // Keep the entity coherent with the new role (clears it for entity-less roles) —
+                  // and drop any facility selection the change invalidates. A role that is no
+                  // longer `user` has no use for grants, and a role change that lands on a
+                  // DIFFERENT tenant would otherwise submit the previous tenant's codes.
+                  setInviteEntity((prev) => {
+                    const next = entityAfterRoleChange(nextRole, prev, assignableEntities[0] ?? '');
+                    if (nextRole !== 'user' || next !== prev) setInviteFacilities([]);
+                    return next;
+                  });
                 }}
                 className={`${SELECT_CLASS} font-normal normal-case`}
               >
@@ -203,7 +267,7 @@ export function UserManager({ initial }: { initial: ManageContext }) {
                 disabled={inviting}
                 ariaLabel="Invite entity"
                 className={`${SELECT_CLASS} font-normal normal-case`}
-                onChange={(entity) => setInviteEntity(entity)}
+                onChange={(entity) => changeInviteEntity(entity)}
               />
             </label>
             <Button type="button" size="sm" disabled={inviting} onClick={onInvite}>
@@ -215,6 +279,24 @@ export function UserManager({ initial }: { initial: ManageContext }) {
               </span>
             )}
           </div>
+          {/* The picker sits BELOW the inline controls rather than inside that flex row: it is a
+              multi-line list, and wrapping it into the row squashed the email input at narrow
+              widths. Rendered only for the `user` seat — see FacilityPicker's header. */}
+          {inviteRole === 'user' && (
+            <div className="mt-3 border-t border-line pt-3">
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-ink400">
+                Facilities this user can see
+              </p>
+              <FacilityPicker
+                idPrefix="invite"
+                facilities={initial.assignableFacilities}
+                entity={inviteEntity}
+                selected={inviteFacilities}
+                disabled={inviting}
+                onChange={setInviteFacilities}
+              />
+            </div>
+          )}
           <p className="mt-2 text-xs text-muted-foreground">
             Creates the Supabase account, emails an invite link, and assigns the role in one step.
             Delivery uses Supabase&rsquo;s email sender (external domains can be slow without custom SMTP).
@@ -291,6 +373,28 @@ export function UserManager({ initial }: { initial: ManageContext }) {
                     ) : (
                       <span className="text-sm text-ink900">{u.entity ? ENTITY_LABEL[u.entity] : '—'}</span>
                     )}
+                    {/* FACILITIES (0112) — under the tenant cell, because the tenant is what
+                        determines which facilities are even listed. Shown only for the `user`
+                        seat; for a read-only row it degrades to a count, since a non-editable row
+                        has no draft to bind checkboxes to. */}
+                    {d.role === 'user' && u.editable ? (
+                      <div className="mt-2">
+                        <FacilityPicker
+                          idPrefix={`u-${u.userId}`}
+                          facilities={initial.assignableFacilities}
+                          entity={d.entity}
+                          selected={d.facilities}
+                          disabled={busy}
+                          onChange={(facilities) => patchDraft(u.userId, { facilities })}
+                        />
+                      </div>
+                    ) : u.role === 'user' ? (
+                      <p className="mt-1 text-[12px] text-ink400">
+                        {u.facilityCodes.length === 0
+                          ? 'No facilities — sees no data'
+                          : `${u.facilityCodes.length} facilit${u.facilityCodes.length === 1 ? 'y' : 'ies'}`}
+                      </p>
+                    ) : null}
                   </TableCell>
 
                   {/* Actions */}

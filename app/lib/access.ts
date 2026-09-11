@@ -21,8 +21,16 @@ import { cache } from 'react';
 import { requireExecutive, type ExecutiveUser } from './executive';
 import { appUserFor } from './server';
 import { supabaseAuthConfigured } from './supabase/env';
-import { allowedViewsFor, canManageUsers, canRevealPhi, type Entity, type Role } from './rbac';
+import {
+  allowedFacilitiesFor,
+  allowedViewsFor,
+  canManageUsers,
+  canRevealPhi,
+  type Entity,
+  type Role,
+} from './rbac';
 import type { DashboardView } from './views';
+import type { FacilityScope } from '../../src/collections/facilityScope';
 
 export interface Access {
   /** The signed-in principal, or null in the no-auth staged-rollout fallback. */
@@ -36,6 +44,12 @@ export interface Access {
   canRevealPhi: boolean;
   /** May provision/manage users (admins + super-admins; UI deferred). */
   canManageUsers: boolean;
+  /**
+   * Facilities this principal may see (migration 0112). A discriminated union, so the
+   * unrestricted and deny-all cases cannot be confused — see FacilityScope. Consumed through
+   * viewFacilityScope() in app/lib/actions.ts.
+   */
+  facilityScope: FacilityScope;
 }
 
 export type AccessResult =
@@ -44,7 +58,12 @@ export type AccessResult =
   // Signed in, but no role row yet — carries the user so the chrome can still offer Sign out.
   | { ok: false; reason: 'unprovisioned'; user: ExecutiveUser };
 
-function accessFor(user: ExecutiveUser | null, role: Role, entity: Entity | null): Access {
+function accessFor(
+  user: ExecutiveUser | null,
+  role: Role,
+  entity: Entity | null,
+  facilityCodes: readonly string[] | null = null,
+): Access {
   return {
     user,
     role,
@@ -52,6 +71,7 @@ function accessFor(user: ExecutiveUser | null, role: Role, entity: Entity | null
     allowedViews: allowedViewsFor(role, entity),
     canRevealPhi: canRevealPhi(role),
     canManageUsers: canManageUsers(role),
+    facilityScope: allowedFacilitiesFor(role, facilityCodes),
   };
 }
 
@@ -67,5 +87,5 @@ export const dashboardAccess = cache(async (): Promise<AccessResult> => {
   const row = await appUserFor(gate.user.id);
   if (!row) return { ok: false, reason: 'unprovisioned', user: gate.user };
 
-  return { ok: true, access: accessFor(gate.user, row.role, row.entity) };
+  return { ok: true, access: accessFor(gate.user, row.role, row.entity, row.facilityCodes) };
 });

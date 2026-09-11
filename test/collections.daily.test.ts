@@ -15,7 +15,7 @@ import type { ExecResult, QueryExecutor } from '../src/queries/types.js';
 const SCOPE = [BXR_ENTITY_ID];
 
 const DAILY_SQL =
-  `with anchor as (select max(payment_date) as max_d from collections.daily_collections_resolved where business_entity_id = any($4::uuid[]) and ($5::date is null or payment_date <= $5::date)) ` +
+  `with anchor as (select max(payment_date) as max_d from collections.daily_collections_resolved where business_entity_id = any($4::uuid[]) and ($5::date is null or payment_date <= $5::date) and ($6::text[] is null or facility_code = any($6::text[]))) ` +
   `select ` +
   `to_char(dc.payment_date, 'YYYY-MM-DD') as payment_date, ` +
   `dc.facility_code as facility_code, ` +
@@ -35,10 +35,11 @@ const DAILY_SQL =
   `and ($2::date is null or dc.payment_date < $2::date)) end) ` +
   `and ($3::text is null or dc.facility_code = $3::text) ` +
   `and ($5::date is null or dc.payment_date <= $5::date) ` +
+  `and ($6::text[] is null or dc.facility_code = any($6::text[])) ` +
   `order by dc.payment_date desc, f.facility_name nulls last, dc.facility_code`;
 
 const KPIS_SQL =
-  `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections_resolved where business_entity_id = any($2::uuid[]) and ($3::date is null or payment_date <= $3::date)) ` +
+  `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections_resolved where business_entity_id = any($2::uuid[]) and ($3::date is null or payment_date <= $3::date) and ($4::text[] is null or facility_code = any($4::text[]))) ` +
   `select ` +
   `to_char(a.d, 'YYYY-MM-DD') as as_of, ` +
   `dc.facility_code as facility_code, ` +
@@ -54,6 +55,7 @@ const KPIS_SQL =
   `cross join anchor a ` +
   `left join collections.facilities f on f.facility_code = dc.facility_code ` +
   `where dc.business_entity_id = any($2::uuid[]) ` +
+  `and ($4::text[] is null or dc.facility_code = any($4::text[])) ` +
   `group by a.d, dc.facility_code, f.facility_name, dc.business_entity_id ` +
   `order by ytd_gross desc`;
 
@@ -116,13 +118,14 @@ test('daily: no args → [null, null, null, scope] (SQL CASE applies latest-mont
   const cap: Capture = {};
   await collectionsDaily({}, ctx(fakeExecutor([], cap)));
   assert.equal(cap.sql, DAILY_SQL);
-  assert.deepEqual(cap.params, [null, null, null, SCOPE, '2026-06-13']);
+  // Trailing null is the 0112 facility scope: NULL = unrestricted. [] would mean deny-all.
+  assert.deepEqual(cap.params, [null, null, null, SCOPE, '2026-06-13', null]);
 });
 
 test('daily: explicit window + facility are passed/trimmed as $1/$2/$3; scope as $4', async () => {
   const cap: Capture = {};
   await collectionsDaily({ facility_code: ' CAMH ', from: '2026-06-01', to: '2026-07-01' }, ctx(fakeExecutor([], cap)));
-  assert.deepEqual(cap.params, ['2026-06-01', '2026-07-01', 'CAMH', SCOPE, '2026-06-13']);
+  assert.deepEqual(cap.params, ['2026-06-01', '2026-07-01', 'CAMH', SCOPE, '2026-06-13', null]);
 });
 
 test('daily/kpis: fail-closed — empty entityIds rejected before any query', async () => {
@@ -170,7 +173,7 @@ test('kpis: as_of param passthrough; overall = sum of by_facility; checks/eft sp
       mtd_checks: '2', mtd_eft: '3', mtd_gross: '5', ytd_checks: '20', ytd_eft: '30', ytd_gross: '50' },
   ];
   const k = await collectionsKpis({ as_of: '2026-06-30' }, ctx(fakeExecutor(rows, cap)));
-  assert.deepEqual(cap.params, ['2026-06-30', SCOPE, '2026-06-13']);
+  assert.deepEqual(cap.params, ['2026-06-30', SCOPE, '2026-06-13', null]);
   assert.equal(k.as_of, '2026-06-30');
   // MTD overall
   assert.strictEqual(k.mtd.checks, 12);

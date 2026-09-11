@@ -214,6 +214,11 @@ import type {
   SearchClaimsSummary,
 } from '../../src/queries/types.js';
 import { collectionsMonthlySummary } from '../../src/collections/summary.js';
+import {
+  UNRESTRICTED_FACILITIES,
+  facilityScopeParam,
+  type FacilityScope,
+} from '../../src/collections/facilityScope.js';
 import type { CollectionsMonthlySummary } from '../../src/collections/summaryTypes.js';
 import { collectionsDaily, collectionsKpis } from '../../src/collections/daily.js';
 import type { CollectionsDailyResult, CollectionsKpis } from '../../src/collections/dailyTypes.js';
@@ -501,6 +506,14 @@ export interface AppUserRow {
   entity: AppEntity | null;
   /** Lowercased staff email stored alongside the role (display/audit convenience). */
   email: string;
+  /**
+   * Granted facility codes (migration 0112). Populated ONLY for role='user' — for every other role
+   * it is an empty array that no consumer reads, because allowedFacilitiesFor returns `null`
+   * (unrestricted) for them before this value is ever consulted.
+   *
+   * ⚠ An EMPTY array on a `user` means DENY, never "unrestricted". Do not "helpfully" widen it.
+   */
+  facilityCodes: string[];
 }
 
 function narrowRole(role: string | null): AppRole | null {
@@ -523,7 +536,72 @@ export async function appUserFor(userId: string): Promise<AppUserRow | null> {
   // Fail closed on any value outside the known unions (CHECK constraints make this unreachable).
   const role = narrowRole(row.role);
   if (!role) return null;
-  return { role, entity: narrowEntity(row.entity), email: row.email };
+
+  // Facility grants are read ONLY for the seat that has them. Skipping the query for every other
+  // role keeps this on the hot path of EVERY authenticated request (dashboardAccess is React-cached
+  // per request, but it still runs once per request) — and an unrestricted role would discard the
+  // answer anyway.
+  //
+  // ⚠ FAIL CLOSED ON A READ ERROR, and note this is the OPPOSITE of the fail-soft posture used for
+  // observability writes elsewhere in this file. If 0112 is unapplied (42P01) or the read errors,
+  // we cannot know what this user may see — and for a scoped seat "unknown" must mean "nothing",
+  // never "everything". An empty array is exactly that denial, and allowedFacilitiesFor preserves
+  // it rather than collapsing it to unrestricted.
+  let facilityCodes: string[] = [];
+  if (role === 'user') {
+    try {
+      const grants = await readerExecutor().query<{ facility_code: string }>(
+        'select facility_code from claims.app_user_facility where app_user_id = $1 order by facility_code',
+        [userId],
+      );
+      facilityCodes = grants.rows.map((r) => r.facility_code);
+    } catch (err) {
+      console.error('[appUserFor] facility grants unreadable — failing closed to no access:', err);
+      facilityCodes = [];
+    }
+  }
+
+  return { role, entity: narrowEntity(row.entity), email: row.email, facilityCodes };
+}
+
+/**
+ * Replace a user's ENTIRE facility grant set (migration 0112's definer, EXECUTE'd on the reader
+ * pool — no direct DML, the 0046/0097 pattern). Returns the number of grants that landed.
+ *
+ * AUTHORIZATION IS THE CALLER'S JOB (app/lib/admin-actions.ts): super_admin only.
+ *
+ * ⚠ TENANCY IS CHECKED IN BOTH PLACES, AND THIS DOCBLOCK USED TO DENY THAT. It said the definer
+ * "structurally cannot verify" tenant coherence because collections.facilities has no
+ * business_entity_id. True of the ROSTER, false of the DATABASE: the definer derives
+ * facility_code -> business_entity_id from the fact tables and REJECTS any code holding data in
+ * another tenant. So a successful call proves the codes exist AND that none of them belongs to a
+ * different tenant.
+ *
+ * The app-side facilityBelongsToEntity check remains as the FAST PATH — it fails earlier and with
+ * a message an admin can act on — but it is no longer the only path, and a reader must not treat
+ * the database check as redundant when changing this boundary.
+ */
+export async function setAppUserFacilities(
+  userId: string,
+  facilityCodes: string[],
+  actorUserId: string,
+): Promise<number> {
+  const { rows } = await readerExecutor().query<{ set_app_user_facilities: number }>(
+    'select claims.set_app_user_facilities($1, $2::text[], $3) as set_app_user_facilities',
+    [userId, facilityCodes, actorUserId],
+  );
+  return rows[0]?.set_app_user_facilities ?? 0;
+}
+
+/** Facility grants for a set of users, for the admin roster. Keyed by user_id. */
+export async function facilityGrantsByUser(): Promise<Record<string, string[]>> {
+  const { rows } = await readerExecutor().query<{ app_user_id: string; facility_code: string }>(
+    'select app_user_id, facility_code from claims.app_user_facility order by app_user_id, facility_code',
+    [],
+  );
+  const out: Record<string, string[]> = {};
+  for (const r of rows) (out[r.app_user_id] ??= []).push(r.facility_code);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -2293,13 +2371,19 @@ export const dashboardDistribution = unstable_cache(
 /**
  * Monthly collections by facility (non-PHI summary; reader-only, no row fetch). `entityIds` is the
  * RBAC-clamped tenant scope; it is an argument to the cached function, so each tenant scope caches
- * SEPARATELY (BXR / Indigo / Consolidated never share a cache entry).
+ * SEPARATELY (BXR / Indigo / Consolidated never share a cache entry). *
+ * ⚠ `facilityCodes` IS AN ARGUMENT, NOT A CLOSURE, AND THAT IS AN ACCESS CONTROL. unstable_cache
+ * keys on the function's ARGUMENTS as well as the key parts, so each distinct facility scope caches
+ * separately — exactly as entityIds already does. Hoisting it out of the signature (a module
+ * constant, a closure, a value read inside the body) would let a super_admin's unrestricted result
+ * be served to a facility-scoped `user` from cache, defeating the grant entirely while every
+ * predicate below still looks correct. `null` (unrestricted) and `[]` (deny) are distinct keys too.
  */
 export const dashboardCollectionsSummary = unstable_cache(
-  async (entityIds: string[]): Promise<CollectionsMonthlySummary> =>
+  async (entityIds: string[], facilityScope: FacilityScope): Promise<CollectionsMonthlySummary> =>
     collectionsMonthlySummary(
       {},
-      { executor: readerExecutor(), createdBy: 'phase7-collections-dashboard', entityIds },
+      { executor: readerExecutor(), createdBy: 'phase7-collections-dashboard', entityIds, facilityScope },
     ),
   ['dashboard-collections-summary'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
@@ -2308,10 +2392,10 @@ export const dashboardCollectionsSummary = unstable_cache(
 /** MTD/YTD collections KPIs by facility (non-PHI; anchored to latest payment_date). Per-tenant cache.
  *  Collections-tab variant: bounded at today, so CMD's forward-dated deposits are excluded. */
 export const dashboardCollectionsKpis = unstable_cache(
-  async (entityIds: string[]): Promise<CollectionsKpis> =>
+  async (entityIds: string[], facilityScope: FacilityScope): Promise<CollectionsKpis> =>
     collectionsKpis(
       {},
-      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds, facilityScope },
     ),
   ['dashboard-collections-kpis'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
@@ -2327,10 +2411,10 @@ export const dashboardCollectionsKpis = unstable_cache(
  * that impossible rather than merely unlikely.
  */
 export const dashboardCollectionsKpisOverview = unstable_cache(
-  async (entityIds: string[]): Promise<CollectionsKpis> =>
+  async (entityIds: string[], facilityScope: FacilityScope): Promise<CollectionsKpis> =>
     collectionsKpis(
       { include_future_payments: true },
-      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds, facilityScope },
     ),
   ['dashboard-collections-kpis-overview'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
@@ -2344,10 +2428,10 @@ export const dashboardCollectionsKpisOverview = unstable_cache(
  * shared DASHBOARD_CACHE_TAG busts it on ingest. Reader projects only non-PHI sums.
  */
 export const dashboardCollectionsYoy = unstable_cache(
-  async (asOf: string): Promise<CollectionsYoy> =>
+  async (asOf: string, facilityScope: FacilityScope): Promise<CollectionsYoy> =>
     collectionsYoy(
       { as_of: asOf },
-      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', facilityScope },
     ),
   ['dashboard-collections-yoy'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
@@ -2356,10 +2440,10 @@ export const dashboardCollectionsYoy = unstable_cache(
 /** Latest-month daily collections rows (non-PHI; date × facility × checks/eft/gross). Per-tenant cache.
  *  Collections-tab variant: bounded at today. */
 export const dashboardCollectionsDaily = unstable_cache(
-  async (entityIds: string[]): Promise<CollectionsDailyResult> =>
+  async (entityIds: string[], facilityScope: FacilityScope): Promise<CollectionsDailyResult> =>
     collectionsDaily(
       {},
-      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds, facilityScope },
     ),
   ['dashboard-collections-daily'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
@@ -2368,10 +2452,10 @@ export const dashboardCollectionsDaily = unstable_cache(
 /** Overview variant of dashboardCollectionsDaily — INCLUDES forward-dated deposits. Separate
  *  cache key for the reason given on dashboardCollectionsKpisOverview. */
 export const dashboardCollectionsDailyOverview = unstable_cache(
-  async (entityIds: string[]): Promise<CollectionsDailyResult> =>
+  async (entityIds: string[], facilityScope: FacilityScope): Promise<CollectionsDailyResult> =>
     collectionsDaily(
       { include_future_payments: true },
-      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds, facilityScope },
     ),
   ['dashboard-collections-daily-overview'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
@@ -2406,6 +2490,8 @@ export async function collectionsDailyForMonth(
   /** Overview passes true so a forward-dated deposit inside the selected month is counted.
    *  Not cached, so unlike the two wrappers above this can safely be a plain argument. */
   includeFuturePayments = false,
+  /** Facility scope (0112). Uncached, so no cache-key concern here. */
+  facilityScope: FacilityScope,
 ): Promise<CollectionsDailyResult> {
   if (!Number.isInteger(year) || year < 2000 || year > 2100) {
     throw new Error('year must be an integer in [2000, 2100]');
@@ -2420,7 +2506,7 @@ export async function collectionsDailyForMonth(
   const to = `${nextYear}-${pad(nextMonth)}-01`; // exclusive upper bound
   return collectionsDaily(
     { from, to, include_future_payments: includeFuturePayments },
-    { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds },
+    { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', entityIds, facilityScope },
   );
 }
 
@@ -2501,11 +2587,14 @@ export async function payerCmdMonth(
   year: number,
   month: number,
   entityIds: string[],
+  /** 0112 facility entitlement — REQUIRED. This reader returns a per-facility breakdown. */
+  facilityScope: FacilityScope,
 ): Promise<CmdPayerMonthResult> {
   return cmdPayerMonth(year, month, {
     executor: readerExecutor(),
     createdBy: 'phase71-collections-dashboard',
     entityIds,
+    facilityScope,
   });
 }
 
@@ -2739,6 +2828,8 @@ async function loadCmdExplorerPage(
   filter: CmdExplorerFilter,
   sort: CmdExplorerSort,
   entityIds: string[],
+  /** 0112 facility entitlement — see FacilityScope. */
+  entitledFacilities: FacilityScope,
 ): Promise<CmdExplorerPage> {
   // Keyset on (sort column, id): ORDER BY <sortcol> <dir> NULLS LAST, id <dir>. Default is
   // Payment Received DESC (most-recent payments first). The cursor continues strictly after the
@@ -2750,6 +2841,7 @@ async function loadCmdExplorerPage(
   // same builders and omit this, keeping their own window semantics.
   const { sql, params } = buildCmdExplorerQuery(cursor, filter, sort, limit, entityIds, {
     requireWindow: true,
+    entitledFacilities,
   });
   const { rows } = await readerExecutor().query<CmdExplorerDbRecord>(sql, params);
   const hasMore = rows.length > CMD_EXPLORER_PAGE_SIZE;
@@ -2776,6 +2868,8 @@ async function loadCmdExplorerGroupedPage(
   direction: 'asc' | 'desc',
   entityIds: string[],
   sortColumn: GroupedSortColumn,
+  /** 0112 facility entitlement — see FacilityScope. */
+  entitledFacilities: FacilityScope,
 ): Promise<CmdExplorerGroupPage> {
   const limit = CMD_EXPLORER_PAGE_SIZE + 1;
   // ⚠ requireWindow: the Collections window must be CLOSED at both ends. Opted in HERE, at the
@@ -2785,6 +2879,7 @@ async function loadCmdExplorerGroupedPage(
   const { sql, params } = buildCmdExplorerGroupedQuery(cursor, filter, direction, limit, entityIds, {
     requireWindow: true,
     groupedSort: sortColumn,
+    entitledFacilities,
   });
   const { rows } = await readerExecutor().query<CmdExplorerGroupRow & { id: string }>(sql, params);
   const hasMore = rows.length > CMD_EXPLORER_PAGE_SIZE;
@@ -2825,8 +2920,14 @@ export const loadCmdExplorerGroupedNonPhi = unstable_cache(
     // closure) would let a totals-ordered page be served for a date-ordered request at the same
     // cursor — wrong rows, in the wrong order, with no error and a 15-minute lifetime.
     sortColumn: GroupedSortColumn,
+    // ⚠ ALSO PART OF THE CACHE KEY, AND HERE IT IS AN ACCESS CONTROL rather than a correctness
+    // nicety. 0112 facility entitlement: null = unrestricted, [] = deny, non-empty = narrow. If
+    // this were carried any other way, a super_admin's unrestricted page would be served from
+    // cache to a facility-scoped `user` at the same cursor — the grant defeated entirely, with
+    // every predicate still reading correctly.
+    entitledFacilities: FacilityScope,
   ): Promise<CmdExplorerGroupPage> =>
-    loadCmdExplorerGroupedPage(cursor, filter, direction, entityIds, sortColumn),
+    loadCmdExplorerGroupedPage(cursor, filter, direction, entityIds, sortColumn, entitledFacilities),
   ['cmd-explorer-grouped'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
@@ -2845,7 +2946,11 @@ export const loadCmdExplorerNonPhi = unstable_cache(
     filter: CmdExplorerFilter,
     sort: CmdExplorerSort,
     entityIds: string[],
-  ): Promise<CmdExplorerPage> => loadCmdExplorerPage(cursor, filter, sort, entityIds),
+    // ⚠ PART OF THE CACHE KEY — an access control, for the reason spelled out on the grouped
+    // wrapper above. null = unrestricted, [] = deny all, non-empty = narrow (0112).
+    entitledFacilities: FacilityScope,
+  ): Promise<CmdExplorerPage> =>
+    loadCmdExplorerPage(cursor, filter, sort, entityIds, entitledFacilities),
   ['cmd-explorer-nonphi'],
   { revalidate: 900, tags: ['cmd-explorer'] },
 );
@@ -3361,6 +3466,7 @@ export const cmdExplorerFacilities = unstable_cache(
       facility: string;
       facility_name: string | null;
       care_setting: string | null;
+      facility_code: string | null;
     }>(sql, params);
     return rows.map((r) => ({
       facility: r.facility,
@@ -3369,6 +3475,7 @@ export const cmdExplorerFacilities = unstable_cache(
         r.care_setting === 'IP' || r.care_setting === 'OP' || r.care_setting === 'BOTH'
           ? r.care_setting
           : null,
+      facility_code: r.facility_code,
     }));
   },
   ['cmd-explorer-facilities'],
@@ -3536,6 +3643,48 @@ export const cmdExplorerEmployers = unstable_cache(
  * requirePhiPrincipal). A row outside that scope resolves to null — so an entity user can
  * never unmask another tenant's patient identifiers even with a hand-crafted id.
  */
+
+/**
+ * The 0112 FACILITY-ENTITLEMENT predicate for `collections.cmd_explorer_rows`, as a SQL fragment.
+ *
+ * `$${codes}` is a text[] where NULL = UNRESTRICTED and an empty array = DENY ALL. `$${scope}` is the
+ * tenant uuid[] the caller is already scoping by.
+ *
+ * ⚠ IT MUST STAY BRANCH-FOR-BRANCH IDENTICAL TO the grid's entitlement predicate in
+ * cmdExplorerBaseConds. The grid decides what a scoped user SEES; this decides what they may
+ * UNMASK. If the reveal were stricter, a row visible in the grid would fail to reveal and read as a
+ * bug; if it were looser, the reveal would be a way around the grant. Both accept branch 1 (CMD
+ * named a granted facility, via the dimension or the alias crosswalk) and branch 2 (0086 attributed
+ * the charge to a granted facility), and both reject the still-unattributed placeholder (R2).
+ *
+ * `cmd_facility_resolution.id` is a cmd_explorer_rows id — the 0059 rollup's `id` is the latest
+ * snapshot's line id for the group (see the 0085 header) — so joining it to `id` here is the same
+ * id space the grid uses, not a coincidence.
+ *
+ * ⚠ THE RESOLUTION LOOKUP SPANS EVERY TENANT IN `scope`, AND THAT IS DELIBERATE, NOT AN OVERSIGHT.
+ * `fr.business_entity_id = any(${scope})` is bound to the CALLER'S ALREADY-CLAMPED entitlement
+ * (requirePhiPrincipal's entityIds, derived server-side from the role row) — so for a super_admin
+ * on Consolidated it legitimately evaluates BOTH tenants, and for an entity-scoped principal it is
+ * a single id. It must span the full scope rather than one tenant because a consolidated reveal is
+ * one request over rows from both books: narrowing it to a single tenant would silently fail to
+ * unmask rows the caller is entitled to, on a surface where a missing row reads as "no PHI here".
+ *
+ * The tenant boundary is enforced UPSTREAM (the `business_entity_id = any($2)` on the outer query,
+ * from the same clamped scope); this branch narrows by FACILITY within it and never widens tenancy.
+ */
+function cmdRowsFacilityEntitlementSql(codes: string, scope: string): string {
+  return (
+    `and (${codes}::text[] is null or (` +
+    `(facility <> 'No Facility' and exists (select 1 from collections.facilities fe ` +
+    `where upper(fe.facility_name) = upper(facility) and fe.facility_code = any(${codes}::text[]))) or ` +
+    `(facility <> 'No Facility' and exists (select 1 from collections.cmd_facility_aliases a ` +
+    `where upper(a.facility_text) = upper(facility) and a.facility_code = any(${codes}::text[]))) or ` +
+    `id in (select fr.id from collections.cmd_facility_resolution fr ` +
+    `where fr.business_entity_id = any(${scope}::uuid[]) and fr.facility_alias = any(${codes}::text[]))` +
+    `)) `
+  );
+}
+
 export async function revealCmdExplorerRow(
   id: number,
   actor: { email: string; userId: string },
@@ -3543,6 +3692,8 @@ export async function revealCmdExplorerRow(
   // Audit action label; defaults to the collections surface. The Qualify reveal passes
   // 'reveal_qualify_row' so the audit trail distinguishes the two surfaces (same audited-decrypt path).
   action = 'reveal_cmd_explorer_row',
+  /** 0112 facility entitlement — see FacilityScope. */
+  entitledFacilities: FacilityScope,
 ): Promise<CmdExplorerPhi | null> {
   const { rows } = await readerExecutor().query<{
     patient_name: Buffer;
@@ -3550,8 +3701,9 @@ export async function revealCmdExplorerRow(
     group_number: Buffer | null;
   }>(
     'select patient_name, member_id, group_number from collections.cmd_explorer_rows ' +
-      'where id = $1 and business_entity_id = any($2::uuid[])',
-    [id, entityIds],
+      'where id = $1 and business_entity_id = any($2::uuid[]) ' +
+      cmdRowsFacilityEntitlementSql('$3', '$2'),
+    [id, entityIds, facilityScopeParam(entitledFacilities)],
   );
   const row = rows[0];
   if (!row) return null;
@@ -3591,6 +3743,8 @@ export async function revealCmdExplorerRows(
   entityIds: string[],
   // Audit action label; Qualify passes 'reveal_qualify_rows' (default is the collections surface).
   action = 'reveal_cmd_explorer_rows',
+  /** 0112 facility entitlement — see FacilityScope. */
+  entitledFacilities: FacilityScope,
 ): Promise<CmdExplorerRevealedRow[]> {
   if (ids.length === 0) return [];
   const { rows } = await readerExecutor().query<{
@@ -3600,8 +3754,9 @@ export async function revealCmdExplorerRows(
     group_number: Buffer | null;
   }>(
     'select id, patient_name, member_id, group_number from collections.cmd_explorer_rows ' +
-      'where id = any($1::bigint[]) and business_entity_id = any($2::uuid[])',
-    [ids, entityIds],
+      'where id = any($1::bigint[]) and business_entity_id = any($2::uuid[]) ' +
+      cmdRowsFacilityEntitlementSql('$3', '$2'),
+    [ids, entityIds, facilityScopeParam(entitledFacilities)],
   );
   const out: CmdExplorerRevealedRow[] = [];
   for (const row of rows) {

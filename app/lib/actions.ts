@@ -120,6 +120,11 @@ import { FUTURE_PAYMENT_HORIZON_DAYS } from '../../src/collections/cmdExplorer.j
 import { revalidateTag } from 'next/cache';
 import { requireExecutive } from '@/lib/executive';
 import { dashboardAccess } from '@/lib/access';
+import {
+  DENY_ALL_FACILITIES,
+  narrowByFacilityCode,
+  type FacilityScope,
+} from '../../src/collections/facilityScope';
 import { BXR_ENTITY_ID, clampView, viewToEntityIds, type DashboardView } from '@/lib/views';
 import { supabaseAuthConfigured } from '@/lib/supabase/env';
 import type { CmdExplorerPhi, CmdExplorerRow } from '../../src/collections/cmdExplorer';
@@ -251,6 +256,31 @@ async function viewEntityScope(view?: DashboardView): Promise<string[] | null> {
   if (allowedViews.length === 0) return null;
   const requested = view ?? allowedViews[0]!;
   return viewToEntityIds(clampView(requested, allowedViews));
+}
+
+/**
+ * FACILITY scope for the `user` seat — the companion to viewEntityScope above, and the ONE place
+ * the facility entitlement is read.
+ *
+ * Returns a FacilityScope: `unrestricted` (no predicate) or `scoped` (exactly those codes, and an
+ * empty `codes` denies everything). The two are distinct SHAPES rather than `null` vs `[]`, so a
+ * caller cannot collapse them by accident — that inversion is now a compile error. See
+ * src/collections/facilityScope.ts for why the encoding changed.
+ *
+ * Fails closed exactly as viewEntityScope does: an unresolved principal (including the no-auth
+ * staged-rollout fallback, which reports super_admin with a NULL user) gets an EMPTY scoped
+ * result — "we could not establish who you are" must never resolve to unrestricted.
+ *
+ * ⚠ SCOPE OF ENFORCEMENT (Alec, R1, reaffirmed after R5): Overview aggregates + the Collections
+ * grid. Claims Desk is deliberately NOT facility-scoped, for PHI either — see the note at its
+ * route gate. Do not assume calling this makes a surface safe; the CALLER must apply it.
+ */
+async function viewFacilityScope(): Promise<FacilityScope> {
+  const result = await dashboardAccess();
+  if (!result.ok) return DENY_ALL_FACILITIES;
+  const { access } = result;
+  if (!access.user) return DENY_ALL_FACILITIES;
+  return access.facilityScope;
 }
 
 export type {
@@ -501,7 +531,7 @@ export async function loadCmdPayerMonth(
   const entityIds = await viewEntityScope(view);
   if (!entityIds) return { ok: false };
   try {
-    return { ok: true, data: await payerCmdMonth(year, month, entityIds) };
+    return { ok: true, data: await payerCmdMonth(year, month, entityIds, await viewFacilityScope()) };
   } catch {
     return { ok: false };
   }
@@ -878,7 +908,7 @@ export async function loadCollectionsSummary(
   const entityIds = await viewEntityScope(view);
   if (!entityIds) return { ok: false };
   try {
-    return { ok: true, data: await dashboardCollectionsSummary(entityIds) };
+    return { ok: true, data: await dashboardCollectionsSummary(entityIds, await viewFacilityScope()) };
   } catch {
     return { ok: false };
   }
@@ -897,11 +927,12 @@ export async function loadCollectionsKpis(
 ): Promise<DashboardResult<CollectionsKpis>> {
   const entityIds = await viewEntityScope(view);
   if (!entityIds) return { ok: false };
+  const facilityCodes = await viewFacilityScope();
   try {
     const data =
       surface === 'overview'
-        ? await dashboardCollectionsKpisOverview(entityIds)
-        : await dashboardCollectionsKpis(entityIds);
+        ? await dashboardCollectionsKpisOverview(entityIds, facilityCodes)
+        : await dashboardCollectionsKpis(entityIds, facilityCodes);
     return { ok: true, data };
   } catch {
     return { ok: false };
@@ -928,7 +959,7 @@ export async function loadCollectionsYoy(
   // (payment_lines tenancy is a separate follow-up; until then YoY is BXR-only by construction.)
   if (!entityIds.includes(BXR_ENTITY_ID)) return { ok: false };
   try {
-    return { ok: true, data: await dashboardCollectionsYoy(asOf) };
+    return { ok: true, data: await dashboardCollectionsYoy(asOf, await viewFacilityScope()) };
   } catch {
     return { ok: false };
   }
@@ -942,11 +973,12 @@ export async function loadCollectionsDaily(
 ): Promise<DashboardResult<CollectionsDailyResult>> {
   const entityIds = await viewEntityScope(view);
   if (!entityIds) return { ok: false };
+  const facilityCodes = await viewFacilityScope();
   try {
     const data =
       surface === 'overview'
-        ? await dashboardCollectionsDailyOverview(entityIds)
-        : await dashboardCollectionsDaily(entityIds);
+        ? await dashboardCollectionsDailyOverview(entityIds, facilityCodes)
+        : await dashboardCollectionsDaily(entityIds, facilityCodes);
     return { ok: true, data };
   } catch {
     return { ok: false };
@@ -990,6 +1022,7 @@ export async function loadCollectionsDailyRange(
         params.month,
         entityIds,
         surface === 'overview',
+        await viewFacilityScope(),
       ),
     };
   } catch {
@@ -1694,7 +1727,13 @@ export async function loadCmdReport(
   if (!phi.ok) return { ok: false, error: phi.error };
   if (phi.phiIndex) readerFilter.phiIndex = phi.phiIndex;
   try {
-    const page = await loadCmdExplorerNonPhi(safeCursor, readerFilter, safeSort, entityIds);
+    const page = await loadCmdExplorerNonPhi(
+      safeCursor,
+      readerFilter,
+      safeSort,
+      entityIds,
+      await viewFacilityScope(),
+    );
     // ⚠ THE ROLLOVER INSTANT IS COMPUTED OUTSIDE THE CACHED READ, ON PURPOSE (#304). It rides the
     // RESULT envelope, never the filter: the filter is an unstable_cache key, so putting an
     // absolute instant in it would mint a new cache entry on every request. It is also derived from
@@ -1812,6 +1851,7 @@ export async function loadCmdReportGrouped(
       safeSort.direction,
       entityIds,
       safeSort.column,
+      await viewFacilityScope(),
     );
     // ⚠ THE ROLLOVER INSTANT IS COMPUTED OUTSIDE THE CACHED READ, ON PURPOSE (#304). It rides the
     // RESULT envelope, never the filter: the filter is an unstable_cache key, so putting an
@@ -2210,7 +2250,22 @@ export async function loadCmdExplorerFacilities(view?: DashboardView): Promise<C
   const entityIds = await viewEntityScope(view);
   if (entityIds === null) return { ok: false };
   try {
-    return { ok: true, facilities: await cmdExplorerFacilities(entityIds) };
+    const all = await cmdExplorerFacilities(entityIds);
+    const entitled = await viewFacilityScope();
+    // UNRESTRICTED → the full tenant vocabulary, unchanged.
+    if (entitled.kind === 'unrestricted') return { ok: true, facilities: all };
+    // ⚠ NARROWED OUTSIDE THE CACHE, DELIBERATELY. cmdExplorerFacilities is keyed on entityIds
+    // alone; adding the grant to that key would mint a cache entry per distinct facility set for a
+    // near-static vocabulary. Filtering the cached result per request keeps ONE entry per tenant
+    // and still cannot leak, because the narrowing happens after the read, on this request's own
+    // entitlement.
+    //
+    // An option with a NULL code is dropped for a scoped user: that is the 'No Facility'
+    // placeholder and any CMD spelling absent from both the dimension and the alias crosswalk.
+    // Dropping it matches R2 (unattributed charges are hidden) and fails safe for an unrecognised
+    // spelling — offering it would advertise a filter that returns nothing anyway, because the
+    // grid's entitlement predicate denies those same rows.
+    return { ok: true, facilities: narrowByFacilityCode(all, entitled) };
   } catch {
     return { ok: false };
   }
@@ -2513,7 +2568,19 @@ export async function revealCmdReportRows(ids: number[]): Promise<RevealCmdRowsR
   const gate = await requirePhiPrincipal();
   if (!gate.ok) return { ok: false, error: gate.error };
   try {
-    const rows = await revealCmdExplorerRows(ids, gate.actor, gate.entityIds);
+    // ⚠ FACILITY-NARROWED (0112). requirePhiPrincipal's scope is TENANT-grained by construction —
+    // its own docblock says "a reveal can only ever unmask a row whose business_entity_id is in
+    // this set" — which, now that `user` may reveal PHI (R5), would be a complete bypass of the
+    // facility grant. The narrowing is applied HERE rather than inside requirePhiPrincipal on
+    // purpose: only the Collections paths are facility-scoped (R1), and putting a field on the
+    // shared gate that most of its callers ignore would look like enforcement without being it.
+    const rows = await revealCmdExplorerRows(
+      ids,
+      gate.actor,
+      gate.entityIds,
+      'reveal_cmd_explorer_rows',
+      await viewFacilityScope(),
+    );
     return { ok: true, rows };
   } catch {
     return { ok: false, error: 'The identifiers could not be revealed right now.' };
@@ -2528,7 +2595,14 @@ export async function revealCmdReportRow(id: number): Promise<RevealCmdRowResult
   const gate = await requirePhiPrincipal();
   if (!gate.ok) return { ok: false, error: gate.error };
   try {
-    const phi = await revealCmdExplorerRow(id, gate.actor, gate.entityIds);
+    // Facility-narrowed for the same reason as the bulk reveal above.
+    const phi = await revealCmdExplorerRow(
+      id,
+      gate.actor,
+      gate.entityIds,
+      'reveal_cmd_explorer_row',
+      await viewFacilityScope(),
+    );
     if (!phi) {
       return { ok: false, error: 'Those identifiers are no longer available — reload and try again.' };
     }

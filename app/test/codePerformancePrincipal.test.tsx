@@ -6,6 +6,7 @@
  * ⚠️ Must be .tsx — app/package.json collects `test/*.test.tsx` only.
  */
 import assert from 'node:assert/strict';
+import { UNRESTRICTED_FACILITIES } from '../../src/collections/facilityScope';
 import { test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +34,9 @@ function access(role: 'super_admin' | 'admin' | 'user' | 'admissions_seat', view
       allowedViews: views,
       canRevealPhi: false,
       canManageUsers: false,
+  // 0112: this fixture is not a facility-scoped `user`, so it is UNRESTRICTED. The type makes the
+  // deny-all case a different shape ({ kind: 'scoped', codes: [] }) rather than a falsy value.
+  facilityScope: UNRESTRICTED_FACILITIES,
     },
   };
 }
