@@ -45,10 +45,21 @@ export const MIGRATIONS_DIR = join(REPO_ROOT, 'supabase', 'migrations');
  */
 export const TRGM_INDEXES_LANDED_AT = 81;
 
-/** The four indexes 0081 created on the rollup. A rebuild must carry ALL of them forward. */
+/**
+ * The 0081 trigram indexes that are STILL LIVE. A rebuild must carry ALL of them forward.
+ *
+ * ⚠ 0081 created FOUR; this list holds three. `cmd_charge_rollup_payer_trgm` was DROPPED by
+ * migration 0114 and must NOT be re-added here — measured 2026-09-11 it had taken **2 index scans
+ * in 111 days** (against 5,525 for the facility trigram and 6,115 for the CPT one), and
+ * EXPLAIN (ANALYZE) of the exact shape it existed for, `primary_payer ilike '%aetna%'`, showed the
+ * planner choosing `cmd_charge_rollup_entity_payer_payment` instead — `primary_payer` is
+ * low-cardinality (587 distinct over 509,807 rows), so a trigram bitmap never wins there.
+ *
+ * Listing it here would be worse than harmless: this array is what a rollup REBUILD is checked
+ * against, so a stale entry silently forces a deliberately-dropped index back into existence.
+ */
 export const REQUIRED_TRGM_INDEXES = [
   'cmd_charge_rollup_facility_trgm',
-  'cmd_charge_rollup_payer_trgm',
   'cmd_charge_rollup_cpt_trgm',
   'cmd_charge_rollup_revenue_trgm',
 ] as const;

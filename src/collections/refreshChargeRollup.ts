@@ -41,6 +41,27 @@
  */
 import type { Db } from './db.js';
 
+/**
+ * statement_timeout for the matview refresh ALONE (see the SET LOCAL block below).
+ *
+ * ⚠ A FIXED INTERNAL LITERAL, never user input — `SET` cannot take a bound parameter, so this is
+ * interpolated into SQL and is validated by `assertPgDuration` for that reason.
+ *
+ * 240s against a refresh whose daily average was 108.5s and climbing ~1.2s/day (measured
+ * 2026-09-11 from collections.rollup_refresh_run) — roughly 110 days of headroom. It must stay
+ * BELOW the route's maxDuration (300s), so the DB cancels first: a refresh cancelled by Postgres
+ * fails safe and records an honest run row, one killed by Vercel leaves the row open. Raising this
+ * a second time is the wrong move — see the follow-up in .claude/rules/collections-crons.md.
+ */
+export const REFRESH_STATEMENT_TIMEOUT = '240s';
+
+/** Postgres duration literal, so a fixed internal constant can never become an injection seam. */
+function assertPgDuration(v: string): void {
+  if (!/^\d{1,6}(ms|s|min)$/.test(v)) {
+    throw new Error('refreshChargeRollup: invalid statement_timeout literal (fixed internal value only)');
+  }
+}
+
 export interface RefreshChargeRollupDeps {
   /** Least-privilege writer pool (cmd_rollup_writer). Runs the run-log INSERT/UPDATE, the
    *  SECURITY-DEFINER refresh function, and the freshness read — each as its own autocommit query. */
@@ -82,8 +103,44 @@ export async function refreshChargeRollup(deps: RefreshChargeRollupDeps): Promis
   const runId = Number(startRes.rows[0]!.id);
 
   try {
-    // 2. The refresh itself — SECURITY DEFINER (owner-privileged), CONCURRENTLY (~58s, non-blocking).
-    await deps.db.query('select collections.refresh_cmd_explorer_charge_rollup()');
+    // 2. The refresh itself — SECURITY DEFINER (owner-privileged), CONCURRENTLY (~58s, non-blocking),
+    //    inside an explicit transaction that raises statement_timeout for THIS STATEMENT ALONE.
+    //
+    //    WHY THIS AND NOT `alter role`: measured 2026-09-11, the cluster-wide default is
+    //    `statement_timeout = 120000` (`source = "configuration file"`), and the refresh's daily
+    //    average had climbed to 108.5s — so it began failing at exactly 120s. The obvious fix,
+    //    `alter role cmd_rollup_writer_login set statement_timeout`, would have raised the cap for
+    //    EVERY statement that ingest role runs (both explorer ingests, both censuses, qualify-census,
+    //    facility-resolution, the patient-directory sync). This raises it for one statement instead.
+    //
+    //    ⚠ `SET LOCAL` CANNOT LEAK TO ANOTHER QUERY. It is scoped to this transaction, so it reverts
+    //    at COMMIT even though the pooler hands the same backend to someone else next. Only a
+    //    session-level `SET` — which this deliberately is not — could leak. BEGIN/SET/SELECT/COMMIT
+    //    all run on ONE checked-out client, which is also what makes it survive Supavisor transaction
+    //    pooling: the pooler binds one backend for the duration of a transaction, by definition.
+    //    Same shape as PgExecutor.queryWithWorkMem (src/queries/executor.ts) — copied, not invented.
+    //
+    //    ⚠ A function-level `SET` on refresh_cmd_explorer_charge_rollup() would NOT work: the timer
+    //    is armed when the outer statement starts, and changing the GUC mid-statement does not re-arm
+    //    it. The SET must be its own statement, before the one it governs.
+    assertPgDuration(REFRESH_STATEMENT_TIMEOUT);
+    const client = await deps.db.connect();
+    try {
+      await client.query('begin');
+      await client.query(`set local statement_timeout = '${REFRESH_STATEMENT_TIMEOUT}'`);
+      await client.query('select collections.refresh_cmd_explorer_charge_rollup()');
+      await client.query('commit');
+    } catch (err) {
+      try {
+        await client.query('rollback');
+      } catch {
+        // the connection is being discarded on release; a rollback failure here is not the error
+        // worth surfacing — the original one is, and it is rethrown below.
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
 
     // 2b. Post-refresh maintenance (BEST-EFFORT). REFRESH ... CONCURRENTLY updates rows in place, which
     //     clears the visibility map's all-visible bits on changed pages and drifts planner stats. Left
