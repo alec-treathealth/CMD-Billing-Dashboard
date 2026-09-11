@@ -4894,3 +4894,64 @@ retries); a `running` run younger than 20 min skips the customer (`skipped_runni
 is `last_run_id < run`, not `<>`, so an overlapping newer run keeps its rows; the cache tag is busted
 whenever a write was attempted (batches commit independently). Assignee options are tenant-scoped
 (`super_admin` ∪ this tenant's `admin`s); the notes read derives the patient from the claim server-side.
+
+## 0113 — `claims.ar_claim.cmd_work_state` (APPLIED LIVE 2026-09-11)
+
+Ledger `20260911074404`, via `apply_migration` — plain transactional DDL, `set role claims_admin`,
+additive only (one nullable column + a CHECK + one index + grants re-asserted). Number re-derived at
+apply: the ledger max was `20260910041317` (0111), and **0112 is claimed by an untracked
+`0112_app_user_facility.sql` in the `CMD-BD-wt-userseat` worktree** — invisible to git, to the
+committed tree, and to the ledger, because an authored-not-applied migration leaves no row. Next
+product number is **0114**.
+
+**Why it exists.** The AR queue's five non-`open` work-status chips returned zero rows for every
+user and could not have returned anything else: they filter `coalesce(w.work_status,'open')` on
+`claims.ar_claim_work`, which is human-owned (0109 §8) and held **0 rows against 59,070 claims**.
+The ingest could not have filled it either — `claims_audit_writer` holds no privilege of any kind
+on that table, by design. CMD already ships the signal and the snapshot already lands it, unread:
+`cmd_status_text` (3,618 claims) is the billers' own work vocabulary, and
+`ar_claim_status_event.err_fixed` says whether a clearinghouse error is still open.
+
+**Verified at apply, both halves.** Catalog: column `text` nullable; CHECK is exactly
+`open / in_progress / waiting_payer / resolved / dismissed` — **`'appeal'` is deliberately absent
+because the snapshot models no appeal anywhere** (1 of 71,926 status messages mentions the word;
+nothing in the 30-table extract models one); index `(business_entity_id, cmd_work_state)`; writer
+SELECT/INSERT/UPDATE on the new column; reader SELECT; **0 grants to `public`/`anon`/
+`authenticated`/`service_role`**. No AR definer contains `select *` (0111 removed the last one), so
+the new column cannot silently widen a runtime projection.
+
+⚠ **The privilege half was proven by RUNNING the statement as the real role, which is the only
+instrument that works here.** `pg_has_role('postgres','claims_audit_writer','SET')` is **false** —
+postgres cannot assume the writer at all — and postgres is `rolbypassrls`, so anything it writes is
+blind to the 4 policies on `ar_claim`. `has_table_privilege` answers the GRANT question and not the
+RLS one, and RLS fails by matching **zero rows rather than raising** (the 0089/0090/0101/0102
+chain). So: one real ingest run, `npm run ingest:ar-snapshot -- --customer 10035974 --commit`,
+printing `writer identity ok: claims_audit_writer_svc`, upserted TREAT_CO's **7 PRE-EXISTING** rows
+— which is the point, because pre-existing rows take the `ON CONFLICT DO UPDATE` arm, the one this
+migration's grant actually needs; a fresh-insert check would exercise the easier arm. Result 7/7
+`cmd_work_state = 'waiting_payer'`, 0 NULL. TREAT_CO was chosen as the smallest book on the roster
+(7 claims / $39,450, matching `arConfig.ts`'s recorded figures exactly).
+⚠ An off-roster `--customer` id makes the CLI print `customers=0` and exit 0 — the check would pass
+while verifying nothing. Use an id from `AR_SNAPSHOT_CUSTOMERS`.
+
+**Every other row is NULL and stays NULL until PR #360 merges.** `main`'s writer does not name the
+column, so the 14:05 UTC cron writes nothing to it and nothing breaks; every read coalesces
+(`work_status` FIRST, then this, then `'open'`). There is deliberately **no SQL backfill** — the
+TypeScript mapper is the single authority for the rule, and a SQL copy would be free to drift.
+
+**The two columns are not interchangeable.** `ar_claim_work.work_status` is a human disposition and
+always wins at read time; `cmd_work_state` is an inference. Keep any "a person touched this" metric
+(`worked` in the KPI row, `paidSinceWorked` in the table) on the human column — fed the effective
+state it reports ~23k of 25.9k claims worked on day one. The UI distinguishes them by ROW
+EXISTENCE (`w.cmd_claim_id is not null`), not by `work_status <> 'open'`: `'open'` is also a valid
+persisted human status, since the drawer's Save sends its seeded status whenever a user changes only
+an assignee or a due date (Qodo #360 finding 2 — it shipped wrong for one commit).
+
+⚠ **`B_CLAIMSTATUS.ERR_FIXED` is a TRI-STATE `X`/`T`/`F`, not the Y/N 0109's schema comment
+implied** (X = not applicable, T = fixed, F = still open; measured X 55,523 / T 8,728 / F 7,675 — so
+a `= 'Y'` or `is null` probe returns 0 for all three and reads as "column is empty" on a fully
+populated column). Two defects came out of it, both fixed in #360: `last_error_*` advertised errors
+CMD had already resolved on **471 of 2,245 open claims (21%)**; and `ACTION_CODE='C'` ("Correct and
+resubmit.") is **not** a state — **404 aged open claims are `T`+`C`**, meaning CMD asked for a
+correction and it was made, while `X`+`C` is **0 claims**, so reading 'C' as open only ever adds
+false positives.
