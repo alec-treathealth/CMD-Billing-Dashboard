@@ -58,6 +58,22 @@ export function UserManager({ initial }: { initial: ManageContext }) {
   const [inviteRole, setInviteRole] = useState<AppRole>('user');
   const [inviteEntity, setInviteEntity] = useState<AppEntity | ''>(assignableEntities[0] ?? '');
   const [inviteFacilities, setInviteFacilities] = useState<string[]>([]);
+
+  /**
+   * Switch the invite form's tenant, dropping any facility selection with it.
+   *
+   * ⚠ THE PICKER HIDES OLD-TENANT SELECTIONS BUT THE PAYLOAD KEPT THEM. FacilityPicker filters its
+   * options to the selected tenant, so after a switch the previous tenant's codes were invisible on
+   * screen and still in `inviteFacilities` — submitted, then rejected by validateFacilityGrant as
+   * foreign, with nothing on screen to explain why. The row editor already cleared on tenant switch
+   * (patchDraft); the invite form did not. This is that parity.
+   */
+  function changeInviteEntity(next: AppEntity | '') {
+    setInviteEntity((prev) => {
+      if (next !== prev) setInviteFacilities([]);
+      return next;
+    });
+  }
   const [inviting, setInviting] = useState(false);
   const [inviteMsg, setInviteMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
@@ -223,8 +239,15 @@ export function UserManager({ initial }: { initial: ManageContext }) {
                 onChange={(e) => {
                   const nextRole = e.target.value as AppRole;
                   setInviteRole(nextRole);
-                  // Keep the entity coherent with the new role (clears it for entity-less roles).
-                  setInviteEntity((prev) => entityAfterRoleChange(nextRole, prev, assignableEntities[0] ?? ''));
+                  // Keep the entity coherent with the new role (clears it for entity-less roles) —
+                  // and drop any facility selection the change invalidates. A role that is no
+                  // longer `user` has no use for grants, and a role change that lands on a
+                  // DIFFERENT tenant would otherwise submit the previous tenant's codes.
+                  setInviteEntity((prev) => {
+                    const next = entityAfterRoleChange(nextRole, prev, assignableEntities[0] ?? '');
+                    if (nextRole !== 'user' || next !== prev) setInviteFacilities([]);
+                    return next;
+                  });
                 }}
                 className={`${SELECT_CLASS} font-normal normal-case`}
               >
@@ -244,7 +267,7 @@ export function UserManager({ initial }: { initial: ManageContext }) {
                 disabled={inviting}
                 ariaLabel="Invite entity"
                 className={`${SELECT_CLASS} font-normal normal-case`}
-                onChange={(entity) => setInviteEntity(entity)}
+                onChange={(entity) => changeInviteEntity(entity)}
               />
             </label>
             <Button type="button" size="sm" disabled={inviting} onClick={onInvite}>

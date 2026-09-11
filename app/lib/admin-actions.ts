@@ -307,15 +307,60 @@ export async function setUserRole(
   if (!target) return { ok: false, error: 'That user no longer exists.' };
   if (!inScope(gate, target)) return { ok: false, error: 'You may not manage that user.' };
 
+  // ⚠ TWO COMMITTED WRITES, NOT ONE TRANSACTION — so the failure path COMPENSATES (Qodo #361-1).
+  //
+  // upsertAppUser and setAppUserFacilities are separate pooled queries, each its own transaction.
+  // Without compensation a failure in the second left the ROLE changed and the GRANTS stale while
+  // the caller was told the change failed. The dangerous direction is user→user: if the previous
+  // grant set is WIDER than the requested one, the target keeps access the admin just tried to
+  // remove, and no audit row records it. (admin→user fails closed — a former admin has no grants —
+  // but "usually closed" is not a property worth relying on.)
+  //
+  // The right fix is one definer that sets role, entity and grants atomically; that is a NEW
+  // migration and is filed as a follow-up rather than bolted onto a PR whose migration is already
+  // applied to production. Compensation closes the observable hole now.
+  const priorRole = target.role;
+  const priorEntity = target.entity;
   try {
     await upsertAppUser(targetUserId, target.email, role, entity);
+  } catch (err) {
+    // Nothing has changed yet — no compensation needed.
+    return { ok: false, error: mutationError(err) };
+  }
+  try {
     // ALWAYS called, including with an empty set. Promoting a `user` to admin must CLEAR their
     // grants rather than leave rows that would silently take effect again if the role were ever
     // set back to `user`. 0112's definer permits an empty set for any role precisely so this
     // clear-on-role-change works without first restoring the old role.
     await setAppUserFacilities(targetUserId, grant.codes, gate.user.id);
   } catch (err) {
-    return { ok: false, error: mutationError(err) };
+    // Roll the role/entity back to what it was, so a failed save leaves the principal exactly as
+    // the admin found it. `priorRole` is null only for an unprovisioned target, which has no row
+    // to restore — deleting is the correct inverse of the upsert that just created one.
+    let restored = true;
+    try {
+      if (priorRole === null) await deleteAppUser(targetUserId);
+      else await upsertAppUser(targetUserId, target.email, priorRole, priorEntity);
+    } catch (restoreErr) {
+      restored = false;
+      console.error('[setUserRole] compensation FAILED — role may be partially applied:', restoreErr);
+    }
+    // A failed compensation is an access-control state nobody asked for, so it is audited even
+    // though the action failed. The successful-rollback case needs no audit: nothing changed.
+    if (!restored) {
+      await recordAccess({
+        actorEmail: gate.user.email,
+        actorUserId: gate.user.id,
+        action: 'provision_user_partial_failure',
+        detail: { target: targetUserId, attemptedRole: role, attemptedEntity: entity, priorRole, priorEntity },
+      });
+    }
+    return {
+      ok: false,
+      error: restored
+        ? mutationError(err)
+        : 'The change failed and could not be fully rolled back. Re-check this user before continuing.',
+    };
   }
   await recordAccess({
     actorEmail: gate.user.email,
@@ -442,6 +487,9 @@ export async function inviteUser(
   const redirectTo = `${origin}/auth/confirm?next=/set-password${seatParam}`;
 
   let userId: string | null = null;
+  // Whether THIS call created the Auth account. Compensation may only remove an account we made;
+  // the existing-account fallback below must never delete a pre-existing sign-in.
+  let authAccountIsNew = false;
   try {
     const { data, error } = await supabaseAdminClient().auth.admin.inviteUserByEmail(
       normEmail,
@@ -449,6 +497,7 @@ export async function inviteUser(
     );
     if (error) throw error;
     userId = data.user?.id ?? null;
+    authAccountIsNew = userId !== null;
   } catch (err) {
     // Surface the real reason (rate limit, invalid address, GoTrue error) in the server logs — the
     // Admin API error is otherwise swallowed here and invisible in Vercel logs. Staff email/uid only,
@@ -487,11 +536,41 @@ export async function inviteUser(
 
   // Facilities AFTER the role row exists: 0112's definer reads claims.app_user to check the role,
   // so calling it before upsertAppUser would raise "no such provisioned user".
+  //
+  // ⚠ AND THE FAILURE PATH COMPENSATES (Qodo #361-2). The invite email has already been sent and
+  // the role row already committed by the time this runs, so a bare `return { ok: false }` left a
+  // provisioned, emailed account with no grants — and no invite audit — while telling the admin it
+  // failed. The residual state is FAIL-CLOSED (a `user` with zero grants sees nothing, by
+  // allowedFacilitiesFor), so this is a reliability and orphaned-account problem rather than an
+  // over-permissive one; it is still not a state anyone asked for.
   if (grant.codes.length > 0) {
     try {
       await setAppUserFacilities(userId, grant.codes, gate.user.id);
     } catch (err) {
-      return { ok: false, error: mutationError(err) };
+      // Remove the role row we just created, and the Auth account ONLY if this call created it.
+      // An existing-account fallback must keep its account and its previous role untouched.
+      let cleaned = true;
+      try {
+        await deleteAppUser(userId);
+        if (authAccountIsNew) await supabaseAdminClient().auth.admin.deleteUser(userId);
+      } catch (cleanupErr) {
+        cleaned = false;
+        console.error('[inviteUser] compensation FAILED — orphaned account may remain:', cleanupErr);
+      }
+      if (!cleaned) {
+        await recordAccess({
+          actorEmail: gate.user.email,
+          actorUserId: gate.user.id,
+          action: 'invite_user_partial_failure',
+          detail: { target: userId, role, entity, authAccountIsNew },
+        });
+      }
+      return {
+        ok: false,
+        error: cleaned
+          ? mutationError(err)
+          : 'The invite failed and the partial account could not be removed. Check this address before retrying.',
+      };
     }
   }
 

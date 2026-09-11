@@ -294,8 +294,13 @@ alter function claims.set_app_user_facilities(uuid, text[], uuid) owner to claim
 revoke all on function claims.set_app_user_facilities(uuid, text[], uuid) from public, anon, authenticated, service_role;
 grant execute on function claims.set_app_user_facilities(uuid, text[], uuid) to claims_reader;
 
+-- ⚠ THIS STRING IS BYTE-FOR-BYTE WHAT IS LIVE IN PRODUCTION (verified 2026-09-11 via
+-- obj_description). The file previously carried the PRE-tenant-check wording — "enforced APP-SIDE
+-- (facilityBelongsToEntity); this table validates facility existence only" — which stopped being
+-- true when the definer gained its own tenant-coherence check, and which did NOT match what was
+-- applied. A comment is only a comment, but the file is the source of record and it disagreed with
+-- the database. Caught by review, not by the gate: nothing tests a COMMENT.
 comment on table claims.app_user_facility is
-  'Per-user facility entitlement for the `user` seat (0112). Absence = denial. Tenant coherence is '
-  'enforced APP-SIDE (facilityBelongsToEntity); this table validates facility existence only.';
+  'Per-user facility entitlement for the `user` seat (0112). Absence = denial. Tenant coherence is enforced in the definer against the fact tables, with an app-side fast path.';
 
 reset role;

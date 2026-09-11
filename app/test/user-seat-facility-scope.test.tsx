@@ -496,3 +496,91 @@ test('yoy: the cached wrapper takes the scope as an ARGUMENT, so it keys the ent
   assert.match(body, /facilityScope:\s*FacilityScope/, 'yoy must take the scope as a parameter');
   assert.doesNotMatch(body, /viewFacilityScope|dashboardAccess/, 'must not resolve the scope inside the callback');
 });
+
+// ---------------------------------------------------------------------------
+// QODO #361 REMEDIATION — partial-application and stale-state fixes
+//
+// Three of the five findings were behavioural. Source assertions rather than execution, because
+// these are Server Actions and a client component: the repo's hermetic rule forbids a live DB, and
+// jsdom is scoped to focus/keyboard behaviour only (CLAUDE.md). What is asserted here is that the
+// compensation paths EXIST and that the ordering invariant holds — the properties whose absence
+// caused the findings.
+// ---------------------------------------------------------------------------
+
+const adminActionsSrc = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '../lib/admin-actions.ts'),
+  'utf8',
+);
+const userManagerSrc = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '../components/admin/user-manager.tsx'),
+  'utf8',
+);
+
+test('qodo #1: setUserRole ROLLS BACK the role when the facility write fails', () => {
+  // upsertAppUser and setAppUserFacilities are separate committed transactions. Without
+  // compensation, a failure in the second left the role changed and the grants stale while the
+  // caller was told it failed — and user→user with a WIDER prior grant set means the target keeps
+  // access the admin just tried to remove.
+  const fn = adminActionsSrc.slice(
+    adminActionsSrc.indexOf('export async function setUserRole'),
+    adminActionsSrc.indexOf('export async function deleteUser'),
+  );
+  assert.ok(fn.length > 0, 'setUserRole located');
+  assert.match(fn, /const priorRole = target\.role/, 'must capture the prior role to restore');
+  assert.match(fn, /if \(priorRole === null\) await deleteAppUser/, 'unprovisioned target must be deleted, not upserted');
+  assert.match(fn, /provision_user_partial_failure/, 'a failed rollback must be audited');
+});
+
+test('qodo #2: inviteUser removes what it created when the facility write fails', () => {
+  // inviteUser is the LAST exported action in the file — slice to the end, not to setUserRole,
+  // which is defined above it. (The first cut of this test sliced backwards and passed vacuously
+  // on an empty string until the assertions were tightened.)
+  const fn = adminActionsSrc.slice(adminActionsSrc.indexOf('export async function inviteUser'));
+  assert.ok(fn.length > 0, 'inviteUser located');
+  // The Auth account may only be deleted if THIS call created it — the existing-account fallback
+  // must never delete a pre-existing sign-in.
+  assert.match(fn, /let authAccountIsNew = false/, 'must track whether the auth account is new');
+  assert.match(fn, /if \(authAccountIsNew\) await supabaseAdminClient\(\)\.auth\.admin\.deleteUser/,
+    'auth deletion must be conditional on having created it');
+  assert.match(fn, /invite_user_partial_failure/, 'a failed cleanup must be audited');
+});
+
+test('qodo #2: facilities are still written AFTER the role row exists', () => {
+  // 0112's definer reads claims.app_user to check the role, so the order is load-bearing: calling
+  // it first raises "no such provisioned user". The compensation must not have reordered this.
+  const fn = adminActionsSrc.slice(adminActionsSrc.indexOf('export async function inviteUser'));
+  assert.ok(
+    fn.indexOf('await upsertAppUser') < fn.indexOf('await setAppUserFacilities'),
+    'upsertAppUser must precede setAppUserFacilities',
+  );
+});
+
+test('qodo #4: the invite form clears facilities whenever its tenant changes', () => {
+  // FacilityPicker filters options to the selected tenant, so old-tenant codes were invisible on
+  // screen yet still submitted — rejected as foreign with nothing explaining why. The row editor
+  // already cleared on tenant switch; this is that parity.
+  assert.match(userManagerSrc, /function changeInviteEntity/, 'a single handler must own the switch');
+  assert.match(userManagerSrc, /if \(next !== prev\) setInviteFacilities\(\[\]\)/, 'tenant switch must clear');
+  assert.match(userManagerSrc, /onChange=\{\(entity\) => changeInviteEntity\(entity\)\}/,
+    'the entity control must go through that handler, not setInviteEntity directly');
+  // A role change that leaves `user`, or lands on a different tenant, must clear too.
+  assert.match(userManagerSrc, /if \(nextRole !== 'user' \|\| next !== prev\) setInviteFacilities\(\[\]\)/,
+    'role change must clear an invalidated grant');
+});
+
+test('qodo #5: the migration comment matches what is live in production', () => {
+  // Verified against obj_description on 2026-09-11. The file previously carried the pre-tenant-check
+  // wording and disagreed with the applied database — a divergence nothing in the gate can catch,
+  // because no test reads a COMMENT.
+  const sql = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '../../supabase/migrations/0112_app_user_facility.sql'),
+    'utf8',
+  );
+  const stmt = sql.slice(sql.indexOf('comment on table claims.app_user_facility is'));
+  assert.match(stmt, /Tenant coherence is enforced in the definer against the fact tables/,
+    'the table comment must describe the definer check');
+  // Scoped to the STATEMENT: the old wording is quoted in the header above it, deliberately, as
+  // the record of what changed and why.
+  assert.doesNotMatch(stmt, /this table validates facility existence only/,
+    'the pre-tenant-check wording must be gone from the executable comment');
+});

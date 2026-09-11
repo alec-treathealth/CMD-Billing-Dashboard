@@ -568,10 +568,18 @@ export async function appUserFor(userId: string): Promise<AppUserRow | null> {
  * Replace a user's ENTIRE facility grant set (migration 0112's definer, EXECUTE'd on the reader
  * pool — no direct DML, the 0046/0097 pattern). Returns the number of grants that landed.
  *
- * AUTHORIZATION IS THE CALLER'S JOB (app/lib/admin-actions.ts): super_admin only, and the TENANT
- * check — that every code belongs to the target's entity — must happen there too, because
- * collections.facilities has no business_entity_id and the definer structurally cannot verify it.
- * A successful call here proves the codes EXIST, not that they are tenant-coherent.
+ * AUTHORIZATION IS THE CALLER'S JOB (app/lib/admin-actions.ts): super_admin only.
+ *
+ * ⚠ TENANCY IS CHECKED IN BOTH PLACES, AND THIS DOCBLOCK USED TO DENY THAT. It said the definer
+ * "structurally cannot verify" tenant coherence because collections.facilities has no
+ * business_entity_id. True of the ROSTER, false of the DATABASE: the definer derives
+ * facility_code -> business_entity_id from the fact tables and REJECTS any code holding data in
+ * another tenant. So a successful call proves the codes exist AND that none of them belongs to a
+ * different tenant.
+ *
+ * The app-side facilityBelongsToEntity check remains as the FAST PATH — it fails earlier and with
+ * a message an admin can act on — but it is no longer the only path, and a reader must not treat
+ * the database check as redundant when changing this boundary.
  */
 export async function setAppUserFacilities(
   userId: string,
@@ -3652,6 +3660,17 @@ export const cmdExplorerEmployers = unstable_cache(
  * `cmd_facility_resolution.id` is a cmd_explorer_rows id — the 0059 rollup's `id` is the latest
  * snapshot's line id for the group (see the 0085 header) — so joining it to `id` here is the same
  * id space the grid uses, not a coincidence.
+ *
+ * ⚠ THE RESOLUTION LOOKUP SPANS EVERY TENANT IN `scope`, AND THAT IS DELIBERATE, NOT AN OVERSIGHT.
+ * `fr.business_entity_id = any(${scope})` is bound to the CALLER'S ALREADY-CLAMPED entitlement
+ * (requirePhiPrincipal's entityIds, derived server-side from the role row) — so for a super_admin
+ * on Consolidated it legitimately evaluates BOTH tenants, and for an entity-scoped principal it is
+ * a single id. It must span the full scope rather than one tenant because a consolidated reveal is
+ * one request over rows from both books: narrowing it to a single tenant would silently fail to
+ * unmask rows the caller is entitled to, on a surface where a missing row reads as "no PHI here".
+ *
+ * The tenant boundary is enforced UPSTREAM (the `business_entity_id = any($2)` on the outer query,
+ * from the same clamped scope); this branch narrows by FACILITY within it and never widens tenancy.
  */
 function cmdRowsFacilityEntitlementSql(codes: string, scope: string): string {
   return (
