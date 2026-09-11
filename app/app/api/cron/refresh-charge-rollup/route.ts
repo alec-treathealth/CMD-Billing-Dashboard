@@ -14,19 +14,33 @@
  * one only fired on non-zero inserts and competed with the 210s ingest budget inside one 300s
  * function, and swallowed failures. Here the refresh gets its OWN function with headroom.
  *
- * Node runtime (pg); never statically cached. maxDuration=180: the 0059 rollup rebuild
- * (allowed_reliable + tiers) raised the REFRESH ... CONCURRENTLY cost from ~58s to 76–113s measured
- * (2026-07-22, ~485k logical charges; the 113s reading ran against a cold-ish cache) — 120 left as
- * little as ~7s of headroom, so this bump ships WITH 0059 as operational headroom for the matview's
- * own refresh (Alec's ruling: not a consumer repoint, don't park it behind one). A timed-out
- * CONCURRENT refresh fails safe (matview keeps prior contents; rollup_refresh_run shows the
- * started-but-unfinished row) — requires a Vercel plan that allows a 180s function (Pro+).
+ * Node runtime (pg); never statically cached. A timed-out CONCURRENT refresh fails safe: the matview
+ * keeps its prior contents and rollup_refresh_run shows the started-but-unfinished row.
+ *
+ * ⚠ maxDuration HAS NEVER BEEN THE BINDING LIMIT, AND THE NOTE THAT STOOD HERE WAS WRONG ABOUT ITS
+ * OWN SUBJECT. It read "maxDuration=180 … 120 left as little as ~7s of headroom, so this bump ships
+ * WITH 0059 as operational headroom". Measured 2026-09-11: the DATABASE cancels first —
+ * `statement_timeout = 120000`, `source = "configuration file"`, i.e. cluster-wide on this Supabase
+ * project. Every failure in rollup_refresh_run is at exactly 120s, a full 60s before Vercel would
+ * have intervened, so the 180s of "headroom" could never be reached from here.
+ *
+ * Migration 0114 raises that cap to 240s for `cmd_rollup_writer` alone, and maxDuration moves to 300
+ * to sit ABOVE it. The ordering is the point: DB cap (240) < function cap (300), so a slow refresh is
+ * cancelled by Postgres — which fails safe and records an honest row — rather than by Vercel, which
+ * kills the function mid-flight and leaves the run row open. Setting these the other way round would
+ * relocate the failure rather than fix it. 300 is the platform default ceiling on current plans.
+ *
+ * The remaining ~60s is the budget for the two jobs riding this cadence AFTER the refresh (the 0086
+ * facility-resolution matview and the 0105 patient-name directory). Both are best-effort and already
+ * wrapped, so squeezing them costs freshness rather than correctness — but a refresh that genuinely
+ * approaches 240s is 0114's tripwire telling you to do the structural work, not to raise a number
+ * for the second time.
  */
 import { handleRefreshChargeRollup } from '@/lib/server';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 180;
+export const maxDuration = 300;
 
 async function route(req: Request): Promise<Response> {
   const { status, body } = await handleRefreshChargeRollup({

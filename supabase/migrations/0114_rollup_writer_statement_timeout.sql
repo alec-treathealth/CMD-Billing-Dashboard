@@ -1,0 +1,117 @@
+-- 0114 — raise statement_timeout for the rollup writer LOGIN role, and drop a dead trigram index.
+--
+-- WHY: /api/cron/refresh-charge-rollup started failing. NOT chronically — measured 2026-09-11 from
+--   collections.rollup_refresh_run, it was green every hour for two weeks and then failed 3 times
+--   (1 on 09-07, 2 on 09-11), every one identical:
+--       canceling statement due to statement timeout   @ exactly 120s
+--
+--   The limit is NOT the route's maxDuration and NOT a role setting. It is
+--       statement_timeout = 120000, source = "configuration file"
+--   i.e. a CLUSTER-WIDE Postgres setting on this Supabase project. The route's `maxDuration = 180`
+--   has therefore been moot the whole time: the database kills the statement at 120s, 60s before
+--   Vercel would. The 0059-era docblock reasoning about "180s of operational headroom" was
+--   describing headroom that could never be reached.
+--
+-- WHAT IS ACTUALLY SLOW. `collections.refresh_cmd_explorer_charge_rollup()` runs TWO
+--   `refresh materialized view concurrently` statements. Sizes measured 2026-09-11:
+--       cmd_explorer_charge_rollup    550 MB  (169 MB heap + 380 MB across 15 indexes), 509,807 rows
+--       cmd_explorer_filter_options   144 kB  (587 rows)
+--   So essentially all of the time is the first one. ⚠ SPLITTING THE TWO INTO SEPARATE STATEMENTS
+--   DOES NOT HELP and was considered and rejected: statement_timeout is armed per TOP-LEVEL
+--   statement, so both refreshes share one 120s budget today — but the second is 144 kB, so
+--   splitting buys back nothing measurable while decoupling a transaction pairing that 0086's
+--   header deliberately relies on.
+--
+-- THE TREND IS THE REAL STORY, AND THIS MIGRATION DOES NOT FIX IT. Daily averages from
+--   rollup_refresh_run: 08-30 94.1s · 09-03 99.1s · 09-08 101.0s · 09-10 102.2s · 09-11 108.5s.
+--   That is roughly +1.2s/day. At that rate this new ceiling is reached in ~110 days. This change
+--   buys a quarter, not a solution — see the FOLLOW-UP block at the bottom, which is the part that
+--   matters and must not be dropped because the alarm stopped ringing.
+--
+-- WHY A ROLE SETTING, AND WHAT IT COSTS. `alter role ... set` is applied at SESSION START, before
+--   the top-level statement is armed, which is what makes it work. Two alternatives were rejected
+--   on mechanism, not taste:
+--     - A function-level `SET statement_timeout` on refresh_cmd_explorer_charge_rollup() would NOT
+--       work: the timer is armed when the outer `select refresh_...()` starts, and changing the GUC
+--       mid-statement does not re-arm it.
+--     - `set local statement_timeout` inside an explicit transaction in the app WOULD work and is
+--       more tightly scoped, but it edits a production-critical ingest path and leans on Supavisor
+--       transaction pinning. Kept as the tightening move if the blast radius below proves to matter.
+--   ⚠ BLAST RADIUS, STATED PLAINLY: this raises the cap for EVERY statement cmd_rollup_writer_login runs
+--   — the explorer ingests, the census writes, the facility-resolution refresh and the patient
+--   directory sync — from 120s to 240s. Those all have their own function-level timeouts, so the DB
+--   cap is a second net rather than the only one; but a runaway among them now runs twice as long
+--   before the database stops it. That is the price of the simplest correct fix and it is a real one.
+--
+-- ALSO DROPPED: `cmd_charge_rollup_payer_trgm` (0081), 18 MB. Every refresh maintains it and it
+--   serves nothing. Evidence, not vibes: **2 index scans in 111 days** of pg_stat (since 2026-05-22)
+--   against 5,525 for the facility trigram and 6,115 for the CPT one — and an EXPLAIN (ANALYZE) of
+--   the exact shape it was built for (`primary_payer ilike '%aetna%'`) shows the planner choosing
+--   `cmd_charge_rollup_entity_payer_payment` with a filter INSTEAD of it. `primary_payer` is
+--   low-cardinality (587 distinct over 509,807 rows), so a trigram bitmap never wins. The payer
+--   PICKER, separately, reads collections.cmd_explorer_filter_options, not this index.
+--   ⚠ `cmd_charge_rollup_id` (UNIQUE) is untouched and must stay — `refresh ... concurrently`
+--   REQUIRES a unique index, and that one is also the most-scanned (107,468).
+--
+-- LOCKING: a plain `drop index` takes ACCESS EXCLUSIVE on the matview, but a DROP does no work — it
+--   unlinks. Milliseconds. `drop index concurrently` would avoid even that, at the cost of the
+--   autocommit apply path (0081/0092/0108); not worth it for an unlink. Avoid applying during the
+--   :45-:48 window, when the refresh holds SHARE UPDATE EXCLUSIVE.
+--
+-- OWNERSHIP: `collections` objects are owned by **postgres**, NOT claims_admin — a `set role
+--   claims_admin` here would DOWNGRADE the applying role and fail 42501 (the 0084/0085 lesson in
+--   root CLAUDE.md). No `set role` in this file, deliberately.
+-- IDEMPOTENT: `alter role ... set` is last-write-wins; `drop index if exists`.
+-- DEPENDENCY: 0050 (the matview), 0081 (the index being dropped).
+-- NUMBER: 0114. 0113 applied 2026-09-11 (ledger 20260911074404); **0112 is still CLAIMED by an
+--   untracked 0112_app_user_facility.sql in the CMD-BD-wt-userseat worktree** — invisible to git and
+--   to the ledger both, so neither source alone gives the right answer.
+-- Rollback: 0114_rollup_writer_statement_timeout_rollback.sql
+
+-- ⚠⚠ THE TARGET IS THE **LOGIN** ROLE, NOT THE GROUP ROLE. THIS IS THE WHOLE MIGRATION.
+--   Measured 2026-09-11:
+--       cmd_rollup_writer        rolcanlogin = FALSE   (group role; nothing ever authenticates as it)
+--       cmd_rollup_writer_login  rolcanlogin = TRUE    member_of = cmd_rollup_writer
+--   `alter role ... set` GUCs are applied at SESSION START **for the role that authenticated**, and
+--   they are NOT inherited through role membership. So the obvious-looking
+--   `alter role cmd_rollup_writer set statement_timeout` is a NO-OP: it would apply cleanly, report
+--   success, leave the cron failing at 120s, and read as "already fixed" to the next person. That is
+--   strictly worse than doing nothing, and it is the same inert-by-construction shape as 0101's
+--   UPDATE grant (granted, RLS-blocked, zero rows, no error, silent for months).
+--   The same trap exists on the claims plane: claims_audit_writer is the group,
+--   claims_audit_writer_svc is the login. Check `rolcanlogin` before writing `alter role`.
+alter role cmd_rollup_writer_login set statement_timeout = '240s';
+
+drop index if exists collections.cmd_charge_rollup_payer_trgm;
+
+-- ═══ VERIFY AFTER APPLY ═══════════════════════════════════════════════════════════════════════
+--
+-- ⚠ `show statement_timeout` from an MCP / postgres session proves NOTHING here: a role-level GUC
+-- is applied at SESSION START for the role that AUTHENTICATED, and postgres is not that role.
+-- The check must run ON A CONNECTION AUTHENTICATED AS THE WRITER, through the same Supavisor
+-- pooler production uses (CMD_ROLLUP_WRITER_DATABASE_URL, port 6543) — a role setting that did not
+-- survive transaction pooling would otherwise look applied and do nothing:
+--
+--     node -e "…connect with CMD_ROLLUP_WRITER_DATABASE_URL…" -> select current_user, current_setting('statement_timeout')
+--
+-- PASS = current_user is the writer login AND statement_timeout reads 240s (it read 2min before).
+-- Then confirm the next :45 run closes ok=true in collections.rollup_refresh_run.
+--
+-- ═══ FOLLOW-UP — THE ACTUAL PROBLEM, NOT FIXED HERE ═══════════════════════════════════════════
+--
+-- A full hourly `refresh materialized view concurrently` of a 550 MB matview is the wrong shape for
+-- data that changes incrementally, and it is growing ~1.2s/day. Raising the ceiling twice would be
+-- papering over it; this migration raises it ONCE and names the exit criteria instead:
+--
+--   1. INDEX WEIGHT IS THE PROXIMATE COST — 380 MB of indexes on a 169 MB heap, and a CONCURRENT
+--      refresh maintains all of them. But the big ones are HOT and must not be dropped reflexively:
+--      prefix_cov 116 MB / 2,396 scans, member_cov 79 MB / 890, entity_payment_cov_m 71 MB / 721.
+--      Their INCLUDE payloads were ratified 2026-08-07 (veris-data-notes.md § 0092) after dropping
+--      `primary_payer` was measured to reproduce the pre-0092 3,561-buffer bitmap path. Re-litigate
+--      that only with EXPLAIN evidence, not by size.
+--   2. THE STRUCTURAL FIX is incremental maintenance — the rollup is derived from
+--      collections.cmd_explorer_rows, which the ingest touches in known, bounded slices per hour.
+--      A delta-applied table would make the hourly cost proportional to what CHANGED rather than to
+--      the whole book. That is a project, and it is the one worth scheduling.
+--   3. TRIPWIRE: if the daily average in rollup_refresh_run passes ~180s, the 240s ceiling is within
+--      one month of the same failure. Do not raise it a second time without doing (2).
