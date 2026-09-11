@@ -13,7 +13,8 @@
  */
 import { z } from 'zod';
 import { dashboardAccess } from '@/lib/access';
-import { requireRegistryEditorFromAccess } from '@/lib/qualify/principal';
+import { requireRegistryEditorFromAccess, type QualifyPrincipal } from '@/lib/qualify/principal';
+import { qualifyMaintenanceBlocks } from '@/lib/qualify/maintenance';
 import { recordAccess } from '@/lib/server';
 import { withCodingEditor, codingWriterPool } from '@/lib/qualify/registry-db';
 import { loadCodingDecisionHistory } from '@/lib/qualify/loaders';
@@ -82,9 +83,36 @@ export interface CodingRegistryList {
   rows: CodingDecisionRow[];
 }
 
+
+/**
+ * The registry editor gate, WITH the maintenance stash applied.
+ *
+ * ⚠ A THIRD GATE, REACHED BY NEITHER OF THE OTHER TWO. These two actions do not call
+ * requireQualifyPrincipal (gate.ts) — they call requireRegistryEditorFromAccess directly — so the
+ * chokepoint that closes the other 29 Qualify actions does not cover them. Left alone, a stale
+ * super_admin tab could still READ the registry and, worse, WRITE through saveCodingDecision (an
+ * editable business-data surface: a decision row plus append-only audit rows, optionally superseding
+ * an existing row) while /qualify/registry rendered the maintenance notice.
+ *
+ * The check is NOT pushed down into principal.ts:requireRegistryEditorFromAccess on purpose — that
+ * is PURE policy, unit-tested without a session, and a maintenance flag is not policy. This wrapper
+ * is where the request-time concerns already live.
+ *
+ * Local and NOT exported: this file carries 'use server', where a non-function export breaks every
+ * Server Action on the page at runtime while passing the whole build+test gate.
+ */
+async function requireRegistryEditor(): Promise<QualifyPrincipal> {
+  const gate = requireRegistryEditorFromAccess(await dashboardAccess());
+  if (!gate.ok) return gate;
+  if (qualifyMaintenanceBlocks(gate.actor.email)) {
+    return { ok: false, error: 'Qualify is paused for maintenance.' };
+  }
+  return gate;
+}
+
 /** Registry list (current + history). super_admin only — same gate as writes. */
 export async function getCodingRegistry(): Promise<CodingRegistryList> {
-  const gate = requireRegistryEditorFromAccess(await dashboardAccess());
+  const gate = await requireRegistryEditor();
   if (!gate.ok) throw new Error(gate.error);
   const { available, rows } = await loadCodingDecisionHistory();
   return { available, editable: codingWriterPool() !== null, rows };
@@ -100,7 +128,7 @@ export async function saveCodingDecision(
   input: CodingDecisionInput,
   supersedesId?: number,
 ): Promise<SaveCodingDecisionResult> {
-  const gate = requireRegistryEditorFromAccess(await dashboardAccess());
+  const gate = await requireRegistryEditor();
   if (!gate.ok) return { ok: false, error: gate.error };
 
   const parsed = DecisionInputSchema.safeParse(input);

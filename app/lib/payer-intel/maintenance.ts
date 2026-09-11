@@ -23,15 +23,34 @@
  * Claims Desk has no equivalent problem: entity admin/user and admissions_seat cannot reach
  * /billing-audit at all, so everyone who CAN be blocked there still has Overview and Collections.
  */
-import { bypassesMaintenance } from '../maintenance-bypass';
-
 function maintenanceEnabled(): boolean {
   const v = (process.env.PAYER_INTEL_MAINTENANCE ?? '').trim().toLowerCase();
   return v !== '0' && v !== 'false' && v !== 'off';
 }
 
-/** True when this viewer should see the maintenance notice instead of the Payer Intel board. */
-export function payerIntelMaintenanceBlocks(email: string | null | undefined): boolean {
-  if (!maintenanceEnabled()) return false;
-  return !bypassesMaintenance(email);
+/**
+ * True when this viewer should see the maintenance notice instead of the Payer Intel board.
+ *
+ * ⚠ STASHED FOR EVERYONE — NO BYPASS, RULED BY ALEC 2026-09-11: "the qualify/payer-intel tab should
+ * be stashed and not visible to anyone, not even me or ryan. it should be stashed and only powering
+ * the features on the platform that are live."
+ *
+ * So while the flag is on, this returns TRUE for every viewer including alec@ and ryan@. It no
+ * longer consults `bypassesMaintenance`, which REVERSES the 2026-08-18 decision to share one
+ * allowlist with Claims Desk — deliberately, and only for this surface.
+ *
+ * ⚠ THE SHARED ALLOWLIST ITSELF MUST STAY. It is still live for AR Management (/billing-audit),
+ * which is a SHIPPED surface — nav entry, notifications bell, migrations 0109-0111. Emptying
+ * lib/maintenance-bypass.ts to stash Payer Intel would have locked both of those people out of AR
+ * Management, which is the opposite of what was asked. Decoupling here is what keeps the two
+ * independent; do not "restore consistency" by pointing this back at the shared list.
+ *
+ * STASHED IS NOT DELETED, and that distinction is the whole point of the ruling: /payer-intel still
+ * resolves and its loaders are still wired, because live surfaces import out of this tree (the tape
+ * core, the rating bands, the marquee hook, the watcher definer wrapper). What is gone is the
+ * ability for anyone to USE the board. To bring it back, turn PAYER_INTEL_MAINTENANCE off — the
+ * kill switch is unchanged and still the single lever.
+ */
+export function payerIntelMaintenanceBlocks(_email: string | null | undefined): boolean {
+  return maintenanceEnabled();
 }

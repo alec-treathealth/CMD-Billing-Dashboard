@@ -1,15 +1,20 @@
 /**
- * Qualify maintenance-mode flag. While the Qualify surface is being refactored into an AI system,
- * /qualify and /qualify/m render a "being rebuilt" notice instead of the tab for EVERY user except
- * the bypass allowlist below — so the rebuild can be verified live while everyone else sees the notice.
+ * Qualify maintenance-mode flag. /qualify and /qualify/m render a "being rebuilt" notice instead of
+ * the tab for EVERY user — with NO exceptions as of 2026-09-11 (Alec: stashed, "not visible to
+ * anyone, not even me or ryan"). This docblock promised a bypass allowlist until that ruling;
+ * there is no longer one to be on.
  *
  * ON BY DEFAULT during the refactor. KILL SWITCH: set env QUALIFY_MAINTENANCE to "0" / "false" /
  * "off" to disable and restore the live tab for everyone. Changing it on Vercel requires a redeploy.
  * To fully revert, `git revert` the commit that added this flag — nothing else references it.
  */
 
-// Only these emails bypass the maintenance notice and reach the live Qualify surface.
-const MAINTENANCE_BYPASS_EMAILS = new Set(['alec@treathealth.ai']);
+// ⚠ NO BYPASS — STASHED FOR EVERYONE, RULED BY ALEC 2026-09-11 (same ruling as Payer Intel).
+// This was `new Set(['alec@treathealth.ai'])`; the one entry is removed rather than the Set kept
+// empty-but-consulted, so there is no list for a future edit to quietly re-populate.
+//
+// Qualify deliberately never shared Claims Desk's allowlist (see lib/maintenance-bypass.ts), so
+// unlike Payer Intel there was nothing to decouple here — only the single email to drop.
 
 function maintenanceEnabled(): boolean {
   const v = (process.env.QUALIFY_MAINTENANCE ?? '').trim().toLowerCase();
@@ -17,7 +22,6 @@ function maintenanceEnabled(): boolean {
 }
 
 /** True when this viewer should see the maintenance notice instead of the Qualify surface. */
-export function qualifyMaintenanceBlocks(email: string | null | undefined): boolean {
-  if (!maintenanceEnabled()) return false;
-  return !MAINTENANCE_BYPASS_EMAILS.has((email ?? '').trim().toLowerCase());
+export function qualifyMaintenanceBlocks(_email: string | null | undefined): boolean {
+  return maintenanceEnabled();
 }

@@ -659,10 +659,25 @@ down 2026-08-17** and folded into Payer Intel (#239). Verified against `linksFor
 (`app/lib/nav-model.ts:100-105`), which is the single source both shells read.
 This file also contradicted itself, calling `admissions_seat` "a Payer-Intel-only
 persona" a few lines below while these bullets still said Qualify.
-**Taken down is NOT deleted, and the distinction is load-bearing** (the takedown
-note at `nav-model.ts:61-76` says so): `/qualify` and `/qualify/m` still render by
-direct URL and their loaders are still wired, so Qualify code paths remain live
-and must still be reasoned about — they simply have no nav entry.
+⚠ **AND SINCE 2026-09-11 THEY NO LONGER RENDER BY DIRECT URL EITHER.** This block
+used to read: "`/qualify` and `/qualify/m` still render by direct URL and their
+loaders are still wired … they simply have no nav entry." That was true of the
+2026-08-17 NAV takedown and is now false. Qualify and Payer Intel are **STASHED
+for every viewer, with no bypass** — `qualifyMaintenanceBlocks` /
+`payerIntelMaintenanceBlocks` return true for everyone, so all four routes
+(`/qualify`, `/qualify/m`, `/qualify/registry`, `/payer-intel`) render the notice,
+and the **Server Actions behind them deny too** (the gate at `lib/qualify/gate.ts`,
+`lib/payer-intel/gate.ts` and the registry editor in `registry-actions.ts`) — a
+stale tab cannot read or mutate around the notice.
+
+**Taken down is still NOT deleted, and THAT distinction remains load-bearing**: the
+modules stay wired and live surfaces import from those trees (the tape core, the
+rating bands, `useDialog`, the marquee hook, the qualify design tokens — AR
+Management's drawer and aging strip among the importers), and
+`/api/cron/qualify-rating-history` still runs daily off `lib/qualify/loaders.ts`.
+Kill switches unchanged: `QUALIFY_MAINTENANCE` / `PAYER_INTEL_MAINTENANCE` =
+`0`/`false`/`off`. So Qualify code paths must still be reasoned about — what is
+gone is anyone's ability to USE the boards.
 
 Surfaces:
 
