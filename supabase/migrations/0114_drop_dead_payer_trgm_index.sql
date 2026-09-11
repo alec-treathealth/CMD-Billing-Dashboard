@@ -1,0 +1,68 @@
+-- 0114 — drop the dead `cmd_charge_rollup_payer_trgm` trigram index from the charge rollup.
+--
+-- ⚠ THIS MIGRATION USED TO ALSO RAISE statement_timeout FOR THE WRITER ROLE. That half is GONE, and
+--   the reason is worth keeping: `alter role cmd_rollup_writer_login set statement_timeout = '240s'`
+--   would have raised the cap for EVERY statement that ingest role runs — both explorer ingests,
+--   both censuses, qualify-census, facility-resolution, the patient-directory sync — to buy headroom
+--   for ONE statement. The timeout now lives in src/collections/refreshChargeRollup.ts as a
+--   `set local` inside an explicit transaction around the refresh alone (the shape
+--   PgExecutor.queryWithWorkMem already uses), so nothing else on that role loses its 120s cap.
+--   No schema change is needed for it at all.
+--
+-- WHY THE INDEX GOES. `cmd_charge_rollup_payer_trgm` (0081) is 18 MB that every hourly
+--   `refresh materialized view concurrently` has to maintain, and it serves nothing. Two independent
+--   measurements, 2026-09-11:
+--     1. **2 index scans in 111 days** of pg_stat_user_indexes (since 2026-05-22) — against 5,525
+--        for `cmd_charge_rollup_facility_trgm` and 6,115 for `..._cpt_trgm`, its siblings from the
+--        same migration. Not "lightly used": effectively never chosen.
+--     2. `EXPLAIN (ANALYZE, BUFFERS)` of the exact shape it was built for —
+--        `primary_payer ilike '%aetna%'` — picks `cmd_charge_rollup_entity_payer_payment` (index-only
+--        scan + filter) INSTEAD of it. `primary_payer` is low-cardinality (587 distinct over 509,807
+--        rows) and the term matches ~12% of the table, so a trigram bitmap never wins.
+--   The payer PICKER is a separate path and is unaffected: it reads
+--   collections.cmd_explorer_filter_options (587 rows), not this index.
+--
+-- ⚠ `cmd_charge_rollup_id` (UNIQUE) IS UNTOUCHED AND MUST STAY — `refresh ... concurrently` REQUIRES
+--   a unique index, and that one is also the most-scanned on the matview (107,468).
+--
+-- ⚠ THE GUARD SCRIPT IS UPDATED IN THE SAME CHANGE, and it has to be. `REQUIRED_TRGM_INDEXES` in
+--   scripts/check-rollup-index-guard.ts listed all four 0081 indexes as ones "a rebuild must carry
+--   ALL of them forward". It does NOT fail on this migration (the guard fires only on migrations
+--   that REBUILD the rollup, which this does not), so the gate stays green either way — but left
+--   alone it would silently force a future rebuild to recreate the index being deliberately dropped
+--   here. Removing it from that list is the point, not a formality.
+--
+-- LOCKING: a plain `drop index` takes ACCESS EXCLUSIVE on the matview, but a DROP does no work — it
+--   unlinks. Milliseconds. `drop index concurrently` would avoid even that at the cost of the
+--   autocommit apply path (0081/0092/0108); not worth it for an unlink. Avoid applying during the
+--   :45–:48 window, when the refresh holds SHARE UPDATE EXCLUSIVE.
+--
+-- OWNERSHIP: `collections` objects are owned by **postgres**, NOT claims_admin — a `set role
+--   claims_admin` here would DOWNGRADE the applying role and fail 42501 (the 0084/0085 lesson).
+--   No `set role` in this file, deliberately.
+-- IDEMPOTENT: `drop index if exists`.
+-- DEPENDENCY: 0050 (the matview), 0081 (the index being dropped).
+-- NUMBER: 0114. 0113 applied 2026-09-11 (ledger 20260911074404); **0112 is still CLAIMED by an
+--   untracked 0112_app_user_facility.sql in the CMD-BD-wt-userseat worktree** — invisible to git and
+--   to the ledger both, so neither source alone gives the right answer.
+-- Rollback: 0114_drop_dead_payer_trgm_index_rollback.sql
+
+drop index if exists collections.cmd_charge_rollup_payer_trgm;
+
+-- ═══ VERIFY AFTER APPLY ═══════════════════════════════════════════════════════════════════════
+--
+--   select indexrelname, idx_scan from pg_stat_user_indexes
+--    where schemaname='collections' and relname='cmd_explorer_charge_rollup' order by idx_scan;
+--
+-- PASS = `cmd_charge_rollup_payer_trgm` is absent and the other 14 remain, `cmd_charge_rollup_id`
+-- among them. Then confirm the next :45 run closes ok=true in collections.rollup_refresh_run.
+--
+-- ═══ THE GROWTH PROBLEM IS STILL NOT FIXED ════════════════════════════════════════════════════
+--
+-- 18 MB off 380 MB of indexes does not change the shape of the problem. The refresh's daily average
+-- is climbing ~1.2s/day (94.1s on 08-30 → 108.5s on 09-11) against a full hourly
+-- `refresh materialized view concurrently` of a 550 MB matview. The code-side `set local` buys
+-- ~110 days at 240s. The structural fix — incremental maintenance, since the rollup derives from
+-- collections.cmd_explorer_rows which the ingest touches in bounded per-hour slices — is written up
+-- in .claude/rules/collections-crons.md with a tripwire: **if the daily average passes ~180s, do
+-- that work rather than raising the number again.**

@@ -24,8 +24,9 @@
  * project. Every failure in rollup_refresh_run is at exactly 120s, a full 60s before Vercel would
  * have intervened, so the 180s of "headroom" could never be reached from here.
  *
- * Migration 0114 raises that cap to 240s for `cmd_rollup_writer` alone, and maxDuration moves to 300
- * to sit ABOVE it. The ordering is the point: DB cap (240) < function cap (300), so a slow refresh is
+ * `refreshChargeRollup` now raises that cap to 240s for THE REFRESH STATEMENT ALONE — a `set local`
+ * inside an explicit transaction (REFRESH_STATEMENT_TIMEOUT), not an `alter role`, so the other eight
+ * jobs on that ingest role keep their 120s cap. maxDuration moves to 300 to sit ABOVE it. The ordering is the point: DB cap (240) < function cap (300), so a slow refresh is
  * cancelled by Postgres — which fails safe and records an honest row — rather than by Vercel, which
  * kills the function mid-flight and leaves the run row open. Setting these the other way round would
  * relocate the failure rather than fix it. 300 is the platform default ceiling on current plans.
@@ -33,7 +34,7 @@
  * The remaining ~60s is the budget for the two jobs riding this cadence AFTER the refresh (the 0086
  * facility-resolution matview and the 0105 patient-name directory). Both are best-effort and already
  * wrapped, so squeezing them costs freshness rather than correctness — but a refresh that genuinely
- * approaches 240s is 0114's tripwire telling you to do the structural work, not to raise a number
+ * approaches 240s is the tripwire in .claude/rules/collections-crons.md telling you to do the structural work, not to raise a number
  * for the second time.
  */
 import { handleRefreshChargeRollup } from '@/lib/server';

@@ -166,9 +166,10 @@ To keep full verification, set `SUPABASE_CA_PATH`.
 **The binding limit is the DATABASE, not `maxDuration`.** Measured 2026-09-11:
 `statement_timeout = 120000` with `source = "configuration file"` — **cluster-wide** on this
 Supabase project. Every failure recorded in `collections.rollup_refresh_run` is at exactly 120s,
-60s before the route's (then) 180s `maxDuration` would have intervened. Migration **0114** raises
-the cap to **240s for `cmd_rollup_writer_login` alone** and moves `maxDuration` to 300 so it sits
-ABOVE the DB cap — that ordering is deliberate: a refresh cancelled by Postgres fails safe and writes an
+60s before the route's (then) 180s `maxDuration` would have intervened. `refreshChargeRollup` raises the cap to
+**240s for THE REFRESH STATEMENT ALONE** — a `set local` inside an explicit transaction
+(`REFRESH_STATEMENT_TIMEOUT`), NOT an `alter role` — and `maxDuration` moves to 300 so it sits ABOVE
+the DB cap — that ordering is deliberate: a refresh cancelled by Postgres fails safe and writes an
 honest run row, one killed by Vercel does not.
 
 **It was NOT chronically broken, and the distinction matters for triage.** 14 days of run rows:
@@ -182,7 +183,10 @@ Three things already measured, so nobody re-derives them:
   `statement_timeout` is armed per TOP-LEVEL statement, so both share one budget today — but
   `cmd_explorer_filter_options` is **144 kB / 587 rows** against the rollup's **550 MB / 509,807
   rows**. Splitting decouples a transaction pairing 0086's header relies on and buys nothing.
-- ⚠ **`alter role` MUST TARGET THE LOGIN ROLE.** `cmd_rollup_writer` has `rolcanlogin = false` —
+- ⚠ **`alter role` WAS THE FIRST DRAFT AND WAS REJECTED**, for blast radius: it would raise the cap
+  for every statement that ingest role runs (both explorer ingests, both censuses, qualify-census,
+  facility-resolution, the patient-directory sync) to buy headroom for one. If you ever do reach for
+  it: **it MUST target the LOGIN role.** `cmd_rollup_writer` has `rolcanlogin = false` —
   it is a GROUP role and nothing ever authenticates as it. The connection authenticates as
   `cmd_rollup_writer_login` (verified through the production pooler: `current_user =
   cmd_rollup_writer_login`, `statement_timeout = 2min`, `source = configuration file`), and
@@ -193,9 +197,10 @@ Three things already measured, so nobody re-derives them:
   `claims_audit_writer_svc` (login). **Check `rolcanlogin` before writing `alter role`, and verify
   GUC changes on a connection authenticated as that role, never from an MCP/postgres session.**
 - **A function-level `SET statement_timeout` would not work.** The timer is armed when the outer
-  `select refresh_...()` starts; changing the GUC mid-statement does not re-arm it. `set local`
-  inside an explicit transaction in the app WOULD work and is more tightly scoped — that is the
-  tightening move if 0114's role-wide blast radius proves to matter.
+  `select refresh_...()` starts; changing the GUC mid-statement does not re-arm it. The SET has to be
+  its OWN statement, immediately before the one it governs — which is what the shipped `set local`
+  does. `SET LOCAL` also cannot leak to the next query the pooler hands that backend, because it
+  reverts at COMMIT; a session `SET` would. Same shape as `PgExecutor.queryWithWorkMem`.
 - **Index weight is the proximate cost: 380 MB of indexes on a 169 MB heap, 15 of them, all
   maintained by a CONCURRENT refresh.** ⚠ Do not prune by size. The big ones are hot (`prefix_cov`
   116 MB / 2,396 scans, `member_cov` 79 MB / 890, `entity_payment_cov_m` 71 MB / 721) and their

@@ -1,0 +1,28 @@
+-- 0114 ROLLBACK — put the payer trigram index back on the charge rollup.
+--
+-- Before restoring it, re-read 0114's evidence: 2 index scans in 111 days, and the planner declining
+-- it for the exact query shape it was built for. Restoring costs 18 MB maintained by EVERY hourly
+-- `refresh materialized view concurrently` — on a refresh already inside ~110 days of its ceiling.
+-- Nothing regressed when it was dropped; if a payer free-text search has since become slow, measure
+-- with EXPLAIN (ANALYZE) FIRST, because a low-cardinality column (587 distinct over 509,807 rows) is
+-- exactly the case a trigram GIN loses.
+--
+-- ⚠ THIS FILE CANNOT BE RUN THROUGH apply_migration. `create index concurrently` cannot run inside a
+-- transaction block and apply_migration wraps the whole file in one. Run the statement below as its
+-- OWN single-statement query via execute_sql (autocommit — the 0081/0092/0108 path), outside the
+-- :45–:48 refresh window, and insert the ledger row by hand afterwards.
+--
+-- ⚠ The opclass MUST be schema-qualified as `claims.gin_trgm_ops` — pg_trgm is installed in the
+-- `claims` schema, and a bare `gin_trgm_ops` fails with "operator class does not exist" (0081).
+--
+-- ⚠ Restoring the index ALSO means restoring 'cmd_charge_rollup_payer_trgm' to REQUIRED_TRGM_INDEXES
+-- in scripts/check-rollup-index-guard.ts, or a future rollup rebuild will silently drop it again.
+--
+-- OWNERSHIP: no `set role` — `collections` objects are owned by postgres (0084/0085 lesson).
+--
+--   create index concurrently if not exists cmd_charge_rollup_payer_trgm
+--     on collections.cmd_explorer_charge_rollup using gin (primary_payer claims.gin_trgm_ops);
+--
+-- NOTE: the statement_timeout half of the original 0114 has NO rollback here because it is no longer
+-- a migration at all — it lives in src/collections/refreshChargeRollup.ts (REFRESH_STATEMENT_TIMEOUT
+-- + the `set local` transaction). Reverting that is a code revert, not a DDL one.
