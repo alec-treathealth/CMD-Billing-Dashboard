@@ -4955,3 +4955,56 @@ CMD had already resolved on **471 of 2,245 open claims (21%)**; and `ACTION_CODE
 resubmit.") is **not** a state — **404 aged open claims are `T`+`C`**, meaning CMD asked for a
 correction and it was made, while `X`+`C` is **0 claims**, so reading 'C' as open only ever adds
 false positives.
+
+## 0114 — drop the dead `cmd_charge_rollup_payer_trgm` (APPLIED LIVE 2026-09-11)
+
+Ledger `20260911150636`, `apply_migration`, one statement:
+`drop index if exists collections.cmd_charge_rollup_payer_trgm`. No `set role` — `collections`
+objects are owned by **postgres**, and a `set role claims_admin` would downgrade the applying role
+and 42501 (0084/0085). Applied at 15:06 UTC, deliberately outside the **:45–:48** window when the
+hourly refresh holds SHARE UPDATE EXCLUSIVE.
+
+**Verified at apply.** Index gone; **14 indexes remain** (was 15); the UNIQUE `cmd_charge_rollup_id`
+survives, which is non-negotiable because `refresh materialized view concurrently` REQUIRES a unique
+index; 3 trigram indexes remain (facility / cpt / revenue), matching the `REQUIRED_TRGM_INDEXES`
+list that shipped updated in the same change. Matview **550 MB → 532 MB**, indexes **380 → 363 MB**.
+
+⚠ **THE REGRESSION RISK WAS TESTED, NOT ASSUMED.** The only way dropping an index hurts is if some
+query quietly depended on it, so the exact shape it was built for was EXPLAINed before and after:
+`primary_payer ilike '%aetna%'` returns the SAME plan both times — `Parallel Index Only Scan using
+cmd_charge_rollup_entity_payer_payment`, identical rows (29,632), Rows Removed by Filter (225,271),
+Heap Fetches (5,840) and buffers. The planner never chose the trigram, because `primary_payer` is
+low-cardinality (587 distinct over 509,807 rows) and the term matches ~12% of the table. The payer
+PICKER is a separate path reading `collections.cmd_explorer_filter_options` (587 rows).
+Usage evidence, re-confirmed at apply: **2 idx_scan in 111 days** (stats since 2026-05-22) while its
+sibling `facility_trgm` moved 5,525 → 5,531 over the same 7 hours — the siblings are live, this one
+is not.
+
+### The half of 0114 that was CUT, and why it matters more than the index
+
+0114 was authored as `alter role cmd_rollup_writer_login set statement_timeout = '240s'` + the index
+drop. **The role half was removed before merge.** A role-level GUC widens the cap for EVERY statement
+that ingest role runs — both explorer ingests, both censuses, qualify-census, facility-resolution,
+the patient-directory sync — to buy headroom for ONE. It now lives in code as `REFRESH_STATEMENT_TIMEOUT`
++ a `set local` inside an explicit transaction around the refresh alone
+(`src/collections/refreshChargeRollup.ts`, the shape `PgExecutor.queryWithWorkMem` already used).
+
+⚠ Three mechanisms worth keeping, each verified rather than reasoned:
+- **a function-level `SET` cannot work** — statement_timeout is armed when the outer
+  `select refresh_...()` starts, and changing the GUC mid-statement does not re-arm it;
+- **`alter role` must target the LOGIN role** — `cmd_rollup_writer` is `rolcanlogin = false`, a GROUP
+  role, and GUCs are NOT inherited through membership. The first draft targeted the group and would
+  have applied cleanly, reported success, and changed nothing (the 0101 inert-grant shape);
+- **`SET LOCAL` cannot leak** across the Supavisor pooler: it reverts at COMMIT, and BEGIN/SET/SELECT/
+  COMMIT run on one checked-out client because transaction pooling binds one backend per transaction.
+
+**PROVEN IN PRODUCTION, not inferred.** `collections.rollup_refresh_run`: 06:45, 07:45 and 08:45 on
+2026-09-11 each failed at exactly 120.2s (`canceling statement due to statement timeout`); the first
+run on the new code, **09:45, closed ok=true at 125.9s** — past the old cap, which is the number that
+makes it conclusive. The cluster default is `statement_timeout = 120000`, `source = "configuration
+file"`, so the route's `maxDuration` was never the binding limit.
+
+⚠ **THE GROWTH PROBLEM IS UNFIXED.** Daily averages climb ~1.2s/day (94.1s on 08-30 → 108.5s on
+09-11) against a full hourly `refresh ... concurrently` of a 532 MB matview; 240s buys ~110 days.
+Tripwire in `.claude/rules/collections-crons.md`: **if the daily average passes ~180s, do the
+incremental-maintenance work rather than raising the number a second time.**
