@@ -24,7 +24,6 @@
 import { unstable_cache } from 'next/cache';
 import { PgExecutor, makeReaderPool, readerConnectionStringFromEnv } from '../../../src/queries/executor';
 import {
-  buildFacilityDeclinersQuery,
   buildPayerIntelCensusQuery,
   buildPayerIntelComboQuery,
   buildPayerIntelDistinctMembersQuery,
@@ -35,7 +34,6 @@ import {
   buildPayerIntelSavedSearchesQuery,
   type PayerIntelCensusRowRaw,
   type PayerIntelComboRow,
-  type PayerIntelDeclinerRow,
   type PayerIntelFacilityNameRow,
   type PayerIntelPlacementRow,
   type PayerIntelRatingRow,
@@ -99,18 +97,6 @@ async function loadGainersUncached(deltaDays: number): Promise<QualifyPolicyTape
  *  0093 relation is absent, mirroring loadQualifyPolicyTape's fail-soft exactly. Cached per
  *  deltaDays (the arg IS the cache key part). */
 export const loadPayerIntelGainers = unstable_cache(loadGainersUncached, ['payer-intel-gainers'], {
-  revalidate: AMBIENT_REVALIDATE_S,
-  tags: [AMBIENT_TAG],
-});
-
-async function loadDeclinersUncached(entityIds: string[], windowDays: number): Promise<PayerIntelDeclinerRow[]> {
-  const q = buildFacilityDeclinersQuery(entityIds, { windowDays });
-  const res = await payerIntelReader().query<PayerIntelDeclinerRow>(q.sql, q.params);
-  return res.rows;
-}
-
-/** Decliners rail. Reads the always-present charge rollup — NO fail-soft; errors rethrow. */
-export const loadPayerIntelDecliners = unstable_cache(loadDeclinersUncached, ['payer-intel-decliners'], {
   revalidate: AMBIENT_REVALIDATE_S,
   tags: [AMBIENT_TAG],
 });

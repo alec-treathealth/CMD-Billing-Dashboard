@@ -30,10 +30,8 @@ import type { CmdExplorerFilter } from '../../../src/collections/cmdExplorerQuer
 import { deriveYield } from '../../../src/collections/cmdExplorerQuery';
 import type { CmdExplorerRow } from '../../../src/collections/cmdExplorer';
 import {
-  PAYER_INTEL_DECLINE_THRESHOLD_PTS,
   type PayerIntelCensusRowRaw,
   type PayerIntelComboRow,
-  type PayerIntelDeclinerRow,
   type PayerIntelFacilityNameRow,
   type PayerIntelPlacementRow,
   type PayerIntelRatingRow,
@@ -44,7 +42,6 @@ import {
   clampPayerIntelWindowDays,
   type PayerIntelBoard,
   type PayerIntelCensusRow,
-  type PayerIntelDeclinerItem,
   type PayerIntelEntityType,
   type PayerIntelFacets,
   type PayerIntelGridCursor,
@@ -66,7 +63,6 @@ export interface PayerIntelDeps {
   /** Both enrichment legs are optional + fail-soft, the tape core's contract. */
   resolvePrefixes?: (tokens: readonly string[]) => Map<string, string>;
   loadTapeContext?: (tokens: readonly string[]) => Promise<QualifyPolicyTapeContext[]>;
-  loadDecliners: (entityIds: string[], windowDays: number) => Promise<PayerIntelDeclinerRow[]>;
   loadCensus: () => Promise<PayerIntelCensusRowRaw[]>;
   loadFacilityNames: () => Promise<PayerIntelFacilityNameRow[]>;
   loadSavedSearches: (userId: string) => Promise<PayerIntelSavedSearchRow[] | null>;
@@ -144,14 +140,15 @@ export interface PayerIntelDeps {
 
 // ── Amounts strips (module-private; applied LAST) ────────────────────────────────────────────────
 
+/**
+ * The board's amounts strip. ⚠ NOW A NO-OP, AND KEPT DELIBERATELY: the decliner ticks were the only
+ * dollar-bearing items on the ambient board, so with that rail gone there is nothing here to strip.
+ * The function stays as the choke point every future ambient dollar must pass through — deleting it
+ * would mean the next dollar added to this board has no obvious place to be gated, and the
+ * amounts-blind persona (`admissions_seat`) is enforced HERE, not at the component.
+ */
 function stripBoardAmounts(board: PayerIntelBoard): PayerIntelBoard {
-  return {
-    ...board,
-    decliners: {
-      ...board.decliners,
-      items: board.decliners.items.map((d) => ({ ...d, billedCurrent: null })),
-    },
-  };
+  return board;
 }
 
 function stripResultAmounts(result: PayerIntelResult): PayerIntelResult {
@@ -310,36 +307,21 @@ export async function getPayerIntelBoardCore(
     deltaDays: windowDays,
   });
 
-  const [gainers, declinerRows, censusRaw, nameRows, savedRows] = await Promise.all([
+  // ⚠ FOUR reads, not five. The decliners rail was removed 2026-09-10 because its query WAS this
+  // tab's latency: 167.8ms / 65,402 buffers warm (2,361ms cold) against 17.3ms / 237 for gainers
+  // and under 2ms for the rest. In a Promise.all the board costs the SLOWEST read, so dropping it
+  // took the board's floor down by roughly an order of magnitude rather than a fifth.
+  const [gainers, censusRaw, nameRows, savedRows] = await Promise.all([
     gainersPromise,
-    deps.loadDecliners(gate.entityIds, windowDays),
     deps.loadCensus(),
     deps.loadFacilityNames(),
     deps.loadSavedSearches(gate.actor.userId),
   ]);
 
   const names = new Map(nameRows.map((n) => [n.facility_code, n]));
-  const declinerItems: PayerIntelDeclinerItem[] = declinerRows.map((d) => ({
-    facility: d.facility,
-    facilityCode: d.facility_code,
-    careSetting: d.care_setting,
-    pctCurrent: d.pct_current,
-    pctPrior: d.pct_prior,
-    deltaPts: d.delta_pts,
-    lineCount: d.line_count,
-    distinctMembers: d.distinct_members,
-    billedCurrent: d.billed_current,
-    declineReason: null, // no server-side attribution exists — see PayerIntelDeclinerRow's TODO
-  }));
-
   const saved = (savedRows ?? []).map(toSavedSearch);
   const board: PayerIntelBoard = {
     gainers,
-    decliners: {
-      items: declinerItems,
-      windowDays,
-      thresholdPts: PAYER_INTEL_DECLINE_THRESHOLD_PTS,
-    },
     census: assembleCensus(censusRaw, names),
     searches: {
       starred: saved.filter((s) => s.starred),

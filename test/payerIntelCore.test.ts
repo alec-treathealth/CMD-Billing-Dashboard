@@ -7,6 +7,9 @@
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { requirePayerIntelPrincipalFromAccess } from '../app/lib/payer-intel/principal.js';
 import {
   buildPayerIntelAiPayloadCore,
@@ -99,19 +102,6 @@ function makeDeps(principal: () => ReturnType<typeof SEAT>, over?: Partial<Payer
         },
       ];
     },
-    loadDecliners: async () => [
-      {
-        facility: 'MHC SAN DIEGO',
-        facility_code: '10024431',
-        care_setting: 'IP',
-        pct_current: 22.4,
-        pct_prior: 31.8,
-        delta_pts: -9.4,
-        line_count: 340,
-        distinct_members: 41,
-        billed_current: BILLED_DECLINER,
-      },
-    ],
     loadCensus: async () => [
       {
         facility_code: 'LSMH',
@@ -240,24 +230,34 @@ function makeDeps(principal: () => ReturnType<typeof SEAT>, over?: Partial<Payer
 
 // ── Board RBAC ───────────────────────────────────────────────────────────────────────────────────
 
-test('board: an admissions_seat receives ZERO dollar sentinels on the wire', async () => {
-  const { deps } = makeDeps(SEAT);
-  const board = await getPayerIntelBoardCore(deps);
-  assert.equal(board.viewerHasAmountsCapability, false);
-  assert.equal(board.decliners.items[0]?.billedCurrent, null);
-  const wire = JSON.stringify(board);
-  for (const s of SENTINELS) assert.ok(!wire.includes(String(s)), `sentinel ${s} leaked to a blind session`);
-  // Ratios and counts SURVIVE the strip — do not "fix" a leak by stripping these.
-  assert.equal(board.decliners.items[0]?.pctCurrent, 22.4);
-  assert.equal(board.decliners.items[0]?.lineCount, 340);
+test('board: NO dollar sentinel reaches ANY viewer — the ambient board carries no dollars at all', async () => {
+  // ⚠ THIS TEST CHANGED SHAPE ON 2026-09-10 AND THE REASON MATTERS. It used to prove the amounts
+  // strip by reading `decliners.items[0].billedCurrent` — null for a seat, the real figure for a
+  // capable viewer. The decliners rail was removed for latency, and its ticks were the ONLY
+  // dollar-bearing items on the ambient board, so there is no longer a field to strip: the strip is
+  // vacuous and the old assertion could not be written.
+  //
+  // What survives is the property that actually matters — no dollar figure appears anywhere on this
+  // wire — now checked for BOTH personas rather than one, and now a whole-board scan rather than one
+  // field. It passes trivially today; it exists so that the next dollar added to the ambient board
+  // fails here if it is added unstripped.
+  for (const persona of [SEAT, SUPER] as const) {
+    const { deps } = makeDeps(persona);
+    const board = await getPayerIntelBoardCore(deps);
+    const wire = JSON.stringify(board);
+    for (const sentinel of SENTINELS) {
+      assert.ok(!wire.includes(String(sentinel)), `sentinel ${sentinel} on the ambient board (${JSON.stringify(persona)})`);
+    }
+  }
 });
 
-test('board: a capable viewer carries the decliner dollars', async () => {
-  const { deps } = makeDeps(SUPER);
-  const board = await getPayerIntelBoardCore(deps);
-  assert.equal(board.viewerHasAmountsCapability, true);
-  assert.equal(board.decliners.items[0]?.billedCurrent, BILLED_DECLINER);
-  assert.ok(JSON.stringify(board).includes(String(BILLED_DECLINER)));
+test('board: the amounts CHOKE POINT is still wired, even though it now strips nothing', () => {
+  // A vacuous strip that has been silently unplugged is worse than no strip: the next ambient dollar
+  // would ship unguarded and nothing would fail. Assert the route survives, by source, since with no
+  // dollar field left there is no output difference to observe.
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'app', 'lib', 'payer-intel', 'core.ts'), 'utf8');
+  assert.match(src, /gate\.hasAmounts \? board : stripBoardAmounts\(board\)/, 'the blind path still routes through the strip');
+  assert.match(src, /function stripBoardAmounts/, 'and the strip still exists');
 });
 
 test('board: census semantics — outpatient rows carry NO bed fields, residential derives occupancy', async () => {

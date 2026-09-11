@@ -88,7 +88,6 @@ export default async function PayerIntelPage({
   // empty-but-honest shell rather than 500ing the whole tab.
   const emptyBoard: PayerIntelBoard = {
     gainers: { available: false, asOf: null, deltaDays: windowDays, items: [] },
-    decliners: { items: [], windowDays, thresholdPts: 5 },
     census: { rows: [], syncedAt: null },
     searches: { starred: [], recent: [] },
     viewerHasAmountsCapability: principal.hasAmounts,
