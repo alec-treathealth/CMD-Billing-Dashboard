@@ -157,3 +157,54 @@ test('Qualify never IMPORTS the shared allowlist — this must not silently wide
     'Qualify must not call the shared bypass helper',
   );
 });
+
+// ── THE STASH REACHES THE SERVER ACTIONS, NOT JUST THE PAGES ────────────────────────────────────
+
+test('every Server Action gate applies the maintenance stash, not only the page gates', () => {
+  // Qodo #363 findings 2 and 3. Server Actions are the browser's ONLY data path and they gate on
+  // ROLE alone, so wiring the stash at the pages left all 41 actions answering POSTs while the
+  // boards rendered the notice — reads AND mutations (stars, search history, watchers via the 0097
+  // definers, and the coding-decision registry write). Closed at the front door, open at the back.
+  //
+  // Three seams close it, and it takes exactly three because the action surfaces do not share one
+  // gate: payer-intel/gate.ts (10 actions), qualify/gate.ts (29), and the registry editor in
+  // registry-actions.ts (2), which calls requireRegistryEditorFromAccess directly and is reached by
+  // neither of the others.
+  const seams: Array<[string, string]> = [
+    ['../lib/payer-intel/gate.ts', 'payerIntelMaintenanceBlocks'],
+    ['../lib/qualify/gate.ts', 'qualifyMaintenanceBlocks'],
+    ['../lib/qualify/registry-actions.ts', 'qualifyMaintenanceBlocks'],
+  ];
+  for (const [rel, helper] of seams) {
+    const src = read(rel);
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    assert.ok(code.includes(helper), `${rel} must consult ${helper} — a comment about it is not a gate`);
+    assert.match(code, /ok: false/, `${rel} must DENY on maintenance, not fall through`);
+  }
+});
+
+test('the stash is checked AFTER the role decision, so it cannot leak that a surface exists', () => {
+  // Answering "paused for maintenance" to a user whose role may never see the surface tells them it
+  // exists. Both action gates resolve the principal first and return its denial unchanged before the
+  // maintenance branch is reached.
+  for (const rel of ['../lib/payer-intel/gate.ts', '../lib/qualify/gate.ts']) {
+    const code = read(rel)
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const roleDenial = code.indexOf('if (!principal.ok) return principal;');
+    const maint = code.search(/MaintenanceBlocks\(/);
+    assert.ok(roleDenial > -1, `${rel} must return the role denial verbatim`);
+    assert.ok(maint > roleDenial, `${rel} must check the role BEFORE maintenance`);
+  }
+});
+
+test('the ACTION gate is separate from the PAGE gate — moving it would break admissions_seat', () => {
+  // The pages call principal.ts:require*FromAccess; the actions call gate.ts. Folding the
+  // maintenance check down into principal.ts would make /payer-intel take redirect('/dashboard')
+  // instead of rendering the notice — a dead end for admissions_seat, whose ONLY nav link is
+  // /payer-intel. principal.ts must stay pure policy.
+  for (const rel of ['../lib/payer-intel/principal.ts', '../lib/qualify/principal.ts']) {
+    const code = read(rel)
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    assert.equal(/MaintenanceBlocks\(/.test(code), false, `${rel} is pure policy; the gate is where maintenance lives`);
+  }
+});
