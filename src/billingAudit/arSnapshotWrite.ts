@@ -108,7 +108,8 @@ const CLAIM_COLS: readonly Col[] = [
   { name: 'last_835_status' }, { name: 'last_835_date', cast: '::date' }, { name: 'last_activity_date', cast: '::date' },
   { name: 'last_error_code' }, { name: 'last_error_message' }, { name: 'last_error_at', cast: '::timestamptz' }, { name: 'last_error_receiver' },
   { name: 'denial_summary', cast: '::jsonb' }, { name: 'has_denial' }, { name: 'cmd_note_count' }, { name: 'last_cmd_note_at', cast: '::timestamptz' },
-  { name: 'ins_last_payment_date', cast: '::date' }, { name: 'in_latest_snapshot' }, { name: 'last_run_id' },
+  { name: 'ins_last_payment_date', cast: '::date' }, { name: 'cmd_work_state' },
+  { name: 'in_latest_snapshot' }, { name: 'last_run_id' },
 ];
 const CLAIM_UPDATE = CLAIM_COLS.map((c) => c.name).filter((n) => !['business_entity_id', 'cmd_claim_id'].includes(n));
 
@@ -174,7 +175,7 @@ function claimParams(c: ArClaimPlain, ctx: ArWriteContext, facilityName: string 
     c.last835Status, c.last835Date, c.lastActivityDate,
     c.lastErrorCode, c.lastErrorMessage, c.lastErrorAt, c.lastErrorReceiver,
     JSON.stringify(c.denialSummary), c.hasDenial, c.cmdNoteCount, c.lastCmdNoteAt,
-    c.insLastPaymentDate, true, ctx.runId,
+    c.insLastPaymentDate, c.cmdWorkState, true, ctx.runId,
   ];
 }
 

@@ -102,6 +102,10 @@ export function buildFixture(overrides: Partial<Record<string, SnapshotTable>> =
     { SEQNO: '300000002', CLAIM: FX.claimF, STATUS_TYPE: 'ERROR', STATUS_DATE: '01/05/2026 08:00:00', STATUS_CODE: '16', STATUS_MESSAGE: 'Claim lacks information needed for adjudication.', ACTION_CODE: 'C', ACTION_MESSAGE: 'Correct and resubmit.', RECEIVER_NAME: 'BETA MUTUAL', ERR_FIXED: 'F' },
     { SEQNO: '300000003', CLAIM: FX.claimF, STATUS_TYPE: 'INFO', STATUS_DATE: '02/01/2026 08:00:00', STATUS_CODE: 'RA', STATUS_MESSAGE: 'RECEIVED REMITTANCE ADVICE FROM PAYER.', ACTION_CODE: '', ACTION_MESSAGE: '', RECEIVER_NAME: 'EPS', ERR_FIXED: 'X' },
     { SEQNO: '300000004', CLAIM: FX.claimA, STATUS_TYPE: 'INFO', STATUS_DATE: '03/07/2026 08:00:00', STATUS_CODE: 'A1', STATUS_MESSAGE: 'x'.repeat(400), ACTION_CODE: '', ACTION_MESSAGE: '', RECEIVER_NAME: '277 DATA FILE', ERR_FIXED: 'X' },
+    // claimB's only error is one CMD has already RESOLVED (ERR_FIXED='T'). It must stay OUT of the
+    // last_error_* roll-up the queue renders as an open problem, while remaining IN statusEvents so
+    // the drawer's history is complete. Both halves are asserted in arSnapshotMap.test.ts.
+    { SEQNO: '300000005', CLAIM: FX.claimB, STATUS_TYPE: 'ERROR', STATUS_DATE: '04/01/2026 08:00:00', STATUS_CODE: '27', STATUS_MESSAGE: 'Expenses incurred prior to coverage.', ACTION_CODE: 'C', ACTION_MESSAGE: 'Correct and resubmit.', RECEIVER_NAME: 'BETA MUTUAL', ERR_FIXED: 'T' },
   ]));
   t.set('B_PATNOTES', table('B_PATNOTES', [
     { SEQNO: '200000001', CUSTNO: '10099999', PATIENT: FX.pat2, USERNAME: 'jt', MESSAGE: 'Synthetic follow-up note one.', DELETED: '0', TYPE: '0', SUBMITTED: '06/17/2026 10:00:00', CLAIM: FX.claimF },

@@ -144,12 +144,28 @@ const TONE: Readonly<Record<string, { fg: string; bg: string }>> = {
   neutral: { fg: '#6B7A78', bg: '#ECEFEE' },
 };
 
-export function WorkChip({ status }: { status: ArWorkStatus | string }) {
+/**
+ * `derived` = the state came from CMD's snapshot, not from a person (migration 0113). It renders as
+ * an OUTLINE rather than a filled chip, so the queue never presents a machine inference with the
+ * same authority as a colleague's ruling — the column would otherwise read as if the team had
+ * already triaged 23,000 claims.
+ *
+ * The hue is kept in both forms so the state stays readable at a glance; only the fill changes.
+ * Colour is never the sole carrier: the `title` says which kind it is in words.
+ */
+export function WorkChip({ status, derived = false }: { status: ArWorkStatus | string; derived?: boolean }) {
   const meta = WORK_STATUS_META.find((m) => m.value === status);
   const t = TONE[meta?.tone ?? 'neutral'] ?? TONE.neutral!;
+  const label = meta?.label ?? status;
   return (
-    <span className="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-semibold" style={{ color: t.fg, backgroundColor: t.bg }}>
-      {meta?.label ?? status}
+    <span
+      className={`inline-flex items-center rounded-md px-2 py-0.5 text-xs ${derived ? 'font-medium' : 'font-semibold'}`}
+      style={derived
+        ? { color: t.fg, backgroundColor: 'transparent', boxShadow: `inset 0 0 0 1px ${t.fg}66` }
+        : { color: t.fg, backgroundColor: t.bg }}
+      title={derived ? `${label} — from CMD's data; nobody has triaged this claim yet` : `${label} — set by a person`}
+    >
+      {label}
     </span>
   );
 }

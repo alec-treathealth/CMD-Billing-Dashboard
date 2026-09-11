@@ -162,3 +162,28 @@ test('Qodo #357-1: a tenant whose ingest NEVER succeeded still sees the alarm', 
   assert.match(branch, /ingestAlarm \?/, 'the alarm survives the empty-state path');
   assert.match(branch, /role="alert"/);
 });
+
+// ── B9 ────────────────────────────────────────────────────────────────────────────────────────────
+test('a CMD-derived chip keys on ROW EXISTENCE, never on work_status === \'open\'', () => {
+  // Qodo #360 finding 2, and it was a real bug for one commit. `'open'` is BOTH "no human has
+  // ruled" and a perfectly valid persisted human status: claim-drawer seeds its editor from
+  // work_status and Save sends that value, so a user who changes only the assignee or the due date
+  // upserts an ar_claim_work row whose work_status is 'open'. Keyed off the value, that claim
+  // rendered outlined with the title "nobody has triaged this claim yet" while a named person
+  // owned it. Row existence (`w.cmd_claim_id is not null`) is the only exact test — assignee,
+  // due_on and resolution_code are all still NULL after a status-only save, so no proxy on those
+  // works either.
+  for (const f of ['components/billing-audit/ar/ar-queue-table.tsx', 'components/billing-audit/ar/claim-drawer.tsx']) {
+    const src = strip(read(f));
+    assert.match(src, /derived=\{!\w+\.has_human_work\}/, `${f} must key on row existence`);
+    assert.equal(/derived=\{\w+\.work_status === 'open'\}/.test(src), false, `${f} must not key on the status value`);
+  }
+  // Both chips still render the EFFECTIVE state, not the human column — that half was correct.
+  for (const f of ['components/billing-audit/ar/ar-queue-table.tsx', 'components/billing-audit/ar/claim-drawer.tsx']) {
+    assert.match(strip(read(f)), /status=\{\w+\.effective_work_state\}/, `${f} renders the effective state`);
+  }
+  // …and the drawer's EDITOR stays bound to the human column, so Save cannot promote CMD's guess.
+  const drawer = strip(read('components/billing-audit/ar/claim-drawer.tsx'));
+  assert.match(drawer, /status: res\.detail\.claim\.work_status/, 'editor seeds from the human column');
+  assert.equal(/status: res\.detail\.claim\.effective_work_state/.test(drawer), false);
+});
