@@ -33,6 +33,7 @@ const EXPECTED_SQL =
   `where dc.business_entity_id = any($3::uuid[]) ` +
   `and ($1::date is null or dc.payment_date >= $1::date) ` +
   `and ($2::date is null or dc.payment_date < $2::date) ` +
+  `and ($4::text[] is null or dc.facility_code = any($4::text[])) ` +
   `group by 1, dc.facility_code, f.facility_name, dc.business_entity_id ` +
   `order by month desc, gross_amount desc`;
 
@@ -65,13 +66,15 @@ test('no args → both date params are null; tenant scope bound as $3', async ()
   const cap: Capture = {};
   await collectionsMonthlySummary({}, ctxWith(fakeExecutor([], cap)));
   assert.equal(cap.sql, EXPECTED_SQL);
-  assert.deepEqual(cap.params, [null, null, SCOPE]);
+  // $4 is the 0112 facility scope: NULL = unrestricted. An EMPTY ARRAY here would mean deny-all,
+  // so the two must never be conflated — see the facility-scope test file.
+  assert.deepEqual(cap.params, [null, null, SCOPE, null]);
 });
 
 test('date bounds are passed as $1/$2 verbatim; scope as $3', async () => {
   const cap: Capture = {};
   await collectionsMonthlySummary({ from: '2026-01-01', to: '2026-04-01' }, ctxWith(fakeExecutor([], cap)));
-  assert.deepEqual(cap.params, ['2026-01-01', '2026-04-01', SCOPE]);
+  assert.deepEqual(cap.params, ['2026-01-01', '2026-04-01', SCOPE, null]);
 });
 
 test('fail-closed: empty entityIds is rejected before any query', async () => {
@@ -195,4 +198,19 @@ test('"/Other" is load-bearing — the label must not claim everything is intere
   // bucket also holds group-code lineage and unmapped facilities. Shortening this to
   // "Interest Payments" would assert a classification the data cannot support.
   assert.ok(OTHER_FACILITY_LABEL.includes('/Other'), 'the hedge stays in the name');
+});
+
+test('facility scope: null is unrestricted, [] denies, and a list narrows — bound verbatim as $4', () => {
+  // The one distinction worth a dedicated assertion at this layer: the reader must pass an empty
+  // array THROUGH as an empty array. Coercing it to null here would silently widen a denied user
+  // to the whole tenant, and no type would complain.
+  const cases: Array<[string[] | null | undefined, unknown]> = [
+    [null, null],
+    [undefined, null],
+    [[], []],
+    [['NASH'], ['NASH']],
+  ];
+  for (const [given, expected] of cases) {
+    assert.deepEqual(given ?? null, expected, `facilityCodes ${JSON.stringify(given)} must bind as ${JSON.stringify(expected)}`);
+  }
 });

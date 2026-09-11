@@ -10,6 +10,7 @@
  * bound `$n` parameter via the `add` closure — never interpolated.
  */
 import type { CmdExplorerRow } from './cmdExplorer.js';
+import type { FacilityScope } from './facilityScope.js';
 import type { GroupedSortColumn } from './groupedSort.js';
 // The SQL layer's one copy of the 'No Facility' literal. Imported rather than re-typed, per that
 // module's own rule that "a site opts in by naming it".
@@ -327,6 +328,24 @@ export interface CmdExplorerCondOptions {
    * Intel, which have their own window semantics. Flipping the default would change them silently.
    */
   requireWindow?: boolean;
+  /**
+   * FACILITY ENTITLEMENT (migration 0112) — the `user` seat's grant, NOT a user-chosen filter.
+   *
+   * Absent or `{ kind: 'unrestricted' }` emits NO predicate at all. `{ kind: 'scoped', codes }`
+   * narrows to those facility CODES, and an empty `codes` denies everything (emits `false`).
+   *
+   * ⚠ THIS IS A SEPARATE AND ADDITIONAL PREDICATE TO `filter.facility`, and the two must never be
+   * merged. `filter.facility` is what the reader ASKED for and may be widened freely by the client;
+   * this is what they are ALLOWED to see and is server-derived. AND-ing them is the point: choosing
+   * a facility outside the grant returns nothing rather than escaping the grant.
+   *
+   * ⚠ IT SPEAKS CODES; `filter.facility` SPEAKS CMD DISPLAY TEXT. They are different namespaces —
+   * see the note on the resolveFacility branch below ('TREAT MENTAL HEALTH WASHINGTON LLC' vs
+   * 'TREAT_WA'). The predicate therefore translates rows to codes rather than codes to labels,
+   * which also means a facility whose CMD spelling is not yet in the crosswalk is DENIED rather
+   * than leaked — the safe direction.
+   */
+  entitledFacilities?: FacilityScope;
 }
 
 /**
@@ -368,6 +387,11 @@ export interface CmdExplorerBuilderOptions {
    * builder emits whatever it is handed, and the window cap is policy, not SQL.
    */
   groupedSort?: GroupedSortColumn;
+  /**
+   * FACILITY ENTITLEMENT — forwarded verbatim to cmdExplorerBaseConds. See CmdExplorerCondOptions
+   * for the full contract and why it is separate from `filter.facility`.
+   */
+  entitledFacilities?: FacilityScope;
 }
 
 export function cmdExplorerBaseConds(
@@ -377,6 +401,55 @@ export function cmdExplorerBaseConds(
   opts?: CmdExplorerCondOptions,
 ): string[] {
   const conds: string[] = [];
+
+  // ── FACILITY ENTITLEMENT (0112) — emitted BEFORE anything the client controls ────────────────
+  // The `user` seat's grant. See CmdExplorerCondOptions.entitledFacilityCodes for why this is
+  // separate from filter.facility and why it speaks CODES while that speaks CMD display text.
+  //
+  // Absent or `unrestricted` emits nothing; `scoped` with no codes denies everything. The two are
+  // distinct SHAPES (see FacilityScope), so the old `null`-vs-`[]` inversion is now a type error
+  // rather than something comments and tests have to defend.
+  const entitled = opts?.entitledFacilities;
+  if (entitled !== undefined && entitled.kind === 'scoped') {
+    if (entitled.codes.length === 0) {
+      // Deny everything. `false` rather than an empty `= any('{}')` so the planner short-circuits
+      // and the intent is unmistakable when the SQL is read in a log.
+      conds.push('false');
+    } else {
+      const ent = add([...entitled.codes]);
+      const scopeEnt = add(entityIds);
+      const nfEnt = add(QUALIFY_NO_FACILITY_SQL);
+      // Two branches, mirroring branches 1 and 2 of the resolveFacility predicate below — and
+      // deliberately NOT its branch 3.
+      //
+      // R2 (Alec, 2026-09-10): the 'No Facility' bucket is HIDDEN from a scoped user, but a charge
+      // the 0086 engine ATTRIBUTES to a granted facility DOES count. Branch 3 is the one that
+      // returns rows still displaying the placeholder — i.e. attributable to nobody — so omitting
+      // it is exactly the ruling. That bucket is BXR-only and large: $29,081,575.38 across 11,451
+      // charges, 15.67% of BXR's rollup rows, measured 2026-09-10 (Indigo has zero).
+      conds.push(
+        '(' +
+          // 1. CMD named a facility whose text resolves — by exact dimension name OR the explicit
+          //    alias crosswalk — to one of the granted codes. Guarded by `<> placeholder` so a
+          //    blank cell cannot satisfy this branch.
+          `(facility <> ${nfEnt} and exists (` +
+          'select 1 from collections.facilities fe ' +
+          `where upper(fe.facility_name) = upper(facility) and fe.facility_code = any(${ent}::text[])` +
+          ')) or ' +
+          `(facility <> ${nfEnt} and exists (` +
+          'select 1 from collections.cmd_facility_aliases a ' +
+          `where upper(a.facility_text) = upper(facility) and a.facility_code = any(${ent}::text[])` +
+          ')) or ' +
+          // 2. The charge is attributed by 0086 to a granted facility. `id in (...)` builds one
+          //    bounded id set and hash-semi-joins it, rather than probing per outer row — the same
+          //    shape (and the same reasoning) as the resolveFacility branch below.
+          `id in (select fr.id from ${CMD_FACILITY_RESOLUTION} fr ` +
+          `where fr.business_entity_id = any(${scopeEnt}::uuid[]) ` +
+          `and fr.facility_alias = any(${ent}::text[]))` +
+          ')',
+      );
+    }
+  }
   // Tenant scope FIRST — server-derived entitled entity ids, applied to every read.
   //
   // ONE id emits plain EQUALITY, not `= any(...)`, and that is a measured performance fix rather
@@ -630,6 +703,17 @@ export interface CmdFacilityOption {
   facility: string;
   facility_name: string | null;
   care_setting: 'IP' | 'OP' | 'BOTH' | null;
+  /**
+   * The resolved canonical facility_code, or null when this CMD text maps to no roster facility
+   * (the 'No Facility' placeholder, and any spelling absent from both the dimension and the alias
+   * crosswalk).
+   *
+   * Added for the 0112 facility entitlement: the grant is expressed in CODES while this vocabulary
+   * is CMD DISPLAY TEXT, so without the code there is no way to narrow the dropdown to what a
+   * scoped user may actually select. A null code is DENIED for a scoped user — consistent with R2
+   * (unattributed charges are hidden) and the safe direction for an unrecognised spelling.
+   */
+  facility_code: string | null;
 }
 
 /**
@@ -686,7 +770,11 @@ export interface QualifyFacilityOption {
 export function buildCmdFacilityOptionsQuery(entityIds: string[]): { sql: string; params: unknown[] } {
   const params: unknown[] = [entityIds];
   const sql =
-    'select r.facility, max(f.facility_name) as facility_name, max(f.care_setting) as care_setting ' +
+    'select r.facility, max(f.facility_name) as facility_name, max(f.care_setting) as care_setting, ' +
+    // The resolved code — the same two-path crosswalk the joins below already compute, surfaced so
+    // the 0112 entitlement can narrow this list. max() collapses join multiplicity exactly as the
+    // other two aggregates do.
+    'max(coalesce(fe.facility_code, a.facility_code)) as facility_code ' +
     'from (select distinct value as facility from collections.cmd_explorer_filter_options ' +
     "where business_entity_id = any($1::uuid[]) and kind = 'facility') r " +
     'left join collections.facilities fe on upper(fe.facility_name) = upper(r.facility) ' +
@@ -1371,6 +1459,7 @@ export function buildCmdExplorerQuery(
     const conds = cmdExplorerBaseConds(filter, scope, add, {
       resolveFacility: true,
       requireWindow: opts?.requireWindow === true,
+      entitledFacilities: opts?.entitledFacilities,
     });
     if (cursor !== null) {
       if (cursor.value === null) {
@@ -1696,6 +1785,7 @@ export function buildCmdSearchSummaryQueries(
     const conds = cmdExplorerBaseConds(filter, entityIds, add, {
       resolveFacility: true,
       requireWindow: opts?.requireWindow === true,
+      entitledFacilities: opts?.entitledFacilities,
     });
     const where = ` where ${conds.join(' and ')}`;
     // CHARGE grain (0050 rollup), so counts are logical charges and sums are netted — the grid
@@ -2327,6 +2417,7 @@ export function buildCmdExplorerGroupedQuery(
   const conds = cmdExplorerBaseConds(filter, entityIds, add, {
     resolveFacility: true,
     requireWindow: opts?.requireWindow === true,
+    entitledFacilities: opts?.entitledFacilities,
   });
   const dir = direction === 'asc' ? 'asc' : 'desc';
   const cmp = direction === 'asc' ? '>' : '<';

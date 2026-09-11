@@ -15,6 +15,7 @@
  * Each call emits one lightweight, non-PHI audit line (no claims.query_log).
  */
 import { businessDayIso } from '../businessWindow.js';
+import { facilityScopeParam, type FacilityScope } from './facilityScope.js';
 import type { QueryExecutor } from '../queries/types.js';
 import { assertEntityScope } from './entityScope.js';
 import { validateDateBound } from './summary.js';
@@ -42,6 +43,23 @@ export interface CollectionsQueryContext {
    * supply it.
    */
   entityIds?: string[];
+  /**
+   * FACILITY scope (migration 0112). Absent = unrestricted; see FacilityScope for the two states.
+   * Bound through facilityScopeParam, whose docblock states the SQL contract once.
+   *
+   * ⚠ OPTIONAL HERE, REQUIRED ONE LAYER UP, AND THAT IS DELIBERATE. This context is shared with
+   * readers that never apply a facility predicate at all (collectionsYoy over payment_lines,
+   * facilityDimension, cmdPayerRollup) — the same reason `entityIds` above is optional. Requiring
+   * it here would force those readers to declare a scope they do not honour, which reads as
+   * enforcement that is not there.
+   *
+   * The omission hole is closed at the BOUNDARY instead: all seven unstable_cache wrappers in
+   * app/lib/server.ts take the scope as a REQUIRED parameter, so no path that serves a `user` can
+   * reach this reader without one. A test asserts none of those seven is optional or defaulted —
+   * because JSON.stringify([undefined]) is "[null]", so an omitted argument would key identically
+   * to an explicit unrestricted and silently share a super_admin's cache entry.
+   */
+  facilityScope?: FacilityScope;
   now?: () => Date;
   audit?: (line: string) => void;
 }
@@ -90,7 +108,13 @@ function futurePaymentBound(
 // --- collectionsDaily -------------------------------------------------------
 
 /**
- * Daily rows. $1 = from (incl), $2 = to (excl), $3 = facility_code, $4 = tenant scope
+ * Daily rows. $1 = from (incl), $2 = to (excl), $3 = facility_code, $4 = tenant scope, $6 = FACILITY
+ * SCOPE (text[]; NULL = unrestricted, empty array = deny all — migration 0112).
+ *
+ * ⚠ THE FACILITY SCOPE IS APPLIED TO THE ANCHOR CTE AS WELL AS THE OUTER QUERY, deliberately. The
+ * anchor is `max(payment_date)` and it drives the default window when no dates are given. Scoping
+ * only the outer query would anchor a restricted user's window on a deposit at a facility they
+ * cannot see — an "as of" date they have no row to explain.
  * (business_entity_id[]; required, non-empty). When BOTH $1 and $2 are null the window
  * defaults to the latest calendar month present FOR THE TENANT (the anchor CTE is itself
  * tenant-scoped, so one tenant's latest month never anchors another's). Exposed for the
@@ -98,7 +122,7 @@ function futurePaymentBound(
  */
 export function collectionsDailySql(): string {
   return (
-    `with anchor as (select max(payment_date) as max_d from collections.daily_collections_resolved where business_entity_id = any($4::uuid[]) and ($5::date is null or payment_date <= $5::date)) ` +
+    `with anchor as (select max(payment_date) as max_d from collections.daily_collections_resolved where business_entity_id = any($4::uuid[]) and ($5::date is null or payment_date <= $5::date) and ($6::text[] is null or facility_code = any($6::text[]))) ` +
     `select ` +
     `to_char(dc.payment_date, 'YYYY-MM-DD') as payment_date, ` +
     `dc.facility_code as facility_code, ` +
@@ -118,6 +142,7 @@ export function collectionsDailySql(): string {
     `and ($2::date is null or dc.payment_date < $2::date)) end) ` +
     `and ($3::text is null or dc.facility_code = $3::text) ` +
     `and ($5::date is null or dc.payment_date <= $5::date) ` +
+    `and ($6::text[] is null or dc.facility_code = any($6::text[])) ` +
     `order by dc.payment_date desc, f.facility_name nulls last, dc.facility_code`
   );
 }
@@ -150,6 +175,9 @@ export async function collectionsDaily(
     facility ?? null,
     entityIds,
     maxPaymentDate,
+    // $6 — see CollectionsDailyContext.facilityCodes. `?? null` keeps unrestricted as NULL and
+    // passes an empty array THROUGH as deny; it never coerces [] to null.
+    facilityScopeParam(ctx.facilityScope),
   ]);
 
   const out: CollectionsDailyRow[] = rows.map((r) => ({
@@ -186,7 +214,7 @@ export function collectionsKpisSql(): string {
   const mtd = `dc.payment_date >= date_trunc('month', a.d)::date and dc.payment_date <= a.d`;
   const ytd = `dc.payment_date >= date_trunc('year', a.d)::date and dc.payment_date <= a.d`;
   return (
-    `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections_resolved where business_entity_id = any($2::uuid[]) and ($3::date is null or payment_date <= $3::date)) ` +
+    `with anchor as (select coalesce($1::date, max(payment_date)) as d from collections.daily_collections_resolved where business_entity_id = any($2::uuid[]) and ($3::date is null or payment_date <= $3::date) and ($4::text[] is null or facility_code = any($4::text[]))) ` +
     `select ` +
     `to_char(a.d, 'YYYY-MM-DD') as as_of, ` +
     `dc.facility_code as facility_code, ` +
@@ -202,6 +230,7 @@ export function collectionsKpisSql(): string {
     `cross join anchor a ` +
     `left join collections.facilities f on f.facility_code = dc.facility_code ` +
     `where dc.business_entity_id = any($2::uuid[]) ` +
+    `and ($4::text[] is null or dc.facility_code = any($4::text[])) ` +
     `group by a.d, dc.facility_code, f.facility_name, dc.business_entity_id ` +
     `order by ytd_gross desc`
   );
@@ -231,6 +260,8 @@ export async function collectionsKpis(
     asOfArg ?? null,
     entityIds,
     futurePaymentBound(args.include_future_payments, ctx),
+    // $4 — facility scope, applied to the anchor CTE as well as the aggregate. See the SQL note.
+    facilityScopeParam(ctx.facilityScope),
   ]);
 
   const by_facility: CollectionsFacilityKpi[] = rows.map((r) => ({

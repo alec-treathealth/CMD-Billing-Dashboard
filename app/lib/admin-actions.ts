@@ -16,13 +16,21 @@
 import {
   deleteAppUser,
   deleteOrphanAppUsers,
+  facilitiesDimension,
+  facilityGrantsByUser,
   listAppUsers,
   recordAccess,
+  setAppUserFacilities,
   upsertAppUser,
   type AppEntity,
   type AppRole,
   type ManagedUser,
 } from '@/lib/server';
+import {
+  facilityBelongsToEntity,
+  facilityIsActiveForEntity,
+} from '../../src/collections/cmdCustomers.js';
+import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '@/lib/views';
 import { dashboardAccess } from '@/lib/access';
 import { supabaseAdminClient } from '@/lib/supabase/admin';
 import { canonicalAppOrigin } from '@/lib/auth/email-link';
@@ -41,6 +49,28 @@ type ManagerRole = Exclude<Role, 'user' | 'admissions_seat'>;
 export interface ManagedUserDto extends ManagedUser {
   /** Whether the CURRENT caller may edit this row (UI affordance; the action re-checks server-side). */
   editable: boolean;
+  /**
+   * Granted facility codes (0112). Meaningful ONLY for role='user'; empty for every other role.
+   * An empty array on a `user` means DENY — the UI must not render it as "all".
+   */
+  facilityCodes: string[];
+}
+
+/** One selectable facility for the provisioning checkbox list. Non-PHI reference data. */
+export interface AssignableFacility {
+  code: string;
+  name: string;
+  /** 'IP' | 'OP' | 'BOTH' | null — groups the checkbox list. */
+  careSetting: 'IP' | 'OP' | 'BOTH' | null;
+  /** Which tenant owns it; the UI shows only the selected tenant's facilities. */
+  entity: AppEntity;
+  /**
+   * True when the facility is owned but no longer polled from CMD (retired). Still grantable, so a
+   * scoped user keeps access to its HISTORY — but flagged, because granting it alone yields a user
+   * who sees nothing current. Measured 2026-09-10: 10036020 MADISON RECOVERY CENTER and 10036030
+   * MISSOURI BEHAVIORAL HEALTH (both Indigo, retired 2026-08-02, dimension row + zero data rows).
+   */
+  retired: boolean;
 }
 
 export interface ManageContext {
@@ -51,6 +81,11 @@ export interface ManageContext {
   assignableEntities: Entity[];
   /** Roles this caller may assign. */
   assignableRoles: AppRole[];
+  /**
+   * The facility roster the checkbox list renders, already filtered to the caller's assignable
+   * tenants. Non-PHI reference data (code + name + care setting).
+   */
+  assignableFacilities: AssignableFacility[];
   users: ManagedUserDto[];
 }
 
@@ -111,8 +146,93 @@ function canAssign(gate: ManageGate, role: AppRole, entity: AppEntity | null): b
   return (role === 'admin' || role === 'user') && entity === gate.entity;
 }
 
-function toDto(gate: ManageGate, u: ManagedUser): ManagedUserDto {
-  return { ...u, editable: u.userId !== gate.user.id && inScope(gate, u) };
+function toDto(
+  gate: ManageGate,
+  u: ManagedUser,
+  grants: Record<string, string[]>,
+): ManagedUserDto {
+  return {
+    ...u,
+    editable: u.userId !== gate.user.id && inScope(gate, u),
+    // Only the `user` seat has meaningful grants; every other role is whole-tenant or cross-tenant
+    // and the read path never consults them. Reporting [] for those avoids a UI that implies a
+    // restriction that is not enforced.
+    facilityCodes: u.role === 'user' ? (grants[u.userId] ?? []) : [],
+  };
+}
+
+/**
+ * The facility roster a caller may assign from, as flat non-PHI options.
+ *
+ * ⚠ TENANT ATTRIBUTION COMES FROM CODE, NOT THE DATABASE. collections.facilities has no
+ * business_entity_id — it is tenant-agnostic reference data — so ownership is resolved through
+ * facilityBelongsToEntity (OWNED_CMD_CUSTOMERS, src/collections/cmdCustomers.ts). This is also why
+ * migration 0112's definer cannot validate tenant coherence and this layer must.
+ *
+ * OWNERSHIP, not the active polling roster, is the filter: ownership is permanent, so a retired
+ * facility stays grantable and its history stays reachable. Retired ones are FLAGGED rather than
+ * hidden — see AssignableFacility.retired.
+ */
+async function assignableFacilitiesFor(entities: readonly AppEntity[]): Promise<AssignableFacility[]> {
+  const dim = await facilitiesDimension();
+  const idFor: Record<AppEntity, string> = { bxr: BXR_ENTITY_ID, indigo: INDIGO_ENTITY_ID };
+  const out: AssignableFacility[] = [];
+  for (const f of dim) {
+    for (const entity of entities) {
+      if (!facilityBelongsToEntity(f.facility_code, idFor[entity])) continue;
+      out.push({
+        code: f.facility_code,
+        name: f.facility_name,
+        careSetting: f.care_setting,
+        entity,
+        // `facilityIsActiveForEntity` answers a DIFFERENT question from facilityBelongsToEntity and
+        // must be used WITH it, never instead of it (that module's own warning) — owned-and-retired
+        // and not-owned are different states and deserve different treatment.
+        retired: !facilityIsActiveForEntity(f.facility_code, idFor[entity]),
+      });
+      break;
+    }
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+
+/**
+ * Validate a facility grant for (role, entity) and return the clean set, or a typed error.
+ *
+ * ⚠ THIS IS WHERE TENANT COHERENCE IS ENFORCED, AND IT IS THE ONLY PLACE IT CAN BE. Migration
+ * 0112's definer validates that a code EXISTS in collections.facilities, but that table has no
+ * business_entity_id — it is tenant-agnostic reference data — so the DB structurally cannot tell
+ * whether NASH belongs to BXR or Indigo. facilityBelongsToEntity (OWNED_CMD_CUSTOMERS) is the only
+ * source of that fact, and it lives in TypeScript. A successful definer call therefore proves
+ * existence, NEVER tenant coherence. Do not "simplify" by trusting the definer.
+ *
+ * REQUIRES AT LEAST ONE facility for the `user` seat (R4 makes a grant an explicit snapshot, and an
+ * empty snapshot is a user who can see nothing). The READ path still fails closed on an empty set
+ * independently — a provisioning rule is not an access control.
+ */
+function validateFacilityGrant(
+  role: AppRole,
+  entity: AppEntity | null,
+  codes: unknown,
+): { ok: true; codes: string[] } | { ok: false; error: string } {
+  if (role !== 'user') {
+    // Facility grants are meaningless for every other role; the read path never consults them.
+    // Silently empty rather than an error, so switching a user to admin does not require the
+    // caller to first clear a list the new role ignores.
+    return { ok: true, codes: [] };
+  }
+  if (!Array.isArray(codes)) return { ok: false, error: 'Choose at least one facility.' };
+  const clean = [...new Set(codes.filter((c): c is string => typeof c === 'string' && c.trim() !== ''))];
+  if (clean.length === 0) return { ok: false, error: 'Choose at least one facility for this user.' };
+  if (clean.length > 500) return { ok: false, error: 'Too many facilities selected.' };
+  if (!entity) return { ok: false, error: 'Choose a tenant before assigning facilities.' };
+  const entityId = entity === 'bxr' ? BXR_ENTITY_ID : INDIGO_ENTITY_ID;
+  const foreign = clean.find((c) => !facilityBelongsToEntity(c, entityId));
+  if (foreign !== undefined) {
+    return { ok: false, error: 'That facility does not belong to the selected tenant.' };
+  }
+  return { ok: true, codes: clean };
 }
 
 export async function listManagedUsers(): Promise<ManageUsersResult> {
@@ -120,7 +240,13 @@ export async function listManagedUsers(): Promise<ManageUsersResult> {
   if (!auth.ok) return auth;
   const { gate } = auth;
   try {
-    const all = await listAppUsers();
+    const assignableEntities: AppEntity[] =
+      gate.role === 'super_admin' ? [...ENTITIES] : gate.entity ? [gate.entity] : [];
+    const [all, grants, assignableFacilities] = await Promise.all([
+      listAppUsers(),
+      facilityGrantsByUser(),
+      assignableFacilitiesFor(assignableEntities),
+    ]);
     const visible = all.filter((u) => gate.role === 'super_admin' || inScope(gate, u));
     return {
       ok: true,
@@ -128,9 +254,10 @@ export async function listManagedUsers(): Promise<ManageUsersResult> {
         callerRole: gate.role,
         callerEntity: gate.entity,
         callerUserId: gate.user.id,
-        assignableEntities: gate.role === 'super_admin' ? [...ENTITIES] : gate.entity ? [gate.entity] : [],
+        assignableEntities,
         assignableRoles: gate.role === 'super_admin' ? [...ROLES] : ['admin', 'user'],
-        users: visible.map((u) => toDto(gate, u)),
+        assignableFacilities,
+        users: visible.map((u) => toDto(gate, u, grants)),
       },
     };
   } catch {
@@ -151,6 +278,8 @@ export async function setUserRole(
   targetUserId: string,
   role: AppRole,
   entity: AppEntity | null,
+  /** Facility grant for the `user` seat (0112). Required and non-empty when role='user'. */
+  facilityCodes: string[] = [],
 ): Promise<MutateUserResult> {
   const auth = await requireManage();
   if (!auth.ok) return auth;
@@ -165,6 +294,8 @@ export async function setUserRole(
   if (!canAssign(gate, role, entity)) {
     return { ok: false, error: 'You may not assign that role or entity.' };
   }
+  const grant = validateFacilityGrant(role, entity, facilityCodes);
+  if (!grant.ok) return { ok: false, error: grant.error };
 
   // Re-read the target server-side (never trust the client for the target's current state/email).
   let target: ManagedUser | undefined;
@@ -178,6 +309,11 @@ export async function setUserRole(
 
   try {
     await upsertAppUser(targetUserId, target.email, role, entity);
+    // ALWAYS called, including with an empty set. Promoting a `user` to admin must CLEAR their
+    // grants rather than leave rows that would silently take effect again if the role were ever
+    // set back to `user`. 0112's definer permits an empty set for any role precisely so this
+    // clear-on-role-change works without first restoring the old role.
+    await setAppUserFacilities(targetUserId, grant.codes, gate.user.id);
   } catch (err) {
     return { ok: false, error: mutationError(err) };
   }
@@ -185,7 +321,8 @@ export async function setUserRole(
     actorEmail: gate.user.email,
     actorUserId: gate.user.id,
     action: 'provision_user',
-    detail: { target: targetUserId, role, entity }, // non-PHI: uid + assigned role only
+    // non-PHI: uid + assigned role + facility CODES (reference data, never patient data).
+    detail: { target: targetUserId, role, entity, facilities: grant.codes },
   });
   return { ok: true };
 }
@@ -274,6 +411,8 @@ export async function inviteUser(
   email: string,
   role: AppRole,
   entity: AppEntity | null,
+  /** Facility grant for the `user` seat (0112). Required and non-empty for role='user'. */
+  facilityCodes: string[] = [],
 ): Promise<InviteUserResult> {
   const auth = await requireManage();
   if (!auth.ok) return auth;
@@ -291,6 +430,10 @@ export async function inviteUser(
   if (!canAssign(gate, role, entity)) {
     return { ok: false, error: 'That role/entity combination is not valid.' };
   }
+  // Validated BEFORE the invite is sent: a rejected grant must not leave a provisioned account and
+  // a delivered email behind, which is exactly what happens if this runs after inviteUserByEmail.
+  const grant = validateFacilityGrant(role, entity, facilityCodes);
+  if (!grant.ok) return { ok: false, error: grant.error };
 
   // Always build the invite link on the canonical prod origin (not the request host). For an
   // admissions_seat, flag the two-choice (mobile / web) invite the Send Email hook renders.
@@ -342,11 +485,22 @@ export async function inviteUser(
     // Non-fatal — the orphan (if any) stays until the next successful invite/cleanup.
   }
 
+  // Facilities AFTER the role row exists: 0112's definer reads claims.app_user to check the role,
+  // so calling it before upsertAppUser would raise "no such provisioned user".
+  if (grant.codes.length > 0) {
+    try {
+      await setAppUserFacilities(userId, grant.codes, gate.user.id);
+    } catch (err) {
+      return { ok: false, error: mutationError(err) };
+    }
+  }
+
   await recordAccess({
     actorEmail: gate.user.email,
     actorUserId: gate.user.id,
     action: 'invite_user',
-    detail: { target: userId, role, entity }, // non-PHI: uid + assigned role only
+    // non-PHI: uid + assigned role + the facility CODES (reference data, never patient data).
+    detail: { target: userId, role, entity, facilities: grant.codes },
   });
 
   // Return an accurate row for the UI (re-read so confirmed-status / created_at reflect reality).
@@ -358,10 +512,16 @@ export async function inviteUser(
     role,
     entity,
     editable: true,
+    facilityCodes: grant.codes,
   };
   try {
     const fresh = (await listAppUsers()).find((u) => u.userId === userId);
-    return { ok: true, user: fresh ? { ...fresh, editable: inScope(gate, fresh) } : fallback };
+    return {
+      ok: true,
+      user: fresh
+        ? { ...fresh, editable: inScope(gate, fresh), facilityCodes: grant.codes }
+        : fallback,
+    };
   } catch {
     return { ok: true, user: fallback };
   }

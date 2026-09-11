@@ -66,7 +66,40 @@ test('⚠ the sort column is part of the unstable_cache KEY', () => {
   );
   assert.ok(cached.length > 0, 'the cached grouped loader is located');
   assert.match(cached, /sortColumn: GroupedSortColumn,/, 'sortColumn is a parameter, so it keys the entry');
-  assert.match(cached, /loadCmdExplorerGroupedPage\(cursor, filter, direction, entityIds, sortColumn\)/);
+  assert.match(
+    cached,
+    /loadCmdExplorerGroupedPage\(\s*cursor,\s*filter,\s*direction,\s*entityIds,\s*sortColumn,\s*entitledFacilities,?\s*\)/,
+    'every cache-keyed argument is forwarded, in order',
+  );
+
+  // ── THE FACILITY ENTITLEMENT (0112) — SAME MECHANISM, HIGHER CONSEQUENCE ────────────────────
+  // VERIFIED against the installed Next source rather than assumed
+  // (node_modules/next/dist/server/web/spec-extension/unstable-cache.js):
+  //     const fixedKey      = `${cb.toString()}-${keyParts.join(',')}`;        // L55
+  //     const invocationKey = `${fixedKey}-${JSON.stringify(args)}`;           // L82
+  // The key is the callback SOURCE + keyParts + JSON.stringify(ARGS). So "is an argument" and "is
+  // in the key" are the same statement — there is no way to pass an argument that does not key.
+  //
+  // Which means the hazard is NOT "argument but unkeyed" (unrepresentable); it is the value
+  // reaching the callback WITHOUT being an argument — resolved inside the body, read from module
+  // state, or closed over. Then `args` does not contain it, the key does not vary by it, and a
+  // super_admin's UNRESTRICTED page is served from cache to a facility-scoped `user`: the grant
+  // defeated entirely, every predicate still correct, no error, for the full 15-minute lifetime.
+  //
+  // These two assertions pin that mechanism rather than the call signature:
+  //   1. the scope IS a declared parameter (so it lands in JSON.stringify(args));
+  //   2. the cached callback does NOT resolve it itself.
+  assert.match(
+    cached,
+    /entitledFacilities:\s*FacilityScope,/,
+    'the facility entitlement must be a PARAMETER — that is what puts it in JSON.stringify(args)',
+  );
+  assert.doesNotMatch(
+    cached,
+    /viewFacilityScope|dashboardAccess/,
+    'the cached callback must NOT resolve the scope itself — a value read inside the body never ' +
+      'reaches JSON.stringify(args) and therefore never varies the cache key',
+  );
 });
 
 test('the cursor scalar is taken from the column the page was ORDERED BY', () => {

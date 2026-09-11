@@ -15,6 +15,7 @@
  * audit); it emits exactly one lightweight structured, non-PHI audit line.
  */
 import type { QueryExecutor } from '../queries/types.js';
+import { facilityScopeParam, type FacilityScope } from './facilityScope.js';
 import { assertEntityScope } from './entityScope.js';
 import type {
   CollectionsMonthlySummary,
@@ -38,6 +39,13 @@ export interface CollectionsSummaryContext {
    * spread; every real caller MUST supply it. Bound as $3 (business_entity_id = any(...)).
    */
   entityIds?: string[];
+  /**
+   * FACILITY scope (migration 0112). Absent = unrestricted; see FacilityScope for the two states.
+   * Bound through facilityScopeParam, whose docblock states the SQL contract once:
+   * `($n::text[] is null or <col> = any($n::text[]))` skips the predicate for unrestricted and
+   * matches no row for a deny-all. Resolved by viewFacilityScope() in app/lib/actions.ts.
+   */
+  facilityScope?: FacilityScope;
   now?: () => Date;
   /** Audit sink; defaults to one JSON line on stdout. */
   audit?: (line: string) => void;
@@ -57,7 +65,8 @@ interface RawRow {
 /**
  * The parameterized SQL. Exposed so the fixture can assert the exact string.
  * `$1` = inclusive from-date, `$2` = exclusive to-date (either may be NULL),
- * `$3` = tenant scope (business_entity_id[]; required, non-empty — see CollectionsSummaryContext).
+ * `$3` = tenant scope (business_entity_id[]; required, non-empty — see CollectionsSummaryContext),
+ * `$4` = facility scope (text[]; NULL = unrestricted, empty array = deny all).
  */
 export function collectionsMonthlySummarySql(): string {
   return (
@@ -75,6 +84,7 @@ export function collectionsMonthlySummarySql(): string {
     `where dc.business_entity_id = any($3::uuid[]) ` +
     `and ($1::date is null or dc.payment_date >= $1::date) ` +
     `and ($2::date is null or dc.payment_date < $2::date) ` +
+    `and ($4::text[] is null or dc.facility_code = any($4::text[])) ` +
     `group by 1, dc.facility_code, f.facility_name, dc.business_entity_id ` +
     `order by month desc, gross_amount desc`
   );
@@ -111,6 +121,9 @@ export async function collectionsMonthlySummary(
     from ?? null,
     to ?? null,
     entityIds,
+    // `?? null` preserves the unrestricted case; an empty array is passed THROUGH as an empty array
+    // (deny), never coerced to null. See CollectionsSummaryContext.facilityCodes.
+    facilityScopeParam(ctx.facilityScope),
   ]);
 
   const by_month_facility: CollectionsMonthRow[] = rows.map((r) => ({

@@ -17,6 +17,11 @@
  *                          (viewerHasAmountsCapability = role !== 'admissions_seat'), not here.
  */
 import { ALL_VIEWS, type DashboardView } from './views';
+import {
+  UNRESTRICTED_FACILITIES,
+  scopedFacilities,
+  type FacilityScope,
+} from '../../src/collections/facilityScope';
 
 export type Role = 'super_admin' | 'admin' | 'user' | 'admissions_seat';
 export type Entity = 'bxr' | 'indigo';
@@ -46,11 +51,50 @@ export function allowedViewsFor(role: Role, entity: Entity | null): DashboardVie
 }
 
 /**
- * Who may unmask patient identifiers. super_admin + admin (dashboard), and admissions_seat (Qualify:
- * masked-by-default with an audited reveal, per ruling R-PHI). Plain `user` may not.
+ * Who may unmask patient identifiers. super_admin + admin (dashboard), admissions_seat (Qualify:
+ * masked-by-default with an audited reveal, per ruling R-PHI) — and, since 2026-09-10, `user`.
+ *
+ * ⚠ `user` GAINED PHI ON 2026-09-10 (Alec, ruling R5: "User can reveal PHI too. Just only access to
+ * their facilities"). This docblock read "Plain `user` may not" for the entire life of the role, so
+ * read the change as deliberate rather than as a slip.
+ *
+ * WHAT NOW SEPARATES `user` FROM `admin` is exactly two things: user management (admin has it, user
+ * does not) and FACILITY SCOPE (user is restricted to its granted facilities; admin sees the whole
+ * tenant). PHI is no longer a differentiator between the two.
+ *
+ * ⚠ THAT MAKES THE FACILITY GRANT THE ONLY THING GUARDING PATIENT DATA FOR THIS SEAT. A reveal, or
+ * a blind-index search, that is not facility-narrowed is a COMPLETE bypass of the grant — see
+ * allowedFacilitiesFor below and the narrowing in app/lib/actions.ts. The PHI-SEARCH path matters
+ * more than the reveal path here: a member-ID lookup is PATIENT-grain, so an un-narrowed search
+ * returns that patient's rows at facilities the seat was never granted.
  */
 export function canRevealPhi(role: Role): boolean {
-  return role === 'super_admin' || role === 'admin' || role === 'admissions_seat';
+  return (
+    role === 'super_admin' || role === 'admin' || role === 'admissions_seat' || role === 'user'
+  );
+}
+
+/**
+ * The facilities a principal may see, as a FacilityScope.
+ *
+ * Only the `user` seat is ever restricted: every other role is whole-tenant (admin) or cross-tenant
+ * (super_admin, admissions_seat), so they get `unrestricted` and no reader applies a predicate.
+ *
+ * ⚠ A `user` ALWAYS gets a `scoped` result, including when they have no grants — that case is
+ * `{ kind: 'scoped', codes: [] }`, which denies everything. It is NOT `unrestricted`, and the type
+ * now makes conflating the two a compile error rather than a one-character slip. Provisioning
+ * refuses an empty grant, so it should be unreachable; "should be unreachable" is not an access
+ * control, so the read path denies on it regardless.
+ *
+ * `assigned` comes from claims.app_user_facility (migration 0112) and is passed IN rather than read
+ * here, so this module stays pure and DB-free.
+ */
+export function allowedFacilitiesFor(
+  role: Role,
+  assigned: readonly string[] | null | undefined,
+): FacilityScope {
+  if (role !== 'user') return UNRESTRICTED_FACILITIES;
+  return scopedFacilities(assigned ?? []);
 }
 
 /** Admins and super-admins may provision/manage users (in-app UI deferred). */
