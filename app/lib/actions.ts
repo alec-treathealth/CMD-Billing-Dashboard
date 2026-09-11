@@ -531,7 +531,7 @@ export async function loadCmdPayerMonth(
   const entityIds = await viewEntityScope(view);
   if (!entityIds) return { ok: false };
   try {
-    return { ok: true, data: await payerCmdMonth(year, month, entityIds) };
+    return { ok: true, data: await payerCmdMonth(year, month, entityIds, await viewFacilityScope()) };
   } catch {
     return { ok: false };
   }
@@ -959,7 +959,7 @@ export async function loadCollectionsYoy(
   // (payment_lines tenancy is a separate follow-up; until then YoY is BXR-only by construction.)
   if (!entityIds.includes(BXR_ENTITY_ID)) return { ok: false };
   try {
-    return { ok: true, data: await dashboardCollectionsYoy(asOf) };
+    return { ok: true, data: await dashboardCollectionsYoy(asOf, await viewFacilityScope()) };
   } catch {
     return { ok: false };
   }

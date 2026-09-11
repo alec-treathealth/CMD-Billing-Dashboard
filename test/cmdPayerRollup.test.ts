@@ -171,7 +171,9 @@ test('cmdPayerMonth: exact parameterized SQL, maps result, emits non-PHI audit',
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0]!.sql, cmdPayerMonthSql());
-  assert.deepEqual(calls[0]!.params, [2026, 5, SCOPE]);
+  // $4 is the 0112 facility scope. NULL = unrestricted here (this fixture's ctx omits the field);
+  // an empty array would mean deny-all, and the two must never be conflated.
+  assert.deepEqual(calls[0]!.params, [2026, 5, SCOPE, null]);
 
   assert.equal(result.year, 2026);
   assert.equal(result.month, 5);

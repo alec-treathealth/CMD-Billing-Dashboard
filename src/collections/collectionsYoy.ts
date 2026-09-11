@@ -18,6 +18,7 @@
  * from daily_collections_resolved, not from here.
  */
 import type { Expect, HasNoPhiKey } from '../queries/types.js';
+import { facilityScopeParam } from './facilityScope.js';
 import type { CollectionsQueryContext } from './daily.js';
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -47,7 +48,18 @@ export function collectionsYoySql(): string {
     `round(coalesce(sum(insurance_paid) filter (where payment_date >= $1::date and payment_date <= $2::date), 0)::numeric, 2) as current_ytd_paid, ` +
     `round(coalesce(sum(insurance_paid) filter (where payment_date >= $3::date and payment_date <= $4::date), 0)::numeric, 2) as prior_ytd_paid, ` +
     `round(coalesce(sum(insurance_paid) filter (where payment_date >= $3::date and payment_date <= $5::date), 0)::numeric, 2) as prior_full_year_paid ` +
-    `from collections.payment_lines`
+    `from collections.payment_lines ` +
+    // 0112 FACILITY ENTITLEMENT ($6). NULL = unrestricted, empty array = deny all.
+    //
+    // payment_lines carries facility_code natively, so this is the plain predicate — no crosswalk.
+    // Without it a facility-scoped `user` reads WHOLE-TENANT year-over-year totals: aggregate
+    // grain rather than row grain, but still money from facilities they were never granted, on an
+    // Overview tile that R1 puts squarely in scope.
+    //
+    // ⚠ payment_lines has NO business_entity_id (it predates the 0027-0031 tenancy set), which is
+    // why the caller gates on "is BXR in scope" instead. That is a separate, pre-existing tenancy
+    // gap — this predicate does not close it and does not pretend to.
+    `where ($6::text[] is null or facility_code = any($6::text[]))`
   );
 }
 
@@ -95,7 +107,11 @@ export async function collectionsYoy(
 ): Promise<CollectionsYoy> {
   const { params, currentYear, priorYear } = windowsFor(args.as_of);
 
-  const { rows } = await ctx.executor.query<RawYoyRow>(collectionsYoySql(), params);
+  // $6 appended to the five date bounds — 0112 facility entitlement.
+  const { rows } = await ctx.executor.query<RawYoyRow>(collectionsYoySql(), [
+    ...params,
+    facilityScopeParam(ctx.facilityScope),
+  ]);
   const r = rows[0];
 
   const result: CollectionsYoy = {

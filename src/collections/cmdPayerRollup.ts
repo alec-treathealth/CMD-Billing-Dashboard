@@ -13,6 +13,7 @@
  * lightweight non-PHI audit line (no claims.query_log — same posture as daily.ts).
  */
 import type { Expect, HasNoPhiKey, PayerGapRow, PayerGapSummary } from '../queries/types.js';
+import { facilityScopeParam } from './facilityScope.js';
 import type { CollectionsQueryContext } from './daily.js';
 import { assertEntityScope } from './entityScope.js';
 
@@ -51,10 +52,28 @@ export interface CmdPayerMonthResult {
  */
 export function cmdPayerMonthSql(): string {
   return (
-    `select payer_name, facility_name, total_charge, total_allowed, total_paid, charge_line_count ` +
-    `from collections.cmd_payer_facility_monthly ` +
-    `where service_year = $1 and service_month = $2 and business_entity_id = any($3::uuid[]) ` +
-    `order by payer_name, total_charge desc`
+    `select m.payer_name, m.facility_name, m.total_charge, m.total_allowed, m.total_paid, m.charge_line_count ` +
+    // ⚠ ALIASED `m`, AND THE ALIAS IS LOAD-BEARING. collections.facilities ALSO has a
+    // `facility_name` column, so an unqualified `facility_name` inside the EXISTS below would bind
+    // to the INNER relation and the correlation would silently degrade to `fe.facility_name =
+    // fe.facility_name` — always true, narrowing nothing. Same trap cmdExplorerQuery's branch 3
+    // documents for `id`. Qualify every outer column.
+    `from collections.cmd_payer_facility_monthly m ` +
+    `where m.service_year = $1 and m.service_month = $2 and m.business_entity_id = any($3::uuid[]) ` +
+    // 0112 FACILITY ENTITLEMENT ($4). NULL = unrestricted, empty array = deny all.
+    //
+    // This table stores facility_NAME, not facility_code, so the grant is resolved through the same
+    // two-path crosswalk the explorer uses: exact dimension name, else the alias table. Measured
+    // 2026-09-11: 2,610 of 2,611 rows resolve (99.96%); the ONLY unresolvable value is the literal
+    // 'No Facility', which R2 hides from a scoped user anyway. So a scoped user loses exactly the
+    // bucket the ruling already denies them, and nothing else.
+    `and ($4::text[] is null or (` +
+    `exists (select 1 from collections.facilities fe ` +
+    `where upper(fe.facility_name) = upper(m.facility_name) and fe.facility_code = any($4::text[])) or ` +
+    `exists (select 1 from collections.cmd_facility_aliases a ` +
+    `where upper(a.facility_text) = upper(m.facility_name) and a.facility_code = any($4::text[]))` +
+    `)) ` +
+    `order by m.payer_name, m.total_charge desc`
   );
 }
 
@@ -179,7 +198,14 @@ export async function cmdPayerMonth(
     throw new Error('month must be an integer in [1, 12]');
   }
   const entityIds = assertEntityScope(ctx.entityIds, 'cmdPayerMonth');
-  const { rows } = await ctx.executor.query<RawRollupRow>(cmdPayerMonthSql(), [year, month, entityIds]);
+  const { rows } = await ctx.executor.query<RawRollupRow>(cmdPayerMonthSql(), [
+    year,
+    month,
+    entityIds,
+    // $4 — 0112 facility entitlement. This reader returns a per-FACILITY breakdown
+    // (`by_facility`), so without it a facility-scoped `user` sees every facility in their tenant.
+    facilityScopeParam(ctx.facilityScope),
+  ]);
   const result = rollupRowsToMonthResult(rows, year, month);
   emitAudit(ctx, { year, month, payers: result.summary.by_payer.length, facility_rows: result.by_facility.length });
   return result;

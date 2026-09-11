@@ -12,7 +12,8 @@ const EXPECTED_SQL =
   `round(coalesce(sum(insurance_paid) filter (where payment_date >= $1::date and payment_date <= $2::date), 0)::numeric, 2) as current_ytd_paid, ` +
   `round(coalesce(sum(insurance_paid) filter (where payment_date >= $3::date and payment_date <= $4::date), 0)::numeric, 2) as prior_ytd_paid, ` +
   `round(coalesce(sum(insurance_paid) filter (where payment_date >= $3::date and payment_date <= $5::date), 0)::numeric, 2) as prior_full_year_paid ` +
-  `from collections.payment_lines`;
+  `from collections.payment_lines ` +
+  `where ($6::text[] is null or facility_code = any($6::text[]))`;
 
 function fakeExecutor(
   rows: Record<string, unknown>[],
@@ -96,13 +97,15 @@ test('collectionsYoy: maps pg-string numerics, echoes years, one non-PHI audit l
   assert.equal(out.current_ytd_paid, 28291649.01);
   assert.equal(out.prior_ytd_paid, 17774280.4);
   assert.equal(out.prior_full_year_paid, 35548560.8);
-  // The derived date bounds reach the executor as $1..$5.
+  // The derived date bounds reach the executor as $1..$5, with the 0112 facility scope as $6.
+  // NULL = unrestricted (this fixture's ctx omits the field); an empty array would deny all.
   assert.deepEqual(cap.params, [
     '2026-01-01',
     '2026-06-24',
     '2025-01-01',
     '2025-06-24',
     '2025-12-31',
+    null,
   ]);
   assert.equal(audit.length, 1);
   assert.equal(JSON.parse(audit[0]!).event, 'collections_yoy');

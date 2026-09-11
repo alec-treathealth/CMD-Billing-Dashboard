@@ -29,6 +29,8 @@ import {
 import { cmdExplorerBaseConds } from '../../src/collections/cmdExplorerQuery';
 import { collectionsMonthlySummarySql } from '../../src/collections/summary';
 import { collectionsDailySql, collectionsKpisSql } from '../../src/collections/daily';
+import { cmdPayerMonthSql } from '../../src/collections/cmdPayerRollup';
+import { collectionsYoySql } from '../../src/collections/collectionsYoy';
 
 // ---------------------------------------------------------------------------
 // allowedFacilitiesFor — null vs [] in BOTH directions
@@ -438,4 +440,59 @@ test('readers: the non-cached scope-bearing functions are not defaulted either',
     /(facilityScope|entitledFacilities)\s*:\s*FacilityScope\s*=\s*UNRESTRICTED_FACILITIES/,
     'no scope parameter anywhere in server.ts may default to unrestricted',
   );
+});
+
+// ---------------------------------------------------------------------------
+// THE TWO OVERVIEW READERS THAT WERE MISSED (Alec, 2026-09-11)
+//
+// R1 put "the Overview aggregates" in scope from the start. Three were narrowed (summary, daily,
+// KPIs) and two were NOT, because I traced the surfaces I had already touched rather than the
+// surfaces a `user` can REACH. Both are reachable: a role='user' with entity='bxr' loads
+// /dashboard (nav-model BASE_LINKS includes Overview; the page gates only admissions_seat and an
+// empty allowlist), and both Server Actions pass viewEntityScope for that principal.
+//
+//   · loadCmdPayerMonth  -> cmd_payer_facility_monthly, which returns a per-FACILITY breakdown
+//     (`by_facility`). Tenant-gated, never facility-gated. The worst of the two: facility-grained
+//     money for every facility in the tenant.
+//   · loadCollectionsYoy -> payment_lines. Aggregate grain, not per-facility, but still whole-
+//     tenant money on an Overview tile.
+//
+// Not in scope, and the distinction matters: loadPayerGapRange / loadPayerGapCmd return
+// `by_payer` ONLY (no facility grain), and loadFacilityDimension returns roster reference data
+// (code/name/care_setting). Those three carry a real PRE-EXISTING tenancy gap — no viewEntityScope
+// at all — which is a different bug, filed rather than fixed here.
+// ---------------------------------------------------------------------------
+
+test('payer month: the per-facility breakdown is facility-narrowed via the name crosswalk', () => {
+  const sql = cmdPayerMonthSql();
+  assert.match(sql, /\$4::text\[\] is null or/, 'unrestricted escape missing');
+  // The table stores facility_NAME, not facility_code, so the grant resolves through the same
+  // two-path crosswalk the explorer uses. Measured 2026-09-11: 2,610/2,611 rows resolve (99.96%);
+  // the only unresolvable value is 'No Facility', which R2 hides from a scoped user anyway.
+  assert.match(sql, /collections\.facilities fe/, 'exact dimension-name path missing');
+  assert.match(sql, /collections\.cmd_facility_aliases a/, 'alias crosswalk path missing');
+});
+
+test('payer month: the outer table is ALIASED so the crosswalk correlates correctly', () => {
+  // collections.facilities ALSO has a `facility_name` column. An unqualified `facility_name`
+  // inside the EXISTS would bind to the INNER relation, degrading the correlation to
+  // `fe.facility_name = fe.facility_name` — always true, narrowing NOTHING, with no error.
+  // The same trap cmdExplorerQuery's branch 3 documents for `id`.
+  const sql = cmdPayerMonthSql();
+  assert.match(sql, /from collections\.cmd_payer_facility_monthly m\b/, 'outer table must be aliased');
+  assert.match(sql, /upper\(fe\.facility_name\) = upper\(m\.facility_name\)/, 'correlation must be qualified');
+  assert.match(sql, /upper\(a\.facility_text\) = upper\(m\.facility_name\)/, 'correlation must be qualified');
+});
+
+test('yoy: payment_lines is facility-narrowed on its native facility_code', () => {
+  const sql = collectionsYoySql();
+  assert.match(sql, /\$6::text\[\] is null or facility_code = any\(\$6::text\[\]\)/, 'yoy unscoped');
+});
+
+test('yoy: the cached wrapper takes the scope as an ARGUMENT, so it keys the entry', () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../lib/server.ts'), 'utf8');
+  const start = src.indexOf('export const dashboardCollectionsYoy = unstable_cache');
+  const body = src.slice(start, src.indexOf("['dashboard-collections-yoy']", start));
+  assert.match(body, /facilityScope:\s*FacilityScope/, 'yoy must take the scope as a parameter');
+  assert.doesNotMatch(body, /viewFacilityScope|dashboardAccess/, 'must not resolve the scope inside the callback');
 });

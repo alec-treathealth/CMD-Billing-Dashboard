@@ -2420,10 +2420,10 @@ export const dashboardCollectionsKpisOverview = unstable_cache(
  * shared DASHBOARD_CACHE_TAG busts it on ingest. Reader projects only non-PHI sums.
  */
 export const dashboardCollectionsYoy = unstable_cache(
-  async (asOf: string): Promise<CollectionsYoy> =>
+  async (asOf: string, facilityScope: FacilityScope): Promise<CollectionsYoy> =>
     collectionsYoy(
       { as_of: asOf },
-      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard' },
+      { executor: readerExecutor(), createdBy: 'phase71-collections-dashboard', facilityScope },
     ),
   ['dashboard-collections-yoy'],
   { revalidate: DASHBOARD_REVALIDATE_SECONDS, tags: [DASHBOARD_CACHE_TAG] },
@@ -2579,11 +2579,14 @@ export async function payerCmdMonth(
   year: number,
   month: number,
   entityIds: string[],
+  /** 0112 facility entitlement — REQUIRED. This reader returns a per-facility breakdown. */
+  facilityScope: FacilityScope,
 ): Promise<CmdPayerMonthResult> {
   return cmdPayerMonth(year, month, {
     executor: readerExecutor(),
     createdBy: 'phase71-collections-dashboard',
     entityIds,
+    facilityScope,
   });
 }
 
