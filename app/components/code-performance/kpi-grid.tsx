@@ -41,12 +41,15 @@ import { MetricHint } from './metric-hint';
 
 // Labels are the keys verbatim — kept as an explicit Record rather than rendering the key directly
 // so a preset can be relabelled without changing the value that reaches the query.
+// Labels are the band keys verbatim — "30-45" reads as an AGE RANGE in days, which is what the
+// preset now is. Kept as an explicit Record so a band can be relabelled without changing the value
+// that reaches the query.
 const WINDOW_LABEL: Record<CodePerfWindow, string> = {
-  '45d': '45d',
-  '60d': '60d',
-  '90d': '90d',
-  '6mo': '6mo',
-  '1yr': '1yr',
+  '30-45': '30-45d',
+  '46-60': '46-60d',
+  '61-90': '61-90d',
+  '91-180': '91-180d',
+  '181-365': '181-365d',
 };
 
 export function MaturityBanner({ maturedShare }: { maturedShare: number | null }) {

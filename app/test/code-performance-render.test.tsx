@@ -185,7 +185,7 @@ test('maturity guard: banner names velocity-not-yield; yield headers and cells a
 
 test('KPI grid: coverage rides with the allowed tile; gated tiles show Suppressed + reason; nothing truncates', () => {
   const board = {
-    tenant: 'indigo' as const, window: '6mo' as const, windowDays: 180, windowStart: '2026-03-12', windowEnd: '2026-09-08',
+    tenant: 'indigo' as const, window: '91-180' as const, windowDays: 180, windowStart: '2026-03-12', windowEnd: '2026-09-08',
     facilitiesApplied: null, summary: indigoSummary, immatureWindow: false, rows: [], facilityOptions: [],
     freshness: { businessToday: '2026-09-08', maxIngestedAt: null, maxChargeDate: '2026-08-23', maxPaymentReceived: null, futurePaymentCharges: 114, chargeLagDays: 16 },
     descriptions,

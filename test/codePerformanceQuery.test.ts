@@ -54,7 +54,7 @@ import {
 
 const BXR = 'af504ab6-3dcd-4aa4-a93c-27bc58de4088';
 const INDIGO = '141d459c-f371-4229-9a92-ace198e940bb';
-const SCOPE: CodePerfScope = { entityId: BXR, windowDays: 180, facilities: null };
+const SCOPE: CodePerfScope = { entityId: BXR, band: '91-180', facilities: null };
 const PAIR = { hcpcs: 'H2013', locSuffix: 'IOP', revcode: '0913' };
 
 const BUSINESS_TODAY = "(now() at time zone 'America/Los_Angeles')::date";
@@ -78,27 +78,32 @@ function allBuilderSql(): Array<[string, string]> {
 // Input clamps
 // ---------------------------------------------------------------------------------------------
 
-test('window: the five presets resolve to their day counts; anything else falls back to 6mo', () => {
-  // Set changed 2026-09-11 (Alec): 30d dropped, 45d and 1yr added. See the maturity-boundary test
-  // below for why 45d can never contain a matured charge — and why that is accepted rather than a
-  // defect.
-  assert.deepEqual(CODE_PERF_WINDOWS, { '45d': 45, '60d': 60, '90d': 90, '6mo': 180, '1yr': 365 });
-  assert.equal(CODE_PERF_DEFAULT_WINDOW, '6mo');
-  for (const k of ['45d', '60d', '90d', '6mo', '1yr'] as const) assert.equal(resolveCodePerfWindow(k), k);
+test('bands: the five presets resolve to lo/hi day offsets; anything else falls back to the default', () => {
+  // Presets became AGE BANDS on 2026-09-11 (Alec: "30-45 then 46-60"). A band is the charges aged
+  // lo..hi days, i.e. dates [today - hi, today - lo] — non-overlapping, and none includes the most
+  // recent `lo` days.
+  assert.deepEqual(CODE_PERF_WINDOWS, {
+    '30-45': { lo: 30, hi: 45 },
+    '46-60': { lo: 46, hi: 60 },
+    '61-90': { lo: 61, hi: 90 },
+    '91-180': { lo: 91, hi: 180 },
+    '181-365': { lo: 181, hi: 365 },
+  });
+  assert.equal(CODE_PERF_DEFAULT_WINDOW, '91-180');
+  for (const k of CODE_PERF_WINDOW_KEYS) assert.equal(resolveCodePerfWindow(k), k);
   // Render order IS the object order — WindowSelector maps CODE_PERF_WINDOW_KEYS — so ascending
-  // order is a UI contract, not a formatting preference.
-  assert.deepEqual(CODE_PERF_WINDOW_KEYS, ['45d', '60d', '90d', '6mo', '1yr']);
-  // A RETIRED key must fall back, not resolve: anything holding a stale '30d' (a bookmark, a
-  // persisted preference) lands on the default rather than erroring or silently querying 30 days.
-  assert.equal(resolveCodePerfWindow('30d'), '6mo');
-  assert.equal(resolveCodePerfWindow('12mo'), '6mo');
-  assert.equal(resolveCodePerfWindow(''), '6mo');
-  assert.equal(resolveCodePerfWindow(45), '6mo');
-  assert.equal(resolveCodePerfWindow(undefined), '6mo');
+  // age order is a UI contract, not a formatting preference.
+  assert.deepEqual(CODE_PERF_WINDOW_KEYS, ['30-45', '46-60', '61-90', '91-180', '181-365']);
+  // RETIRED keys must fall back, not resolve. The whole previous vocabulary is stale now, so a
+  // bookmark or persisted preference holding any of it lands on the default rather than erroring.
+  for (const stale of ['30d', '45d', '60d', '90d', '6mo', '1yr', '12mo', '']) {
+    assert.equal(resolveCodePerfWindow(stale), '91-180', `${stale} must fall back`);
+  }
+  assert.equal(resolveCodePerfWindow(45), '91-180');
+  assert.equal(resolveCodePerfWindow(undefined), '91-180');
   // A non-string whose toString() is a VALID key must still be rejected — the guard is a typeof
-  // check, not a coercion. (This used to pass '30d', which stopped proving anything once that key
-  // was retired: it would now fall back for the wrong reason.)
-  assert.equal(resolveCodePerfWindow({ toString: () => '45d' }), '6mo');
+  // check, not a coercion.
+  assert.equal(resolveCodePerfWindow({ toString: () => '46-60' }), '91-180');
 });
 
 test('facilities: null means ALL; blanks and non-strings drop; trimmed, de-duped, capped; never []', () => {
@@ -146,14 +151,16 @@ test('every builder: no select *, no avg(), never reads pct_allowed / pct_paid, 
   }
 });
 
-test('window: a trailing N-day window is N civil dates ENDING today — [today − N + 1, today], the businessWindow.ts trailing contract', () => {
-  // src/businessWindow.ts: to = today + 1, from = to − days → exactly `days` dates including today.
-  // The first draft's `today − N` start was N + 1 dates: "30d" covered 31 days (Qodo #346 finding 4).
+test('bands: the window is [today − hi, today − lo] — an age band, NOT a trailing window', () => {
+  // ⚠ THIS TEST IS THE INVERSE OF THE ONE IT REPLACES. It asserted the businessWindow.ts trailing
+  // contract — `today − N + 1` start, and NO bare `today − N` anywhere (Qodo #346 finding 4). Bands
+  // changed that deliberately: the start IS `today − hi` and the end is `today − lo`, so `+ 1` on
+  // the start is now the bug and its absence is the requirement.
   const windowed = allBuilderSql().filter(([n]) => !['freshness', 'descriptions'].includes(n));
   assert.equal(windowed.length, 7, 'six base-CTE builders plus the facility vocabulary');
   for (const [name, sql] of windowed) {
-    assert.ok(sql.includes(`${BUSINESS_TODAY} - $2::int + 1`), `${name}: start is today − N + 1`);
-    assert.ok(!/- \$2::int(?! \+ 1)/.test(sql), `${name}: no today − N start anywhere`);
+    assert.ok(sql.includes(`${BUSINESS_TODAY} - $2::int`), `${name}: band start is today − hi`);
+    assert.ok(!sql.includes('$2::int + 1'), `${name}: the trailing-window \`+ 1\` start must be gone`);
   }
 });
 
@@ -165,7 +172,8 @@ test('every windowed builder: normalisation on read, tenant param, business-day 
     assert.ok(sql.includes(LOC_SUFFIX_SQL), `${name}: loc_suffix kept`);
     assert.ok(sql.includes(REVCODE_NORM_SQL), `${name}: revcode lpad`);
     assert.ok(sql.includes('r.business_entity_id = $1::uuid'), `${name}: tenant param`);
-    assert.ok(sql.includes(`${BUSINESS_TODAY} - $2::int + 1 as s`), `${name}: window start (N dates ending today)`);
+    assert.ok(sql.includes(`${BUSINESS_TODAY} - $2::int as s`), `${name}: band start (today − hi)`);
+    assert.ok(sql.includes(`${BUSINESS_TODAY} - $4::int as e`), `${name}: band end (today − lo), NOT today`);
     assert.ok(sql.includes('r.charge_date >= w.s and r.charge_date < w.e + 1'), `${name}: half-open window`);
     assert.ok(sql.includes('($3::text[] is null or r.facility = any($3::text[]))'), `${name}: facility param`);
   }
@@ -204,13 +212,20 @@ test('metrics: sum-over-sum with the reliable-tier gate, unclamped paid_of_allow
   assert.ok(sql.includes('sum(adjustments) / nullif(sum(charge_amount), 0)'), 'write_off_rate');
   assert.ok(sql.includes('sum(patient_balance_due) / nullif(sum(charge_amount), 0)'), 'patient_balance_rate');
   assert.equal(CODE_PERF_MATURITY_DAYS, 45);
-  assert.ok(sql.includes(`count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / nullif(count(*), 0)`), 'matured_share');
+  // ⚠ PINNED TO BUSINESS-TODAY, NOT `e`. Under trailing windows `e` WAS business-today, so
+  // `e - 45` happened to be right. A band's `e` is today − lo, so `e - 45` would drift by lo days
+  // and silently mis-report maturity — for 46-60 it would have tested against today − 91.
+  assert.ok(
+    sql.includes(`count(*) filter (where charge_date <= ${BUSINESS_TODAY} - ${CODE_PERF_MATURITY_DAYS}) / nullif(count(*), 0)`),
+    'matured_share must be pinned to business-today, not the band end',
+  );
+  assert.ok(!sql.includes(`charge_date <= e - ${CODE_PERF_MATURITY_DAYS}`), 'maturity must not key off `e`');
   assert.ok(!sql.includes('max(e) - 45'), 'the spec\'s aggregate-inside-FILTER shape is NOT emitted');
 });
 
 test('pairing: grain, payer concentration, facility spread with the 30-charge floor, NULL-safe joins, fixed order', () => {
   const q = buildCodePerfPairingQuery(SCOPE);
-  assert.deepEqual(q.params, [BXR, 180, null]);
+  assert.deepEqual(q.params, [BXR, 180, null, 91]);
   assert.ok(q.sql.includes('group by hcpcs, loc_suffix, revcode'));
   assert.ok(q.sql.includes('count(distinct payer_raw)::int'));
   assert.ok(q.sql.includes('count(distinct facility)::int'));
@@ -233,12 +248,14 @@ test('pairing: grain, payer concentration, facility spread with the 30-charge fl
   assert.equal((q.sql.match(/is not distinct from/g) ?? []).length, 6, 'both joins NULL-safe on all three keys');
   assert.ok(q.sql.includes('(max(e) - max(charge_date))::int                                 as days_idle'));
   assert.ok(q.sql.trimEnd().endsWith('order by p.billed desc, p.hcpcs nulls last, p.loc_suffix nulls last, p.revcode nulls last'));
-  assert.ok(!/\$[4-9]/.test(q.sql), 'exactly three params');
+  // FOUR params now: entity, band HI, facilities, band LO. $5+ would mean a pair predicate leaked
+  // into a query that has no pair.
+  assert.ok(!/\$[5-9]/.test(q.sql), 'exactly four params');
 });
 
 test('window summary: one row with window bounds, no-code counts on both slots, and the window-level maturity', () => {
   const q = buildCodePerfWindowSummaryQuery(SCOPE);
-  assert.deepEqual(q.params, [BXR, 180, null]);
+  assert.deepEqual(q.params, [BXR, 180, null, 91]);
   assert.ok(q.sql.includes('max(s)                                                             as window_start'));
   assert.ok(q.sql.includes('max(e)                                                             as window_end'));
   assert.ok(q.sql.includes("count(*) filter (where hcpcs is null or hcpcs = '—')::int          as no_procedure_code_charges"));
@@ -254,14 +271,17 @@ test('window summary: one row with window bounds, no-code counts on both slots, 
 
 test('payer + facility drill-downs: pair key rides as three NULL-safe text params after the scope', () => {
   for (const q of [buildCodePerfPayerQuery(SCOPE, PAIR), buildCodePerfFacilityQuery(SCOPE, PAIR)]) {
-    assert.deepEqual(q.params, [BXR, 180, null, 'H2013', 'IOP', '0913']);
-    assert.ok(q.sql.includes('hcpcs is not distinct from $4::text'));
-    assert.ok(q.sql.includes('loc_suffix is not distinct from $5::text'));
-    assert.ok(q.sql.includes('revcode is not distinct from $6::text'));
-    assert.ok(!/\$[7-9]/.test(q.sql));
+    assert.deepEqual(q.params, [BXR, 180, null, 91, 'H2013', 'IOP', '0913']);
+    assert.ok(q.sql.includes('hcpcs is not distinct from $5::text'));
+    assert.ok(q.sql.includes('loc_suffix is not distinct from $6::text'));
+    assert.ok(q.sql.includes('revcode is not distinct from $7::text'));
+    // $7 is the revcode param now (shifted from $6 when the band's LO took $4), so only $8+ is out.
+    assert.ok(!/\$[8-9]/.test(q.sql));
   }
   const nulls = buildCodePerfPayerQuery(SCOPE, { hcpcs: null, locSuffix: null, revcode: null });
-  assert.deepEqual(nulls.params.slice(3), [null, null, null], 'a NULL-keyed pairing is addressable');
+  // slice(4), not slice(3): the pair key now starts at index 4 because the band's LO bound sits at
+  // index 3 ($4). Slicing from 3 would swallow the LO value and compare it against the pair.
+  assert.deepEqual(nulls.params.slice(4), [null, null, null], 'a NULL-keyed pairing is addressable');
 });
 
 test('payer level: grouped by the RAW payer string, share of the pairing\'s billed, billed desc', () => {
@@ -285,22 +305,29 @@ test('facility level: EVERY facility returned with a rated flag — the core spl
 
 test('monthly: date_trunc month series with allowed_rate + matured_share; pair filter is optional', () => {
   const whole = buildCodePerfMonthlyQuery(SCOPE);
-  assert.deepEqual(whole.params, [BXR, 180, null]);
+  assert.deepEqual(whole.params, [BXR, 180, null, 91]);
   assert.ok(whole.sql.includes("date_trunc('month', charge_date)::date"));
   assert.ok(whole.sql.includes('as matured_share'));
   assert.ok(whole.sql.includes('as allowed_rate'));
-  assert.ok(!whole.sql.includes('$4'), 'no pair predicate without a pair');
+  // $4 is the band's LO bound and is ALWAYS present; the pair predicate starts at $5, so that is
+  // what must be absent when no pair is supplied.
+  assert.ok(whole.sql.includes('$4'), 'the band LO bound is always bound');
+  assert.ok(!whole.sql.includes('$5'), 'no pair predicate without a pair');
   assert.ok(/group by 1\norder by 1$/.test(whole.sql.trimEnd()));
   const one = buildCodePerfMonthlyQuery(SCOPE, PAIR);
-  assert.deepEqual(one.params, [BXR, 180, null, 'H2013', 'IOP', '0913']);
-  assert.ok(one.sql.includes('where hcpcs is not distinct from $4::text'));
+  assert.deepEqual(one.params, [BXR, 180, null, 91, 'H2013', 'IOP', '0913']);
+  assert.ok(one.sql.includes('where hcpcs is not distinct from $5::text'));
 });
 
 test('facility options: tenant + window only, ignores the facility filter, keeps "No Facility" as a value', () => {
   const q = buildCodePerfFacilityOptionsQuery({ ...SCOPE, facilities: ['TELEHEALTH MH LLC'] });
-  assert.deepEqual(q.params, [BXR, 180], 'the facility filter never reaches the vocabulary query');
+  // [entity, HI, LO] — the vocabulary query takes the band bounds but NOT the facility filter.
+  assert.deepEqual(q.params, [BXR, 180, 91], 'the facility filter never reaches the vocabulary query');
   assert.ok(q.sql.includes('group by r.facility'));
-  assert.ok(!q.sql.includes('$3'));
+  // The vocabulary query binds [entity, HI, LO] — $3 is its LO bound, not a facility filter. $4
+  // would mean the facility array leaked in, which is what this test exists to prevent.
+  assert.ok(q.sql.includes('$3'), 'the band LO bound is bound');
+  assert.ok(!q.sql.includes('$4'), 'the facility filter never reaches the vocabulary query');
   assert.ok(!/No Facility|where .*facility\s*<>/.test(q.sql), 'nothing is hardcoded or excluded');
 });
 
@@ -339,13 +366,25 @@ test('descriptions: distinct-on precedence — tenant row wins, global falls bac
 // Scope guard
 // ---------------------------------------------------------------------------------------------
 
-test('scope: a malformed or missing tenant throws before any SQL is built; a bad day count falls back to 180', () => {
+test('scope: a malformed tenant throws before any SQL; an unknown band falls back to the default', () => {
   assert.throws(() => buildCodePerfPairingQuery({ ...SCOPE, entityId: '' }), /canonical business_entity_id/);
   assert.throws(() => buildCodePerfPairingQuery({ ...SCOPE, entityId: 'x' }), /canonical business_entity_id/);
-  assert.deepEqual(buildCodePerfPairingQuery({ ...SCOPE, windowDays: 0 }).params, [BXR, 180, null]);
-  assert.deepEqual(buildCodePerfPairingQuery({ ...SCOPE, windowDays: 400 }).params, [BXR, 180, null]);
-  assert.deepEqual(buildCodePerfPairingQuery({ ...SCOPE, windowDays: 30.5 }).params, [BXR, 180, null]);
-  assert.deepEqual(buildCodePerfPairingQuery({ ...SCOPE, windowDays: 30, facilities: ['A', 'B'] }).params, [BXR, 30, ['A', 'B']]);
+  // Params are [entity, HI, facilities, LO] — lo is $4, appended so the entity/facility positions
+  // every builder already references stay put.
+  assert.deepEqual(buildCodePerfPairingQuery(SCOPE).params, [BXR, 180, null, 91]);
+  assert.deepEqual(
+    buildCodePerfPairingQuery({ ...SCOPE, band: '30-45', facilities: ['A', 'B'] }).params,
+    [BXR, 45, ['A', 'B'], 30],
+  );
+  // A stale key (the pre-band trailing windows, or anything else) resolves to the default rather
+  // than reaching the SQL — so a persisted preference cannot produce a band nobody designed.
+  for (const stale of ['6mo', '90d', '45d', '', 'nope']) {
+    assert.deepEqual(
+      buildCodePerfPairingQuery({ ...SCOPE, band: stale as never }).params,
+      [BXR, 180, null, 91],
+      `${stale} must fall back to the default band`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -470,32 +509,35 @@ test('shapeCodePerfPairingRow: pg-shaped row → typed row with coerced numbers,
 });
 
 
-test('maturity boundary: 45d is immature-ONLY, and 46 is the first preset that is not', () => {
-  // ⚠ THIS ENCODES AN OFF-BY-ONE THAT WAS ASSERTED BACKWARDS FIRST. The original comment on
-  // CODE_PERF_WINDOWS claimed 45d was "the first window whose charges can have matured". It is the
-  // LAST window whose charges can never have matured, because the two ranges are computed from
-  // opposite ends:
-  //
-  //   window   [today - N + 1, today]                    → earliest = today - N + 1
-  //   matured  charge_date <= today - CODE_PERF_MATURITY_DAYS
-  //
-  // so a preset contains matured dates only when N >= CODE_PERF_MATURITY_DAYS + 1.
-  const firstMatureCapable = CODE_PERF_MATURITY_DAYS + 1;
-  assert.equal(firstMatureCapable, 46, 'maturity is 45 days, so 46 is the smallest capable preset');
+test('maturity boundary: only the FIRST band is immature; every later band is fully matured', () => {
+  // Bands changed the shape of this problem rather than solving it by accident, so the assertion
+  // is rewritten rather than deleted. A band covers [today - hi, today - lo]; a charge is matured
+  // at charge_date <= today - CODE_PERF_MATURITY_DAYS. So a band is:
+  //   FULLY matured   when lo > MATURITY  (its newest date is already past the cutoff)
+  //   PARTLY matured  when lo <= MATURITY <= hi
+  const fullyMatured = (lo: number) => lo > CODE_PERF_MATURITY_DAYS;
 
-  const canContainMatured = (n: number) => -n + 1 <= -CODE_PERF_MATURITY_DAYS;
+  // 30-45 straddles the cutoff on purpose — it is the velocity/volume band, and the maturity floor
+  // flags it. Measured live 2026-09-11 on BXR: 11.1% matured.
+  assert.equal(fullyMatured(CODE_PERF_WINDOWS['30-45'].lo), false, '30-45 is the immature band');
+  assert.ok(
+    CODE_PERF_WINDOWS['30-45'].hi >= CODE_PERF_MATURITY_DAYS,
+    'the first band must at least REACH the cutoff, or it could never mature at all',
+  );
 
-  // 45d is immature-only — ACCEPTED, ruled by Alec 2026-09-11 after measurement. It is the same
-  // property the 30d preset it replaced had, so nothing regressed; the KPI grid treats an immature
-  // window as a first-class state. Asserted so a later edit cannot quietly reintroduce the claim
-  // that 45d reports yield.
-  assert.equal(canContainMatured(45), false, '45d must be immature-only');
-  assert.equal(canContainMatured(30), false, 'the 30d it replaced had the same property');
-
-  // Every OTHER preset must be yield-capable — that is the line 45d sits just below.
+  // Every later band must be entirely past the cutoff — that is what makes their yield clean, and
+  // it is the property the old cumulative windows could never have.
   for (const key of CODE_PERF_WINDOW_KEYS) {
-    const days = CODE_PERF_WINDOWS[key];
-    if (days === 45) continue;
-    assert.equal(canContainMatured(days), true, `${key} (${days}d) must be able to report yield`);
+    if (key === '30-45') continue;
+    assert.equal(fullyMatured(CODE_PERF_WINDOWS[key].lo), true, `${key} must be fully matured`);
+  }
+});
+
+test('bands: contiguous, non-overlapping, and ascending — the render order is the age order', () => {
+  const bands = CODE_PERF_WINDOW_KEYS.map((k) => CODE_PERF_WINDOWS[k]);
+  for (const b of bands) assert.ok(b.lo <= b.hi, 'each band runs lo..hi');
+  for (let i = 1; i < bands.length; i += 1) {
+    // Contiguous: no age falls between two bands, and none is covered twice.
+    assert.equal(bands[i]!.lo, bands[i - 1]!.hi + 1, 'bands must be contiguous and non-overlapping');
   }
 });
