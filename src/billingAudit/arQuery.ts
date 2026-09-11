@@ -94,6 +94,17 @@ export interface ArQueueRow {
   last_user_note_at: string | null;
   /** The HUMAN disposition, 'open' when nobody has ruled. The drawer's editor binds to this. */
   work_status: ArWorkStatus;
+  /**
+   * An `ar_claim_work` row EXISTS for this claim — i.e. a person has saved something here.
+   *
+   * ⚠ THIS IS NOT `work_status !== 'open'`, and the difference is a real bug we shipped for one
+   * commit. `'open'` is also a perfectly valid PERSISTED human status: the drawer seeds its editor
+   * from `work_status` and Save sends that value, so assigning someone or setting a due date
+   * upserts a row whose `work_status` is 'open'. Keyed off the status, such a claim rendered as
+   * "nobody has triaged this claim yet" while a named person owned it. Row existence is the only
+   * exact test — assignee / due_on / resolution_code are all still NULL after a status-only save.
+   */
+  has_human_work: boolean;
   /** CMD's snapshot-derived state; NULL until the next snapshot run. Never 'appeal' — no source. */
   cmd_work_state: string | null;
   /**
@@ -390,7 +401,8 @@ export function buildArQueueQuery(
     // `work_status` stays the HUMAN value: the drawer's editor is seeded from it and saving writes
     // it back, so serving CMD's derivation here would launder a guess into somebody's ruling on the
     // first Save. `effective_work_state` is what the row displays and what the chips filter on.
-    `coalesce(w.work_status, 'open') as work_status, c.cmd_work_state, ` +
+    `coalesce(w.work_status, 'open') as work_status, ` +
+    `(w.cmd_claim_id is not null) as has_human_work, c.cmd_work_state, ` +
     `${arWorkStateSql(asOfParam)} as effective_work_state, ` +
     `w.assignee_user_id::text as assignee_user_id, w.assignee_email, ` +
     `${dateOut('w.due_on')} as due_on, w.resolution_code, ${tsOut('c.last_seen_at')} as last_seen_at, c.in_latest_snapshot ` +

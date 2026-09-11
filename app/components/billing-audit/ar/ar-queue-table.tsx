@@ -241,10 +241,11 @@ export function ArQueueTable({ view, canRevealPhi, filter, sort, onSort, initial
                     {!r.last_835_status && !r.last_error_code ? <span className="text-ink400">—</span> : null}
                   </TableCell>
                   {/* The EFFECTIVE state, outlined when it is CMD's inference rather than a
-                      person's ruling. `work_status === 'open'` is exactly "no human has ruled",
-                      because ar_set_work is the only writer of that column. */}
+                      person's ruling. ⚠ Keyed on ROW EXISTENCE, not on work_status — 'open' is
+                      also a valid saved human status (an assignee-only save writes one), and
+                      keying off the value labelled those person-owned claims "not yet triaged". */}
                   <TableCell className={CELL}>
-                    <WorkChip status={r.effective_work_state} derived={r.work_status === 'open'} />
+                    <WorkChip status={r.effective_work_state} derived={!r.has_human_work} />
                   </TableCell>
                   <TableCell className={`${CELL} text-xs text-ink600`}>{r.assignee_email ? r.assignee_email.split('@')[0] : <span className="text-ink400">—</span>}</TableCell>
                   <TableCell className={`${CELL} ths-num text-xs ${overdue ? 'font-semibold text-status-danger' : 'text-ink600'}`}>{followup ? shortDate(followup) : <span className="text-ink400">—</span>}</TableCell>

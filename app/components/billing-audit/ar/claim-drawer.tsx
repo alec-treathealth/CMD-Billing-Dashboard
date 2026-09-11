@@ -262,8 +262,10 @@ export function ClaimDrawer({ view, canRevealPhi, canWork, target, assignees, on
                 {/* Shows the EFFECTIVE state, outlined while it is still CMD's inference. The
                     editor below is seeded from c.work_status (the human column) — NOT from this —
                     so opening a claim and pressing Save cannot silently promote CMD's guess into
-                    somebody's recorded decision. */}
-                <Fact label="Work" value={<WorkChip status={c.effective_work_state} derived={c.work_status === 'open'} />} />
+                    somebody's recorded decision. ⚠ `has_human_work` is row existence, not
+                    `work_status !== 'open'`: this editor's own Save writes an 'open' row whenever
+                    a user changes only the assignee or the due date. */}
+                <Fact label="Work" value={<WorkChip status={c.effective_work_state} derived={!c.has_human_work} />} />
                 <Fact label="Codes" value={`${c.cpt_codes.join(' ') || '—'}${c.rev_codes.length ? ` / rev ${c.rev_codes.join(' ')}` : ''}`} mono />
                 <Fact label="Type of bill" value={c.type_of_bill ?? '—'} mono />
                 <Fact label="Claim type" value={c.claim_type === 'I' ? 'Institutional' : c.claim_type === 'P' ? 'Professional' : c.claim_type ?? '—'} />

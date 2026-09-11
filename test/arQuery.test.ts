@@ -179,8 +179,15 @@ test('work-status chips: a human ruling wins, CMD stands in when there is none, 
   // The projection serves BOTH: the human column (what the drawer's editor binds to) and the
   // effective state (what the row displays). Serving only the effective one would let a Save
   // launder CMD's inference into somebody's recorded ruling.
-  assert.match(q.sql, /coalesce\(w\.work_status, 'open'\) as work_status, c\.cmd_work_state, /);
+  assert.match(q.sql, /coalesce\(w\.work_status, 'open'\) as work_status, /);
   assert.match(q.sql, /end\) as effective_work_state/);
+
+  // …plus ROW EXISTENCE, which is what tells the UI whether a person has been here. It must be the
+  // join's own null-ness, NOT a comparison against 'open': the drawer's Save sends the seeded
+  // status, so changing only an assignee or a due date persists a work row whose work_status IS
+  // 'open'. Keyed off the value, those person-owned claims rendered as "nobody has triaged this".
+  assert.match(q.sql, /\(w\.cmd_claim_id is not null\) as has_human_work/);
+  assert.equal(/as has_human_work[\s\S]{0,40}work_status <> 'open'/.test(q.sql), false);
 
   // Values stay bound, never inlined.
   assert.equal(q.sql.includes("'in_progress'])"), false);

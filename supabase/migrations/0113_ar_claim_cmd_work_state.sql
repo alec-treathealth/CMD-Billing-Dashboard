@@ -67,9 +67,49 @@ comment on column claims.ar_claim.cmd_work_state is
 create index if not exists ar_claim_cmd_work_state_idx
   on claims.ar_claim (business_entity_id, cmd_work_state);
 
--- Grants re-asserted. Table-level SELECT/UPDATE already cover a new column; restated so this
--- migration is self-evidently complete rather than relying on the reader knowing that.
+-- Grants re-asserted. `ar_claim`'s grants are TABLE-level (verified 2026-09-10: all 54 columns
+-- listed for every grantee, which is what a table-level grant expands to), so they already cover a
+-- new column. Restated so this migration is self-evidently complete rather than relying on the
+-- reader knowing that.
 grant select on claims.ar_claim to claims_reader;
 grant select, insert, update on claims.ar_claim to claims_audit_writer;
 
 reset role;
+
+-- ═══ VERIFY AFTER APPLY — MANDATORY, AND NOT OPTIONAL BECAUSE IT LOOKS OBVIOUS ═══════════════
+--
+-- The paragraph above is a PRIVILEGE CLAIM, and this repo has already been burned by reasoning
+-- about one instead of running it: 0106 asserted that `INSERT ... ON CONFLICT DO NOTHING` needs no
+-- SELECT, which is false, and the plain revoke 42501'd the sync immediately. 0105 records the other
+-- half — a grant is only half the gate, because RLS is a SECOND gate that fails by matching ZERO
+-- ROWS rather than by raising (0089/0090/0101/0102 are four migrations in that one chain).
+-- `claims_audit_writer` is NOT rolbypassrls and `claims.ar_claim` carries 4 policies, so both gates
+-- are live here.
+--
+-- ⚠ THIS CANNOT BE CHECKED FROM AN MCP / `postgres` SESSION, AND `has_table_privilege` IS NOT THE
+-- CHECK. Measured 2026-09-10: `pg_has_role('postgres','claims_audit_writer','SET')` is **false** —
+-- postgres cannot assume the writer role at all (the same wall CLAUDE.md records for
+-- claims_reader). And postgres IS rolbypassrls, so any row it writes proves nothing about RLS.
+--
+-- The only instrument that answers "can the writer actually store this column" is the real ingest
+-- running as the real role. After applying, run ONE customer through it and confirm the column
+-- lands — the 0105 pattern, where the proof was the writer inserting 11,161 rows itself:
+--
+--     npm run ingest:ar-snapshot -- --customer 10035974 --commit
+--
+--     select count(*) as claims, count(cmd_work_state) as with_state
+--       from claims.ar_claim where cmd_customer_id = '10035974';
+--
+-- TREAT_CO is the deliberate choice: it is the smallest book on the roster (7 claims, measured
+-- 2026-09-10) so the run is seconds, AND those 7 rows ALREADY EXIST — which is the point. On
+-- pre-existing rows the upsert takes its ON CONFLICT **DO UPDATE** arm, so a pass proves the
+-- writer can UPDATE the new column under its grants and row policies. A fresh-insert-only check
+-- would exercise the easier arm and miss exactly the privilege this migration adds.
+--
+-- PASS = `with_state` equals `claims` (7 of 7). A 42501 is the loud failure; `with_state` = 0 with
+-- no error is the QUIET one — that is RLS matching zero rows, the 0101 shape — and either must be
+-- caught here, before 14:05 UTC takes all 19 accounts through the same statement.
+--
+-- ⚠ Do NOT substitute a `--customer` id that is not on AR_SNAPSHOT_CUSTOMERS: the CLI filters the
+-- roster by that flag, so a wrong id prints `customers=0` and exits 0. The check would pass while
+-- verifying nothing.

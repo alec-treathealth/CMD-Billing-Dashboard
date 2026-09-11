@@ -37,6 +37,11 @@ test('writeArSnapshot: upserts every table with the right conflict key, inside t
   assert.match(byTable('ar_claim')[0]!.sql, /on conflict \(business_entity_id, cmd_claim_id\) do update set/);
   assert.match(byTable('ar_claim')[0]!.sql, /in_latest_snapshot = excluded\.in_latest_snapshot/);
   assert.match(byTable('ar_claim')[0]!.sql, /last_run_id = excluded\.last_run_id/);
+  // A column present in the INSERT list but absent from the DO UPDATE set is the silent-skew shape:
+  // the first snapshot writes it, and every refresh afterwards leaves the stale value in place. The
+  // work state would then freeze at whatever the claim looked like the day it was first ingested.
+  assert.match(byTable('ar_claim')[0]!.sql, /insert into claims\.ar_claim \([^)]*\bcmd_work_state\b/);
+  assert.match(byTable('ar_claim')[0]!.sql, /cmd_work_state = excluded\.cmd_work_state/);
   // 52 columns × 6 rows of parameters (cmd_work_state added by 0113), denial_summary cast to jsonb,
   // code arrays cast to text[]. This count is the tripwire on CLAIM_COLS and claimParams keeping the
   // same length AND the same order — a skew would write values into the wrong columns, silently.
