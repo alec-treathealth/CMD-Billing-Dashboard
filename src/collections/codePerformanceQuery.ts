@@ -45,14 +45,14 @@
  *   patient_balance_rate sum(patient_balance_due) / sum(charge_amount) — BXR ONLY, see SUPPRESSION.
  *                        An AR-AGING concept, not a rate: it is the balance OUTSTANDING AS OF TODAY
  *                        after patient payments, so it decays as patients pay and a 6mo window reads
- *                        lower than 30d on the same charges. Label it that way; never place it beside
+ *                        lower than 45d on the same charges. Label it that way; never place it beside
  *                        allowed_rate as though comparable.
  *   payer_concentration  top payer's billed / total billed for the pairing (raw, unaliased payer strings)
  *   facility_spread      max(allowed_rate) − min(allowed_rate) across facilities within the pairing,
  *                        facilities with >= CODE_PERF_FACILITY_MIN_CHARGES charges only
  *
  * ── WINDOWS + MATURITY GUARD ─────────────────────────────────────────────────────────────────────
- * 30d / 60d / 90d / 6mo (=180d), half-open, anchored on the BUSINESS day in America/Los_Angeles —
+ * 45d / 60d / 90d / 6mo (=180d) / 1yr (=365d), half-open, anchored on the BUSINESS day in America/Los_Angeles —
  * computed IN SQL as (now() at time zone 'America/Los_Angeles')::date so the app never reads a clock:
  *   s := business_today − N,  e := business_today,  charge_date >= s AND charge_date < e + 1.
  * Median days-to-money runs 27–44 days and Indigo's charge feed lags ~15 days, so a short window is
@@ -102,11 +102,37 @@ import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
 // Constants
 // ---------------------------------------------------------------------------------------------
 
-/** Window presets → day counts. `6mo` is 180 days by definition here (documented, not calendar). */
-export const CODE_PERF_WINDOWS = { '30d': 30, '60d': 60, '90d': 90, '6mo': 180 } as const;
+/**
+ * Presets are AGE BANDS, not trailing windows — changed 2026-09-11 (Alec: "30-45 then 46-60").
+ *
+ * A band is the charges aged `lo`..`hi` days inclusive, i.e. the dates
+ * `[today - hi, today - lo]`. Bands are NON-OVERLAPPING and none of them includes the most recent
+ * `lo` days, which is the whole point: a cumulative window always dilutes yield with charges too
+ * young to have been paid, while a band isolates one age cohort.
+ *
+ * ⚠ THIS CHANGES WHAT EVERY NUMBER ON THE SURFACE MEANS. "90d" used to answer "how is the book
+ * doing lately"; "61-90" answers "how do charges of this age perform". Do not describe a band as a
+ * window, and do not compare a band figure to a pre-2026-09-11 window figure.
+ *
+ * WHY THE BOUNDARIES SIT WHERE THEY DO. A charge is matured at CODE_PERF_MATURITY_DAYS (45), so
+ * every band from 46 up is ENTIRELY matured and reports yield cleanly. Measured live 2026-09-11 on
+ * BXR: 30-45 is 11.1% matured (1,569 charges), 46-60 is 100% (1,846), 61-90 is 100% (3,811). The
+ * first band is deliberately the immature one — it reports velocity and volume, and the maturity
+ * floor flags it as such, exactly as the old short windows did.
+ *
+ * ⚠ ORDER IS THE RENDER ORDER. CODE_PERF_WINDOW_KEYS derives from this object and WindowSelector
+ * maps over it, so the buttons appear left-to-right as written. Keep them ascending by age.
+ */
+export const CODE_PERF_WINDOWS = {
+  '30-45': { lo: 30, hi: 45 },
+  '46-60': { lo: 46, hi: 60 },
+  '61-90': { lo: 61, hi: 90 },
+  '91-180': { lo: 91, hi: 180 },
+  '181-365': { lo: 181, hi: 365 },
+} as const;
 export type CodePerfWindow = keyof typeof CODE_PERF_WINDOWS;
 export const CODE_PERF_WINDOW_KEYS = Object.keys(CODE_PERF_WINDOWS) as CodePerfWindow[];
-export const CODE_PERF_DEFAULT_WINDOW: CodePerfWindow = '6mo';
+export const CODE_PERF_DEFAULT_WINDOW: CodePerfWindow = '91-180';
 
 /** A charge is "matured" when it is at least this many days old at the window's end. */
 export const CODE_PERF_MATURITY_DAYS = 45;
@@ -190,29 +216,38 @@ export function sanitizeCodePerfPairKey(input: unknown): CodePerfPairKey {
 export interface CodePerfScope {
   /** ONE tenant. Pairings are never mixed across tenants — code conventions differ per tenant. */
   entityId: string;
-  windowDays: number;
+  /** The age band to report on. Replaces the former `windowDays` trailing window. */
+  band: CodePerfWindow;
   facilities: string[] | null;
 }
 
+/**
+ * $1 entity, $2 band HI (older bound, days), $3 facilities, $4 band LO (newer bound, days).
+ *
+ * `lo` is appended as $4 rather than inserted at $3 so the entity/facility positions every builder
+ * already references stay put; only PAIR_PREDICATE_SQL shifted, to $5-$7.
+ *
+ * The band is re-resolved through resolveCodePerfWindow rather than trusted: an unknown key falls
+ * back to the default instead of reaching the SQL, so a stale persisted value cannot produce a
+ * window nobody designed.
+ */
 function scopeParams(scope: CodePerfScope): unknown[] {
   const [entityId] = assertEntityScope([scope.entityId], 'codePerformanceQuery');
-  const days = Number.isSafeInteger(scope.windowDays) && scope.windowDays > 0 && scope.windowDays <= 366
-    ? scope.windowDays
-    : CODE_PERF_WINDOWS[CODE_PERF_DEFAULT_WINDOW];
-  return [entityId, days, scope.facilities];
+  const { lo, hi } = CODE_PERF_WINDOWS[resolveCodePerfWindow(scope.band)];
+  return [entityId, hi, scope.facilities, lo];
 }
 
 // ---------------------------------------------------------------------------------------------
 // The shared base CTE — window + normalisation + tenant + facility filter. $1 entity, $2 days, $3 facilities.
 // ---------------------------------------------------------------------------------------------
 
-// ⚠ WINDOW ARITHMETIC — the same contract as src/businessWindow.ts's `trailing` kind: a trailing
-// N-day window is the N civil dates ENDING ON business-today, i.e. [today - N + 1, today]. Written as
-// `>= s and < e + 1` so both bounds are dates. The first draft used `today - N`, which is N + 1 dates:
-// every "30d" board covered 31 days while reporting windowDays = 30 (Qodo #346 finding 4).
+// ⚠ BAND ARITHMETIC (2026-09-11) — this is NO LONGER a trailing window. A band is the charges aged
+// $4..$2 days inclusive, i.e. the dates [today - hi, today - lo]. Both bounds move; `e` is NOT
+// business-today any more, which is the trap the maturity test below had to be fixed for.
+// Written `>= s and < e + 1` so both bounds stay dates, unchanged from the window form.
 const BASE_CTE = `with win as (
-  select ${BUSINESS_TODAY_SQL} - $2::int + 1 as s,
-         ${BUSINESS_TODAY_SQL}               as e
+  select ${BUSINESS_TODAY_SQL} - $2::int as s,
+         ${BUSINESS_TODAY_SQL} - $4::int as e
 ), base as (
   select
     ${HCPCS_NORM_SQL}                          as hcpcs,
@@ -234,10 +269,11 @@ const BASE_COLUMNS_SQL =
   'hcpcs, loc_suffix, revcode, payer_raw, facility, charge_date, payment_received, charge_amount, ' +
   'insurance_payments, allowed_reliable, allowed_tier, adjustments, patient_balance_due, s, e';
 
-/** The pair-key predicate for drill-downs. NULL-safe: `is not distinct from`. $4 hcpcs, $5 loc, $6 rev. */
-const PAIR_PREDICATE_SQL = `hcpcs is not distinct from $4::text
-    and loc_suffix is not distinct from $5::text
-    and revcode is not distinct from $6::text`;
+/** The pair-key predicate for drill-downs. NULL-safe: `is not distinct from`. $5 hcpcs, $6 loc, $7 rev.
+ *  Shifted from $4-$6 when the band's LO bound took $4 — see scopeParams. */
+const PAIR_PREDICATE_SQL = `hcpcs is not distinct from $5::text
+    and loc_suffix is not distinct from $6::text
+    and revcode is not distinct from $7::text`;
 
 /**
  * The metric block shared by every grouped aggregate. Sum-over-sum; no pct_allowed / pct_paid.
@@ -275,7 +311,7 @@ const METRICS_SQL = `count(*)::int                                              
                                                                      as write_off_rate,
     round(100.0 * sum(patient_balance_due) / nullif(sum(charge_amount), 0), 2)
                                                                      as patient_balance_rate,
-    round(100.0 * count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / nullif(count(*), 0), 1)
+    round(100.0 * count(*) filter (where charge_date <= ${BUSINESS_TODAY_SQL} - ${CODE_PERF_MATURITY_DAYS}) / nullif(count(*), 0), 1)
                                                                      as matured_share`;
 
 // ---------------------------------------------------------------------------------------------
@@ -445,7 +481,7 @@ select
                                                                      as allowed_rate,
   round(100.0 * count(*) filter (where ${RELIABLE_TIER_SQL}) / nullif(count(*), 0), 1)
                                                                      as allowed_coverage,
-  round(100.0 * count(*) filter (where charge_date <= e - ${CODE_PERF_MATURITY_DAYS}) / nullif(count(*), 0), 1)
+  round(100.0 * count(*) filter (where charge_date <= ${BUSINESS_TODAY_SQL} - ${CODE_PERF_MATURITY_DAYS}) / nullif(count(*), 0), 1)
                                                                      as matured_share
 from base
 ${where}
@@ -461,15 +497,15 @@ order by 1`;
  * resolution queue) is a real value and surfaces like any other. Ignores any facility filter.
  */
 export function buildCodePerfFacilityOptionsQuery(scope: CodePerfScope): SqlQuery {
-  const [entityId, days] = scopeParams(scope);
+  const [entityId, hi, , lo] = scopeParams(scope);
   const sql = `select r.facility, count(*)::int as charges, sum(r.charge_amount) as billed
 from collections.cmd_explorer_charge_rollup r
 where r.business_entity_id = $1::uuid
-  and r.charge_date >= ${BUSINESS_TODAY_SQL} - $2::int + 1
-  and r.charge_date <  ${BUSINESS_TODAY_SQL} + 1
+  and r.charge_date >= ${BUSINESS_TODAY_SQL} - $2::int
+  and r.charge_date <  ${BUSINESS_TODAY_SQL} - $3::int + 1
 group by r.facility
 order by r.facility nulls last`;
-  return { sql, params: [entityId, days] };
+  return { sql, params: [entityId, hi, lo] };
 }
 
 /**

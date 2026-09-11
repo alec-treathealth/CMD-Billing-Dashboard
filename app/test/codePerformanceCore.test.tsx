@@ -23,7 +23,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const BXR = 'af504ab6-3dcd-4aa4-a93c-27bc58de4088';
 const INPUT: CodePerfPairInput = {
   tenant: 'bxr',
-  window: '6mo',
+  window: '91-180',
   facilities: null,
   pair: { hcpcs: 'H2013', locSuffix: 'IOP', revcode: '0913' },
 };

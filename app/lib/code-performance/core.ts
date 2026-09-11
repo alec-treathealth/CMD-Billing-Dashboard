@@ -42,7 +42,7 @@ export interface CodePerfDeps {
 type Raw = Record<string, unknown>;
 
 function scopeFor(entityId: string, input: CodePerfBoardInput): CodePerfScope {
-  return { entityId, windowDays: CODE_PERF_WINDOWS[input.window], facilities: input.facilities };
+  return { entityId, band: input.window, facilities: input.facilities };
 }
 
 export async function getCodePerfBoardCore(
@@ -65,7 +65,10 @@ export async function getCodePerfBoardCore(
   return {
     tenant,
     window: input.window,
-    windowDays: scope.windowDays,
+    // The band's SPAN in days (hi - lo + 1), not a trailing length. Kept on the board under the
+    // existing name so consumers that render "N days" keep working; it no longer means "the last N
+    // days", because a band excludes the most recent `lo` days entirely.
+    windowDays: CODE_PERF_WINDOWS[input.window].hi - CODE_PERF_WINDOWS[input.window].lo + 1,
     windowStart: isoDate(summaryRow?.window_start),
     windowEnd: isoDate(summaryRow?.window_end),
     facilitiesApplied: input.facilities,

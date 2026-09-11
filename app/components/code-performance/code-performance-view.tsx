@@ -64,7 +64,7 @@ const FACILITY_KEY_SEPARATOR = '|';
 
 export function CodePerformanceView({ tenants, defaultTenant }: { tenants: CodePerfTenant[]; defaultTenant: CodePerfTenant }) {
   const [tenant, setTenant] = useState<CodePerfTenant>(defaultTenant);
-  const [window, setWindow] = useState<CodePerfWindow>('6mo');
+  const [window, setWindow] = useState<CodePerfWindow>('91-180');
   const [facilities, setFacilities] = useState<string[]>([]);
   const [board, setBoard] = useState<BoardState>({ status: 'loading' });
   const [sort, setSort] = useState<PairingSort>(DEFAULT_PAIRING_SORT);
