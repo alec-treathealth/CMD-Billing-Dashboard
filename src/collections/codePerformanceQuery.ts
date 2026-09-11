@@ -106,15 +106,18 @@ import { BXR_ENTITY_ID, INDIGO_ENTITY_ID } from '../tenants.js';
  * Window presets → day counts. `6mo` is 180 days and `1yr` is 365, BY DEFINITION here — fixed day
  * counts, not calendar arithmetic, so a window never changes length with the month it lands in.
  *
- * ⚠ SET CHANGED 2026-09-11 (Alec): 30d dropped, 45d and 1yr added. 45d is not an arbitrary
- * substitution for 30d — it is exactly CODE_PERF_MATURITY_DAYS below, so the shortest window is now
- * the first one whose charges can have matured at all. A 30d window could only ever report
- * velocity and volume, never yield, because nothing in it had reached maturity.
+ * ⚠ SET CHANGED 2026-09-11 (Alec): 30d dropped, 45d and 1yr added. The shortest preset spans
+ * 46 dates so its oldest date can satisfy the 45-day maturity boundary below; the display key remains
+ * 45d because that is the maturity horizon. A 30d window could only ever report velocity and volume,
+ * never yield, because nothing in it had reached maturity.
+
+ * The extra boundary date is intentional: this is an inclusive trailing window, while maturity uses
+ * `charge_date <= e - CODE_PERF_MATURITY_DAYS`.
  *
  * ⚠ ORDER IS THE RENDER ORDER. CODE_PERF_WINDOW_KEYS derives from this object and WindowSelector
  * maps over it, so the buttons appear left-to-right exactly as written here. Keep them ascending.
  */
-export const CODE_PERF_WINDOWS = { '45d': 45, '60d': 60, '90d': 90, '6mo': 180, '1yr': 365 } as const;
+export const CODE_PERF_WINDOWS = { '45d': 46, '60d': 60, '90d': 90, '6mo': 180, '1yr': 365 } as const;
 export type CodePerfWindow = keyof typeof CODE_PERF_WINDOWS;
 export const CODE_PERF_WINDOW_KEYS = Object.keys(CODE_PERF_WINDOWS) as CodePerfWindow[];
 export const CODE_PERF_DEFAULT_WINDOW: CodePerfWindow = '6mo';

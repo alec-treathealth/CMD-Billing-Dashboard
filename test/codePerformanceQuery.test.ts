@@ -79,10 +79,10 @@ function allBuilderSql(): Array<[string, string]> {
 // ---------------------------------------------------------------------------------------------
 
 test('window: the five presets resolve to their day counts; anything else falls back to 6mo', () => {
-  // Set changed 2026-09-11 (Alec): 30d dropped, 45d and 1yr added. 45d is exactly
-  // CODE_PERF_MATURITY_DAYS, so the shortest window is the first one whose charges can have
-  // matured — a 30d window could only ever report velocity, never yield.
-  assert.deepEqual(CODE_PERF_WINDOWS, { '45d': 45, '60d': 60, '90d': 90, '6mo': 180, '1yr': 365 });
+  // Set changed 2026-09-11 (Alec): 30d dropped, 45d and 1yr added. The 45d preset spans
+  // 46 inclusive dates so its oldest date can satisfy the 45-day maturity boundary — a 30d
+  // window could only ever report velocity, never yield.
+  assert.deepEqual(CODE_PERF_WINDOWS, { '45d': 46, '60d': 60, '90d': 90, '6mo': 180, '1yr': 365 });
   assert.equal(CODE_PERF_DEFAULT_WINDOW, '6mo');
   for (const k of ['45d', '60d', '90d', '6mo', '1yr'] as const) assert.equal(resolveCodePerfWindow(k), k);
   // Render order IS the object order — WindowSelector maps CODE_PERF_WINDOW_KEYS — so ascending
@@ -99,6 +99,13 @@ test('window: the five presets resolve to their day counts; anything else falls 
   // check, not a coercion. (This used to pass '30d', which stopped proving anything once that key
   // was retired: it would now fall back for the wrong reason.)
   assert.equal(resolveCodePerfWindow({ toString: () => '45d' }), '6mo');
+});
+
+test('window: the 45d preset includes a date eligible for 45-day maturity', () => {
+  const query = buildCodePerfWindowSummaryQuery({ ...SCOPE, windowDays: CODE_PERF_WINDOWS['45d'] });
+  assert.equal(query.params[1], 46);
+  assert.match(query.sql, /- \$2::int \+ 1 as s/);
+  assert.match(query.sql, /charge_date <= e - 45/);
 });
 
 test('facilities: null means ALL; blanks and non-strings drop; trimmed, de-duped, capped; never []', () => {
